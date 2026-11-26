@@ -4,6 +4,7 @@
 //!
 //! The library that changes a project's packages (vrc-get) writes by itself: it is only given a project ([`project_io`]) and an
 //! environment ([`environment_io`]) that were asked about here, and what a change touches is asked about before it ([`tree`]).
+use orbiters_core::locks::*;
 use crate::owned::{id_of, is_link, FileId};
 use orbiters_i18n::tr;
 use std::cell::RefCell;
@@ -39,7 +40,7 @@ static THEIRS: Mutex<Theirs> = Mutex::new(Theirs { more: Vec::new(), known: None
 
 /// Also nothing in `root` from now on: the Creator Companion folder an operation is for.
 pub(crate) fn companion(root: &Path) {
-    let mut theirs = THEIRS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut theirs = THEIRS.locked();
     if !theirs.more.iter().any(|p| p == root) {
         theirs.more.push(root.to_path_buf());
         theirs.known = None;
@@ -63,7 +64,7 @@ fn this_computers(more: &[PathBuf]) -> Vec<PathBuf> {
         all.extend(alcom.into_iter().flatten().map(|d| d.join("com.anatawa12.vrc-get-gui")));
     }
     static PROGRAMS: Mutex<Option<(Instant, Vec<PathBuf>)>> = Mutex::new(None);
-    let mut programs = PROGRAMS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut programs = PROGRAMS.locked();
     if programs.as_ref().is_none_or(|(at, _)| at.elapsed() >= INSTALLED) {
         *programs = Some((Instant::now(), crate::programs::folders()));
     }
@@ -76,7 +77,7 @@ fn number(id: FileId) -> (u64, u64) {
 }
 
 fn ids() -> (Ids, u64) {
-    let mut theirs = THEIRS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut theirs = THEIRS.locked();
     if let Some((at, ids)) = &theirs.known {
         if at.elapsed() < STANDS {
             return (ids.clone(), theirs.changes);

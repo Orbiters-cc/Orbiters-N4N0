@@ -6,6 +6,7 @@
 //! Mac's own loopback, as beside a PC's VRChat, on the port VRChat sends to by default (9001) when it can have it, so that
 //! what VRChat says arrives whether or not the two find each other by OSCQuery. An address the person typed stays theirs.
 
+use orbiters_core::locks::*;
 use super::{NoticeKind, Shared};
 use crate::state::{LanLink, LanStatus};
 use orbiters_core::lan::{self, Choice, LanBrowser};
@@ -138,7 +139,7 @@ impl super::Controller {
             *browser = None;
             *running = None;
             self.lan.alive.store(false, Ordering::Relaxed);
-            let service = self.osc.lock().unwrap().take();
+            let service = self.osc.locked().take();
             drop(service);
             self.camera_route_changed();
             self.update_if(|s| {
@@ -185,7 +186,7 @@ impl super::Controller {
         if wanted_service.as_ref() != running.as_ref() || (settings_changed && wanted_service.is_some()) {
             // The service before goes first: the new one wants its port (and stopping waits for its receiving thread,
             // outside the lock).
-            let before = self.osc.lock().unwrap().take();
+            let before = self.osc.locked().take();
             drop(before);
             self.camera_route_changed();
             match &wanted_service {
@@ -206,7 +207,7 @@ impl super::Controller {
         }
 
         let heard = {
-            let osc = self.osc.lock().unwrap();
+            let osc = self.osc.locked();
             let received = osc.as_ref().and_then(|o| o.last_received_ns());
             let answers = osc.as_ref().is_some_and(|o| o.vrchat_query().is_some());
             answers || received.is_some_and(|t| orbiters_core::clock::now_ns().saturating_sub(t) < QUIET_NS)

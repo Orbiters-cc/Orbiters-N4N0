@@ -3,6 +3,7 @@
 //! music the system tells, and N4N0's ears in a worker process of their own (`orbiters-voice`, below normal priority on
 //! Windows). The names say Windows for where they began; these are this computer's on macOS too.
 
+use orbiters_core::locks::*;
 use orbiters_core::voice::{VoiceCommand, VoiceEvent};
 #[allow(unused_imports)] // Its macro, which only some systems use.
 use orbiters_i18n::tr;
@@ -379,7 +380,7 @@ impl VoiceChild {
             for line in crate::worker::log_lines(stderr) {
                 let line = line.strip_prefix("voice: ").unwrap_or(&line).to_string();
                 eprintln!("voice: {line}");
-                *last.lock().unwrap() = Some(line);
+                *last.locked() = Some(line);
             }
         })?;
         Ok(VoiceChild { child, stdin, last_line })
@@ -413,7 +414,7 @@ impl VoiceWorker for VoiceChild {
     }
 
     fn last_line(&self) -> Option<String> {
-        self.last_line.lock().unwrap().clone()
+        self.last_line.locked().clone()
     }
 }
 

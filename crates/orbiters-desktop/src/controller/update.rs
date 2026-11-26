@@ -9,6 +9,7 @@
 //! anything runs ([`pending_setup`]), once: one that failed is left to the person's restart. A copy the setup did not
 //! install (a development build) never updates itself.
 
+use orbiters_core::locks::*;
 use super::{Controller, NoticeKind, Shared};
 use crate::ipc::UpdateAction;
 use crate::state::UpdateState;
@@ -163,7 +164,7 @@ impl Controller {
         });
         let (tx, rx) = mpsc::channel();
         {
-            let mut u = self.updates.lock().unwrap();
+            let mut u = self.updates.locked();
             u.install = Some(dir);
             u.wake = Some(tx);
         }
@@ -197,18 +198,18 @@ impl Controller {
 
     /// Lets the service restart the app into a setup.
     pub fn set_restarter(&self, restarter: Restarter) {
-        self.updates.lock().unwrap().restarter = Some(restarter);
+        self.updates.locked().restarter = Some(restarter);
     }
 
     /// What a restart would cut short now.
     pub fn busy_with(&self) -> Option<&'static str> {
-        self.snapshot.lock().unwrap().busy_with()
+        self.snapshot.locked().busy_with()
     }
 
     pub fn update_action(self: &Shared, action: UpdateAction) {
         match action {
             UpdateAction::Check => {
-                if let Some(wake) = &self.updates.lock().unwrap().wake {
+                if let Some(wake) = &self.updates.locked().wake {
                     let _ = wake.send(());
                 }
             }
@@ -223,7 +224,7 @@ impl Controller {
     fn look_for_update(self: &Shared) {
         let Some(key) = orbiters_update::public_key() else { return };
         let (channel, ready) = {
-            let s = self.snapshot.lock().unwrap();
+            let s = self.snapshot.locked();
             (s.update.channel.clone(), matches!(s.update.state, UpdateState::Ready { .. }))
         };
         if !ready {
@@ -351,7 +352,7 @@ impl Controller {
         };
         // Asked for by the person: it goes even when the mark could not be written.
         let _ = write_ready(&Ready { started: true, ..ready });
-        let u = self.updates.lock().unwrap();
+        let u = self.updates.locked();
         match (&u.restarter, &u.install) {
             (Some(restart), Some(dir)) => restart(&setup, dir),
             _ => self.notify(NoticeKind::Error, tr("This window cannot restart Orbiters - N4N0 to update.")),

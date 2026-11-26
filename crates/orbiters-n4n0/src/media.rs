@@ -10,6 +10,7 @@
 //! What a browser or YouTube's app plays is looked up on YouTube ([`Links`]): the media controls give no link, and the
 //! menus offer the video's link to copy and drop as they do a search result's.
 
+use orbiters_core::locks::*;
 use orbiters_n4n0_core::menu::{AppSound, Media, MediaCommand, Volume};
 use orbiters_n4n0_core::picture::{self, Rgb};
 use orbiters_n4n0_core::youtube::{self, Video};
@@ -135,7 +136,7 @@ impl Links {
             return;
         }
         let key = (media.title.clone(), media.artist.clone());
-        let mut found = self.found.lock().unwrap();
+        let mut found = self.found.locked();
         match found.lookups.get(&key) {
             Some(Lookup::Found(results)) => {
                 media.video = youtube::find_playing(results, &media.title, &media.artist, media.duration).map(|v| v.id.clone());
@@ -164,14 +165,14 @@ impl Links {
                     Lookup::Failed(Instant::now())
                 }
             };
-            let mut found = kept.lock().unwrap();
+            let mut found = kept.locked();
             // Kept only while still asked for (not forgotten meanwhile).
             if let Some(slot) = found.lookups.get_mut(&key) {
                 *slot = lookup;
             }
         });
         if spawned.is_err() {
-            self.found.lock().unwrap().lookups.insert((media.title.clone(), media.artist.clone()), Lookup::Failed(Instant::now()));
+            self.found.locked().lookups.insert((media.title.clone(), media.artist.clone()), Lookup::Failed(Instant::now()));
         }
     }
 }
@@ -205,7 +206,7 @@ impl Watcher {
     /// Something shows the music: keep reading it for a few seconds.
     pub fn want(&self) {
         let (lock, wake) = &*self.state;
-        let mut state = lock.lock().unwrap();
+        let mut state = lock.locked();
         let first = state.wanted_until.is_none_or(|t| t < Instant::now());
         state.wanted_until = Some(Instant::now() + WANT_FOR);
         self.start(&mut state);
@@ -219,14 +220,14 @@ impl Watcher {
         self.want();
         let lock = &self.state.0;
         let until = Instant::now() + timeout;
-        let mut state = lock.lock().unwrap();
+        let mut state = lock.locked();
         let after = state.reads;
         while state.reads == after {
             let left = until.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 break;
             }
-            state = self.read.wait_timeout(state, left).unwrap().0;
+            state = self.read.wait_timeout_locked(state, left).0;
         }
         state.reading.clone()
     }
@@ -234,7 +235,7 @@ impl Watcher {
     /// A made-up reading in place of the device's (the screenshot review), before anything wanted one: this process
     /// never reads the device's then.
     pub fn stand_in(&self, reading: Reading) {
-        let mut state = self.state.0.lock().unwrap();
+        let mut state = self.state.0.locked();
         state.started = true;
         state.reading = reading;
         state.version += 1;
@@ -242,14 +243,14 @@ impl Watcher {
 
     /// The latest reading and its version (it changes with the reading).
     pub fn reading(&self) -> (u64, Reading) {
-        let state = self.state.0.lock().unwrap();
+        let state = self.state.0.locked();
         (state.version, state.reading.clone())
     }
 
     /// Asks the playing app or the speakers for `command`; the reading shows its effect at once.
     pub fn command(&self, command: MediaCommand) {
         let (lock, wake) = &*self.state;
-        let mut state = lock.lock().unwrap();
+        let mut state = lock.locked();
         let reading = &mut state.reading;
         match command {
             MediaCommand::PlayPause | MediaCommand::Play | MediaCommand::Pause => {
@@ -297,7 +298,7 @@ impl Watcher {
         if std::mem::replace(&mut state.started, true) {
             return;
         }
-        let Some(make) = self.backend.lock().unwrap().take() else { return };
+        let Some(make) = self.backend.locked().take() else { return };
         let (shared, read, links) = (self.state.clone(), self.read.clone(), self.links.clone());
         if let Err(e) = std::thread::Builder::new().name("orbiters-media".into()).spawn(move || run(shared, read, make, links)) {
             eprintln!("media: could not start its thread: {e}");
@@ -311,9 +312,9 @@ fn run(shared: Arc<(Mutex<State>, Condvar)>, read: Arc<Condvar>, make: MakeBacke
     let mut backend = make();
     loop {
         let commands: Vec<MediaCommand> = {
-            let mut state = lock.lock().unwrap();
+            let mut state = lock.locked();
             while state.commands.is_empty() && state.wanted_until.is_none_or(|t| t < Instant::now()) {
-                state = wake.wait(state).unwrap();
+                state = wake.wait_locked(state);
             }
             state.commands.drain(..).collect()
         };
@@ -322,13 +323,13 @@ fn run(shared: Arc<(Mutex<State>, Condvar)>, read: Arc<Condvar>, make: MakeBacke
                 eprintln!("media: {command:?}: {e}");
             }
         }
-        let previous = lock.lock().unwrap().reading.clone();
+        let previous = lock.locked().reading.clone();
         let mut reading = backend.read(&previous);
         if let Some(media) = reading.media.as_mut() {
             links.fill(media);
         }
         {
-            let mut state = lock.lock().unwrap();
+            let mut state = lock.locked();
             // A command that came meanwhile shows its own effect until its reading.
             if state.commands.is_empty() && !same(&state.reading, &reading) {
                 state.reading = reading;
@@ -337,9 +338,9 @@ fn run(shared: Arc<(Mutex<State>, Condvar)>, read: Arc<Condvar>, make: MakeBacke
             state.reads += 1;
             read.notify_all();
         }
-        let state = lock.lock().unwrap();
+        let state = lock.locked();
         if state.commands.is_empty() {
-            let _ = wake.wait_timeout(state, EVERY).unwrap();
+            let _ = wake.wait_timeout_locked(state, EVERY);
         }
     }
 }

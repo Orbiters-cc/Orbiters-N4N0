@@ -3,6 +3,7 @@
 //!
 //! The looks run on ScreenCaptureKit's own queue, and starting and stopping on a thread of this module's, which sleeps while nothing is asked. The loop never waits for either.
 
+use orbiters_core::locks::*;
 use super::super::detect::{self, CameraLook, Part};
 use super::super::zones::Around;
 use super::game::Shot;
@@ -313,7 +314,7 @@ define_class!(
         fn stopped(&self, _stream: *mut AnyObject, error: *mut NSError) {
             // SAFETY: the error ScreenCaptureKit passes, for the call.
             let why = unsafe { trouble(error) };
-            *self.ivars().shared.trouble.lock().unwrap() = Some(why);
+            *self.ivars().shared.trouble.locked() = Some(why);
             self.ivars().ended.store(true, Ordering::Release);
             self.ivars().shared.wake.notify_all();
         }
@@ -329,10 +330,10 @@ impl Output {
             return;
         }
         this.shared.frames.fetch_add(1, Ordering::Relaxed);
-        let Some(ask) = *this.shared.asked.lock().unwrap() else { return };
+        let Some(ask) = *this.shared.asked.locked() else { return };
         let now = Instant::now();
         let (menus, camera) = {
-            let mut last = this.last.lock().unwrap();
+            let mut last = this.last.locked();
             let menus = ask.menus && last.0.is_none_or(|t| now.duration_since(t) >= ask.every);
             let camera = ask.camera.filter(|_| last.1.is_none_or(|t| now.duration_since(t) >= detect::CAMERA_LOOK_EVERY));
             if !menus && camera.is_none() {
@@ -558,7 +559,7 @@ impl Looker {
 
     /// What to look for from now on; `None`: nothing, and the picture ends.
     pub fn ask(&self, ask: Option<Ask>) {
-        let mut asked = self.shared.asked.lock().unwrap();
+        let mut asked = self.shared.asked.locked();
         if *asked != ask {
             *asked = ask;
             self.shared.wake.notify_all();
@@ -572,7 +573,7 @@ impl Looker {
 
     /// Why there was no picture, since the last call.
     pub fn trouble(&self) -> Option<Trouble> {
-        self.shared.trouble.lock().unwrap().take()
+        self.shared.trouble.locked().take()
     }
 
     /// Whether a picture runs now, and how many frames came ever (what the lab measures).
@@ -601,7 +602,7 @@ fn run(shared: &Arc<Shared>, answers: &mpsc::Sender<Answer>) {
     let same = |a: &Ask, b: &Ask| (a.window, a.owner, a.shot) == (b.window, b.owner, b.shot);
     loop {
         let ask = {
-            let mut asked = shared.asked.lock().unwrap();
+            let mut asked = shared.asked.locked();
             loop {
                 if shared.stop.load(Ordering::Acquire) {
                     break;
@@ -618,7 +619,7 @@ fn run(shared: &Arc<Shared>, answers: &mpsc::Sender<Answer>) {
                 if ended || changed {
                     break;
                 }
-                asked = shared.wake.wait_timeout(asked, Duration::from_secs(60)).unwrap().0;
+                asked = shared.wake.wait_timeout_locked(asked, Duration::from_secs(60)).0;
             }
             *asked
         };
@@ -638,7 +639,7 @@ fn run(shared: &Arc<Shared>, answers: &mpsc::Sender<Answer>) {
                 return true;
             }
             // (macOS may have ended it: what is asked is read again)
-            let Some(ask) = ask.filter(|a| shared.asked.lock().unwrap().is_some_and(|now| same(&now, a))) else { return false };
+            let Some(ask) = ask.filter(|a| shared.asked.locked().is_some_and(|now| same(&now, a))) else { return false };
             let made = match filter.take().filter(|(of, _)| same(of, &ask)) {
                 Some((_, kept)) => Ok(kept),
                 None => filter_of(ask.window, ask.owner),
@@ -654,7 +655,7 @@ fn run(shared: &Arc<Shared>, answers: &mpsc::Sender<Answer>) {
                     stream = Some((ask, s));
                 }
                 Err(why) => {
-                    *shared.trouble.lock().unwrap() = Some(why);
+                    *shared.trouble.locked() = Some(why);
                     pause(shared, AGAIN_AFTER);
                 }
             }

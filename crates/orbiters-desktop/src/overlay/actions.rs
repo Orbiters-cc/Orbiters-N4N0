@@ -6,6 +6,7 @@
 //! default bindings for each kind of controller (people change them in SteamVR's controller settings, under Orbiters).
 //! SteamVR gives the same inputs to VRChat as well. Every set is read once a frame, together.
 
+use orbiters_core::locks::*;
 use orbiters_i18n::tr;
 use orbiters_n4n0::input::{Pad, Pads};
 use orbiters_openvr::input::{ActionHandle, ActionSetHandle, ActiveSet, OVERLAY_GLOBAL_PRIORITY_MIN};
@@ -743,7 +744,7 @@ impl Actions {
 
     /// Whether this hand's controller (`device`) points with VRChat's Touch laser, read once per device.
     fn follows_vrchat(&self, steamvr: &vr::Client, hand: usize, device: u32) -> bool {
-        let Ok(mut kinds) = self.laser_kinds.lock() else { return false };
+        let mut kinds = self.laser_kinds.locked();
         match kinds[hand] {
             Some((known, follows)) if known == device => follows,
             _ => {

@@ -5,6 +5,7 @@
 //! worlds N4N0's menus give feedback on (the shown capture's world, the one the player is in, previous instances'),
 //! handed to N4N0 ([`orbiters_n4n0::N4n0::set_feedback`]) whenever what they show changes.
 
+use orbiters_core::locks::*;
 use super::Shared;
 use orbiters_contracts::world_feedback::{self as contract, Action as Line, Refusal};
 use orbiters_core::account::Api;
@@ -527,7 +528,7 @@ impl super::Controller {
 
     /// The world the player is in now (VRChat's log as the watchers read it), with its name.
     fn feedback_here(&self) -> Option<(String, String)> {
-        let s = self.snapshot.lock().unwrap();
+        let s = self.snapshot.locked();
         let w = &s.vrchat.world;
         if !w.in_world {
             return None;
@@ -540,7 +541,7 @@ impl super::Controller {
         let here = self.feedback_here();
         let signed_in = self.feedback_api().is_some();
         let view = {
-            let mut rt = self.world_feedback.lock().unwrap();
+            let mut rt = self.world_feedback.locked();
             let view = rt.view(here, signed_in);
             if rt.sent.as_ref() == Some(&view) {
                 return;
@@ -555,7 +556,7 @@ impl super::Controller {
     pub(super) fn world_feedback_ask(self: &Shared, ask: FeedbackAsk) {
         let (_, stamp) = self.account_api_for();
         {
-            let mut rt = self.world_feedback.lock().unwrap();
+            let mut rt = self.world_feedback.locked();
             rt.set_stamp(stamp);
             match menu_action(&ask) {
                 Some((world, action)) => {
@@ -582,23 +583,23 @@ impl super::Controller {
 
     /// Why the N4N0 world cannot reach this app, when it cannot (for the window).
     pub fn world_feedback_note(&self) -> Option<String> {
-        self.world_feedback.lock().unwrap().port_note.clone()
+        self.world_feedback.locked().port_note.clone()
     }
 
     /// World label changes and comments waiting to be sent (to whichever environment is active when they go).
     pub(super) fn feedback_pending(&self) -> u32 {
-        let rt = self.world_feedback.lock().unwrap();
+        let rt = self.world_feedback.locked();
         rt.queue.for_stamp(&rt.stamp).items.len() as u32
     }
 
     /// The Development environment was switched: what Orbiters answered for worlds is the other server's, so it is read again.
     pub(super) fn world_feedback_environment_changed(&self) {
-        self.world_feedback.lock().unwrap().environment_changed();
+        self.world_feedback.locked().environment_changed();
     }
 
     fn feedback_follow(self: &Shared) -> bool {
         let (development, api, stamp) = self.feedback_context();
-        let mut rt = self.world_feedback.lock().unwrap();
+        let mut rt = self.world_feedback.locked();
         rt.set_stamp(stamp);
         rt.follow(development, api.is_some())
     }
@@ -638,7 +639,7 @@ impl crate::bridge::game::Feedback for RealFeedback {
     }
 
     fn feedback(&self, world: &str) -> WorldFeedback {
-        self.ctl.upgrade().map(|ctl| ctl.world_feedback.lock().unwrap().feedback_of(&world.to_ascii_lowercase())).unwrap_or_default()
+        self.ctl.upgrade().map(|ctl| ctl.world_feedback.locked().feedback_of(&world.to_ascii_lowercase())).unwrap_or_default()
     }
 
     fn ask(&self, ask: FeedbackAsk) {
@@ -669,7 +670,7 @@ pub(super) fn spawn(ctl: Shared) {
             // The account and server read once: what is handed out is for them, and goes with them.
             let (api, stamp) = c.account_api_for();
             let (call, scope) = {
-                let mut rt = c.world_feedback.lock().unwrap();
+                let mut rt = c.world_feedback.locked();
                 // Switched between reading the account and here: read it again, never a call for the other server.
                 if stamp.server != Api::new(orbiters_core::account::Server::current()).url("") {
                     drop(rt);
@@ -687,13 +688,13 @@ pub(super) fn spawn(ctl: Shared) {
             if matches!(result, Err(Failure::SignedOut)) && api.is_none() {
                 // Nothing to send with: kept until an account is signed in.
                 if let Call::Send { op, .. } = &call {
-                    let mut rt = c.world_feedback.lock().unwrap();
+                    let mut rt = c.world_feedback.locked();
                     if let Some(i) = rt.queue.items.iter().position(|p| p.op == *op) {
                         rt.queue.items[i].due = now_ms() + 10_000;
                     }
                 }
             } else {
-                c.world_feedback.lock().unwrap().answered_in(&call, result, scope);
+                c.world_feedback.locked().answered_in(&call, result, scope);
             }
             c.feedback_publish();
         }
@@ -709,11 +710,11 @@ fn serve(ctl: Shared) {
         }
         match TcpListener::bind(("127.0.0.1", contract::PORT)) {
             Ok(l) => {
-                ctl.world_feedback.lock().unwrap().port_note = None;
+                ctl.world_feedback.locked().port_note = None;
                 break l;
             }
             Err(e) => {
-                ctl.world_feedback.lock().unwrap().port_note =
+                ctl.world_feedback.locked().port_note =
                     Some(tr!("Port {port} is taken ({error}): the N4N0 world cannot reach Orbiters - N4N0 to give feedback", port = contract::PORT, error = e));
                 std::thread::sleep(Duration::from_secs(30));
             }
@@ -775,7 +776,7 @@ fn answer(ctl: &Shared, stream: TcpStream) -> std::io::Result<()> {
 fn respond(runtime: &std::sync::Mutex<WorldFeedbackRuntime>, mut stream: TcpStream, development: bool, signed_in: bool, stamp: Option<Stamp>) -> std::io::Result<()> {
     let Some((method, target, host)) = request(&mut stream) else { return Ok(()) };
     let (status, body) = {
-        let mut rt = runtime.lock().unwrap();
+        let mut rt = runtime.locked();
         // The lines this reads are queued for whom the follower would queue them now (verify2: never the scope of before).
         if let Some(stamp) = stamp {
             rt.set_stamp(stamp);

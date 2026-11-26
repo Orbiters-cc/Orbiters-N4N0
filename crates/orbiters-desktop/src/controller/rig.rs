@@ -19,6 +19,7 @@
 //! and the keyframes it keeps are a few a second), and VRChat renders the world six more times for 0.3 s in 3 s rather
 //! than all along. The app's own flights (3D pictures and scans) leave the rig to themselves.
 
+use orbiters_core::locks::*;
 use super::burst::{floats, rig_parameters, rig_switch, POSE};
 use super::Shared;
 use crate::state::CaptureState;
@@ -115,21 +116,21 @@ pub fn values(pose: &[f32; 6], hips: &Hips) -> [f32; 4] {
 impl super::Controller {
     /// Where VRChat last said its camera is (`/usercamera/Pose`: x, y, z in metres, pitch, yaw, roll in degrees).
     pub(super) fn camera_pose(&self) -> Option<[f32; 6]> {
-        let osc = self.osc_values.lock().unwrap();
+        let osc = self.osc_values.locked();
         osc.latest.get(POSE).map(|(v, _)| floats(v)).filter(|v| v.len() == 6 && v.iter().any(|f| *f != 0.0)).and_then(|v| v.try_into().ok())
     }
 
     /// The capture worker read the avatar's hips from a frame's skeleton band.
     pub(super) fn rig_hips(&self, position: [f32; 3], rotation: [f32; 4]) {
         if position.iter().chain(&rotation).all(|v| v.is_finite()) {
-            self.rig.lock().unwrap().hips = Some((position, rotation));
+            self.rig.locked().hips = Some((position, rotation));
         }
     }
 
     /// Puts the rig at a camera `pose`, with `camera` (the camera's own pose message, a flight's) in the same bundle:
     /// VRChat applies them together. Until a frame showed where the hips are, only the camera moves.
     pub(super) fn place_rig(&self, camera: Option<(String, Vec<rosc::OscType>)>, pose: &[f32; 6]) {
-        let hips = self.rig.lock().unwrap().hips;
+        let hips = self.rig.locked().hips;
         let mut messages: Vec<_> = camera.into_iter().collect();
         if let Some(hips) = &hips {
             messages.extend(rig_parameters(pose, hips));
@@ -138,18 +139,18 @@ impl super::Controller {
             return;
         }
         if self.with_osc(|o| o.send_bundle(messages)).is_some_and(|r| r.is_ok()) && hips.is_some() {
-            self.rig.lock().unwrap().following = true;
+            self.rig.locked().following = true;
         }
     }
 
     /// Where the capture kit last said the avatar's hips are, during a recording.
     pub(super) fn hips_now(&self) -> Option<[f32; 3]> {
-        self.rig.lock().unwrap().hips.map(|h| h.0)
+        self.rig.locked().hips.map(|h| h.0)
     }
 
     /// Switches the rig on or off when it is not already.
     fn switch_rig(&self, on: bool) {
-        let mut rig = self.rig.lock().unwrap();
+        let mut rig = self.rig.locked();
         if rig.on != on && self.with_osc(|o| o.send_bundle(vec![rig_switch(on)])).is_some_and(|r| r.is_ok()) {
             rig.on = on;
         }
@@ -157,14 +158,14 @@ impl super::Controller {
 
     /// A 3D picture holds the rig on for its flight, or lets go of it.
     pub(super) fn hold_rig(&self, on: bool) {
-        self.rig.lock().unwrap().held = on;
+        self.rig.locked().held = on;
         self.switch_rig(on);
     }
 
     /// Starts following VRChat's camera with the rig for the recording starting now.
     pub(super) fn start_rig(self: &Shared) {
         let generation = {
-            let mut rig = self.rig.lock().unwrap();
+            let mut rig = self.rig.locked();
             rig.generation += 1;
             // Where the hips are, from this recording's frames.
             rig.hips = None;
@@ -179,7 +180,7 @@ impl super::Controller {
     /// The rig off and back at the hips, its follower ended (the recording is over).
     pub(super) fn stop_rig(&self) {
         let (on, following) = {
-            let mut rig = self.rig.lock().unwrap();
+            let mut rig = self.rig.locked();
             rig.generation += 1;
             rig.held = false;
             (std::mem::take(&mut rig.on), std::mem::take(&mut rig.following))
@@ -199,7 +200,7 @@ impl super::Controller {
     /// A new avatar (or the same one reloaded) starts with N4N0's parameters at their defaults: the rig rests at its
     /// hips, off, until the follower places it again from where its frames show the new avatar's hips.
     pub(super) fn rig_avatar_changed(&self) {
-        let mut rig = self.rig.lock().unwrap();
+        let mut rig = self.rig.locked();
         rig.following = false;
         rig.on = false;
         rig.hips = None;
@@ -212,17 +213,17 @@ impl super::Controller {
         loop {
             std::thread::sleep(TICK);
             let (current, following, held, hips) = {
-                let rig = self.rig.lock().unwrap();
+                let rig = self.rig.locked();
                 (rig.generation == generation, rig.following, rig.held, rig.hips)
             };
             if !current || !self.is_capturing() {
                 return;
             }
             let (state, position) = {
-                let snap = self.snapshot.lock().unwrap();
+                let snap = self.snapshot.locked();
                 (snap.capture.state, snap.capture.stats.as_ref().and_then(|s| s.position))
             };
-            let flying = self.burst.lock().unwrap().recording || self.scan.lock().unwrap().recording;
+            let flying = self.burst.locked().recording || self.scan.locked().recording;
             let pose = self.camera_pose();
             if !flying {
                 if let (Some(p), Some(h)) = (pose, hips) {

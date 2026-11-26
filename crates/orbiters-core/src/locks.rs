@@ -5,7 +5,7 @@
 //! after it, one at a time: the app ends as a tray icon that answers nothing. So:
 //!
 //! - **State is safe to go on with** ([`Locked::locked`] and its siblings, what everything uses): the data is taken as it
-//!   is, the poisoning is said once in the app's log with where it was found and where the panic was, and the lock is a
+//!   is, the poisoning is logged once with the source location of the recovering call, and the lock is a
 //!   lock like any other again. What was under it may be half changed: a list with one entry more, a part not published
 //!   yet. The next change or the next publish puts it right, and nothing here is worse than answering nobody.
 //! - **The few whose rule cannot be trusted half changed** are [`StartsOver`], each by name where it is made, with how it
@@ -24,8 +24,7 @@ use std::time::Duration;
 /// Said once for each poisoning: `clear_poison` goes before it, so the next one to come finds an ordinary lock.
 #[cold]
 fn recovered(found: &'static Location<'static>) {
-    let panicked = crate::panic_log::last();
-    log_error!("a lock was left by a thread that panicked (the last panic: {:?}); found at {}: what is under it is used as it is", panicked, found);
+    log_error!("recovered a poisoned lock at {}; keeping its state", found);
 }
 
 pub trait Locked {
@@ -68,12 +67,12 @@ impl<T: ?Sized> Locked for Mutex<T> {
 pub struct StartsOver<T> {
     value: Mutex<T>,
     what: Word,
-    over: fn(&mut T),
+    over: Box<dyn Fn(&mut T) + Send + Sync>,
 }
 
 impl<T> StartsOver<T> {
-    pub const fn new(what: &'static str, value: T, over: fn(&mut T)) -> Self {
-        Self { value: Mutex::new(value), what: Word(what), over }
+    pub fn new(what: &'static str, value: T, over: impl Fn(&mut T) + Send + Sync + 'static) -> Self {
+        Self { value: Mutex::new(value), what: Word(what), over: Box::new(over) }
     }
 
     /// The lock; what is under it was started over if a thread panicked with it.
@@ -85,8 +84,7 @@ impl<T> StartsOver<T> {
             (self.over)(&mut held);
             // Only now: a panic of the starting over itself leaves it to be started over by who comes next.
             self.value.clear_poison();
-            let panicked = crate::panic_log::last();
-            log_error!("{} was left by a thread that panicked (the last panic: {:?}); found at {}: started over", self.what, panicked, found);
+            log_error!("recovered {} at {}; restored its state", self.what, found);
             held
         })
     }
@@ -95,6 +93,12 @@ impl<T> StartsOver<T> {
     #[cfg(any(test, feature = "test-support"))]
     pub fn lock(&self) -> std::sync::LockResult<MutexGuard<'_, T>> {
         self.value.lock()
+    }
+
+    /// As [`Mutex::try_lock`], for tests that check lock ownership.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn try_lock(&self) -> std::sync::TryLockResult<MutexGuard<'_, T>> {
+        self.value.try_lock()
     }
 }
 
@@ -109,12 +113,14 @@ impl<T: ?Sized> RwLocked for RwLock<T> {
 
     #[track_caller]
     fn read_locked(&self) -> RwLockReadGuard<'_, T> {
-        let found = Location::caller();
-        self.read().unwrap_or_else(|poisoned| {
-            self.clear_poison();
-            recovered(found);
-            poisoned.into_inner()
-        })
+        match self.read() {
+            Ok(held) => held,
+            Err(poisoned) => {
+                // Clear and report poison under an exclusive guard, even with competing readers.
+                drop(poisoned.into_inner());
+                RwLockWriteGuard::downgrade(self.write_locked())
+            }
+        }
     }
 
     #[track_caller]
@@ -205,14 +211,26 @@ mod tests {
     fn who_waits_goes_on_when_another_panics_with_the_lock() {
         let (lock, changed) = (Mutex::new(0), Condvar::new());
         std::thread::scope(|s| {
-            let waits = s.spawn(|| *changed.wait_while_locked(lock.locked(), |n| *n == 0));
-            let panics = s.spawn(|| {
+            let (announce, announced) = std::sync::mpsc::sync_channel(1);
+            let (lock, changed) = (&lock, &changed);
+            let waits = s.spawn(move || {
+                *changed.wait_while_locked(lock.locked(), |n| {
+                    if *n == 0 {
+                        let _ = announce.try_send(());
+                    }
+                    *n == 0
+                })
+            });
+            // The waiter reports that it holds the lock before the panicking thread tries it.
+            let entered = announced.recv_timeout(Duration::from_secs(30));
+            let panics = s.spawn(move || {
                 let mut held = lock.locked();
                 *held = 7;
                 changed.notify_all();
                 panic!("with the lock, on purpose");
             });
             assert!(panics.join().is_err());
+            entered.expect("the waiting thread reached the condition");
             assert_eq!(waits.join().expect("it goes on"), 7);
         });
         assert!(changed.wait_timeout_locked(lock.locked(), Duration::from_millis(1)).1.timed_out());

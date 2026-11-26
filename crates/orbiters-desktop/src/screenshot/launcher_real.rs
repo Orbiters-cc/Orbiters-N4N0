@@ -10,9 +10,9 @@ use crate::app::App;
 use crate::controller::launcher::{fill_worlds, read_signed_in, unnamed_worlds};
 use egui::{pos2, vec2, ColorImage, Rect, TextureOptions};
 use orbiters_core::launcher::*;
-use orbiters_core::vrchat_api::{Client, Gate, Login};
+use orbiters_core::vrchat_api::{Client, ClientLock, Gate, Login};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 const PICTURES: usize = 40;
@@ -66,7 +66,7 @@ fn read() -> &'static Real {
                     return None;
                 }
             }
-            let client = Mutex::new(client);
+            let client = ClientLock::new(client);
             let (mut state, _, worn) = match read_signed_in(&client) {
                 Ok(read) => read,
                 Err(e) => {
@@ -77,7 +77,7 @@ fn read() -> &'static Real {
             // As the controller does over its first minute: the worlds and decorations of those in view.
             let mut worlds = HashMap::new();
             for id in unnamed_worlds(&state).into_iter().take(8) {
-                let w = client.lock().unwrap().world(&id).ok().map(|w| (w.name, if w.thumbnail_image_url.is_empty() { w.image_url } else { w.thumbnail_image_url }));
+                let w = client.locked().world(&id).ok().map(|w| (w.name, if w.thumbnail_image_url.is_empty() { w.image_url } else { w.thumbnail_image_url }));
                 worlds.insert(id, w);
             }
             fill_worlds(&mut state, &worlds);
@@ -87,7 +87,7 @@ fn read() -> &'static Real {
                 let Some(d) = worn.get(id) else { continue };
                 for t in [&d.icon_frame, &d.nameplate].into_iter().flatten() {
                     if templates.len() < 8 && !templates.contains_key(t) {
-                        templates.insert(t.clone(), client.lock().unwrap().inventory_template_picture(t).ok());
+                        templates.insert(t.clone(), client.locked().inventory_template_picture(t).ok());
                     }
                 }
             }
@@ -106,9 +106,9 @@ fn read() -> &'static Real {
                 .or_else(|| in_view.iter().filter_map(|id| state.friend(id)).find(|f| f.presence == Presence::InGame))
                 .cloned();
             if let Some(f) = pick {
-                let public = client.lock().unwrap().public_profile(&f.id).unwrap_or(serde_json::Value::Null);
-                let user = client.lock().unwrap().user_value(&f.id).unwrap_or(serde_json::Value::Null);
-                let mutuals = client.lock().unwrap().mutuals(&f.id).ok();
+                let public = client.locked().public_profile(&f.id).unwrap_or(serde_json::Value::Null);
+                let user = client.locked().user_value(&f.id).unwrap_or(serde_json::Value::Null);
+                let mutuals = client.locked().mutuals(&f.id).ok();
                 state.profile = Some(orbiters_core::launcher_feed::profile(f, &public, &user, mutuals));
             }
             // The pictures of what is in view, in the list's order.
@@ -132,7 +132,7 @@ fn read() -> &'static Real {
             urls.truncate(PICTURES);
             let mut pictures = Vec::new();
             for url in urls {
-                match client.lock().unwrap().image(&url) {
+                match client.locked().image(&url) {
                     Ok(bytes) => match decode(&bytes) {
                         Some(img) => pictures.push((url, img)),
                         None => log.push("picture did not decode".into()),

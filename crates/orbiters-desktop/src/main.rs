@@ -74,6 +74,8 @@ mod words;
 mod worker;
 #[cfg(test)]
 mod layers;
+#[cfg(test)]
+mod unseen;
 #[cfg(all(test, windows))]
 mod test_crash;
 

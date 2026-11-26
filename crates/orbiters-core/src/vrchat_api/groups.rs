@@ -10,7 +10,6 @@
 //! null. Every write goes in the [`WRITES`] family, whose lost answers are "outcome unknown" (B2), through
 //! the client's pacing and shared 429 back-off. Errors are local codes ([`Failure`]); VRChat's own words of a refusal are kept
 //! beside ([`Refusal`]), for the person it refused to read them (REQUEST28).
-use crate::locks::*;
 use super::*;
 use crate::group_events::{is_event_id, CalendarEvent, Events, Month};
 use crate::groups::{self as g, ArtSlot, FileTag, Group, GroupCard, InventoryFile, Member, MyMember, PermissionInfo, Post, PostDraft, Role, RoleChange, RoleDraft, RoleField, Visibility};

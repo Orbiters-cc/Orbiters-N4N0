@@ -1,9 +1,12 @@
 //! N4N0's state behind its lock, which remembers that something wrote to it since it was last handed to the interfaces: what nobody
 //! published by itself is, at the N4N0 thread's next step, and nothing looks for it meanwhile (N4N-3).
 
+use orbiters_core::locks::*;
 use crate::runtime::N4n0Runtime;
 use std::ops::{Deref, DerefMut};
-use std::sync::{Condvar, LockResult, Mutex, MutexGuard, PoisonError};
+use std::sync::{Condvar, Mutex, MutexGuard};
+#[cfg(test)]
+use std::sync::{LockResult, PoisonError};
 use std::time::Duration;
 
 pub(crate) struct Held(Mutex<Inner>);
@@ -18,7 +21,14 @@ impl Held {
         Held(Mutex::new(Inner { rt, changed: false }))
     }
 
-    /// As [`Mutex::lock`].
+    /// As [`Locked::locked`]: also after a thread panicked with it.
+    #[track_caller]
+    pub(crate) fn locked(&self) -> Guard<'_> {
+        Guard(self.0.locked())
+    }
+
+    /// As [`Mutex::lock`], for the tests.
+    #[cfg(test)]
     pub(crate) fn lock(&self) -> LockResult<Guard<'_>> {
         self.0.lock().map(Guard).map_err(|e| PoisonError::new(Guard(e.into_inner())))
     }
@@ -58,6 +68,6 @@ impl Guard<'_> {
 
     /// Unlocked until `wake` is notified, `most` at most.
     pub(crate) fn wait(self, wake: &Condvar, most: Duration) -> Self {
-        Guard(wake.wait_timeout(self.0, most).unwrap().0)
+        Guard(wake.wait_timeout_locked(self.0, most).0)
     }
 }

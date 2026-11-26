@@ -2,6 +2,7 @@
 //! same process (screenshots, the end-to-end test). Actions are fire-and-forget: the interface shows them at once
 //! and failures come back as notices.
 
+use orbiters_core::locks::*;
 use crate::controller::{self, Notice, NoticeKind};
 use crate::ipc::{Client, N4n0Command, ToService, UpdateAction};
 use crate::state::{AccountState, MapsMine, Snapshot};
@@ -689,11 +690,11 @@ impl Backend for Local {
     }
 
     fn request_worker_log(&self) {
-        *self.log.lock().unwrap() = Some(self.ctl.worker_log());
+        *self.log.locked() = Some(self.ctl.worker_log());
     }
 
     fn worker_log(&self) -> Option<Vec<String>> {
-        self.log.lock().unwrap().clone()
+        self.log.locked().clone()
     }
 
     fn upload_pictures(&self, world_id: String, world_name: String, paths: Vec<PathBuf>) {
@@ -725,7 +726,7 @@ impl Backend for Local {
     }
 
     fn perf_turns(&self, turns: crate::perf::ProcessTurns) {
-        crate::perf::keeper().lock().unwrap_or_else(|e| e.into_inner()).turns(turns);
+        crate::perf::keeper().locked().turns(turns);
     }
 
     fn perf(&self, command: crate::perf::Command) {

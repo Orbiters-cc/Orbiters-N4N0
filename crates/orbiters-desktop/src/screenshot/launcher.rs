@@ -1,6 +1,7 @@
 //! The launcher on Home (`pages/launcher`) over made-up people only (`orbiters_core::launcher::sample` and more of the
 //! same, pictures painted here): the list, the database-only list, a row hovered with a boop and a request just sent,
 //! a profile open, an invite, and (run with `--width 900`) the rail and its drawer.
+use orbiters_core::locks::*;
 use super::{Page, Scenario};
 use crate::app::App;
 use egui::{pos2, vec2, Color32, ColorImage, Rect, TextureOptions};
@@ -743,7 +744,7 @@ fn keep_pictures(data: &mut LauncherState) {
 fn pictures_on_screen(state: &crate::pages::launcher::State, f: u32) {
     use std::sync::{Mutex, OnceLock};
     static SEEN: OnceLock<Mutex<(Option<(u32, std::time::Instant)>, bool)>> = OnceLock::new();
-    let mut seen = SEEN.get_or_init(Mutex::default).lock().unwrap_or_else(|e| e.into_inner());
+    let mut seen = SEEN.get_or_init(Mutex::default).locked();
     let loading = state.stand_in_pictures_loading();
     if loading && seen.0.is_none() {
         seen.0 = Some((f, std::time::Instant::now()));

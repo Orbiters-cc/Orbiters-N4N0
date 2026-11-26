@@ -3,6 +3,7 @@
 //! For a trial: what it shares with its original, what to do in Creator Companion while it waits, then Open in Unity 6
 //! and what each opening showed. Calm and factual: VRChat's Unity 6 SDK is a beta with no announced end for Unity 2022.
 
+use orbiters_core::locks::*;
 use orbiters_i18n::tr;
 use super::art;
 use super::state::State;
@@ -778,12 +779,12 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
         inner.spacing_mut().item_spacing = vec2(0.0, 8.0);
         let bg = ui.painter().add(egui::Shape::Noop);
         // What this window does with it now, if it does: its Stop and its progress.
-        let run = state.u6.run.as_ref().filter(|r| r.recorded.lock().unwrap().as_deref() == Some(job.id.as_str())).map(|r| (r.cancel.clone(), r.progress.clone()));
+        let run = state.u6.run.as_ref().filter(|r| r.recorded.locked().as_deref() == Some(job.id.as_str())).map(|r| (r.cancel.clone(), r.progress.clone()));
         let finishing = state.u6.finishing.as_ref().filter(|f| f.0 == job.id && state.u6.busy().is_some()).map(|f| (f.1.clone(), f.2.clone()));
         let mine = run.or(finishing);
         let (glyph, tint, text) = match &status {
             trial::Status::Running => {
-                match mine.as_ref().map(|(_, p)| p.lock().unwrap().clone()) {
+                match mine.as_ref().map(|(_, p)| p.locked().clone()) {
                     Some(p) => {
                         let pct = if p.total > 0 { format!(" · {:.0}%", 100.0 * p.copied as f32 / p.total as f32) } else { String::new() };
                         (icons::CIRCLE_NOTCH, theme::accent(), format!("{}{pct}", super::unity6::phase_label(&p.phase)))

@@ -6,6 +6,7 @@
 //! the API's web `.splat` and sky map of the preview elsewhere (a development server publishes its slots to storage the
 //! app has no address for).
 
+use orbiters_core::locks::*;
 use orbiters_i18n::tr;
 use super::cache::{Disk, Validators};
 use super::stereo::{self, StartView, V3};
@@ -946,7 +947,7 @@ struct Listed {
 impl Catalog {
     /// Reads the listing again unless it was read lately or is being read.
     pub fn refresh(&self, source: &Source) {
-        let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let mut s = self.state.locked();
         if s.fetching || s.fetched.is_some_and(|t| t.elapsed() < LISTING_FOR) {
             return;
         }
@@ -955,7 +956,7 @@ impl Catalog {
         let _ = std::thread::Builder::new().name("3d-worlds-listing".into()).spawn(move || {
             let answer = source.listing();
             let feedback = source.all_feedback().map_err(|e| eprintln!("3D worlds: worlds' feedback: {e:#}")).ok();
-            let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
+            let mut s = state.locked();
             if let Some(feedback) = feedback {
                 s.feedback = feedback;
             }
@@ -983,25 +984,25 @@ impl Catalog {
 
     /// The listing's entry of this id now, if it lists one (its revision, who it is shared with), without copying the rest.
     pub fn entry(&self, id: u64) -> Option<Entry> {
-        let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let s = self.state.locked();
         s.entries.iter().find(|e| e.id == id).cloned()
     }
 
     /// The entries, whether a read is under way, the last error, and the answer's number.
     pub fn snapshot(&self) -> (Vec<Entry>, bool, Option<String>, u64) {
-        let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let s = self.state.locked();
         (s.entries.clone(), s.fetching, s.error.clone(), s.version)
     }
 
     /// Whether a read is under way, and the last error (without copying the entries).
     pub fn state(&self) -> (bool, Option<String>) {
-        let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let s = self.state.locked();
         (s.fetching, s.error.clone())
     }
 
     /// A world's feedback for everyone as Orbiters last gave it: its capture's listing's, else the one of every world.
     pub fn feedback(&self, world_id: &str) -> Aggregate {
-        let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let s = self.state.locked();
         let key = world_id.to_ascii_lowercase();
         s.entries
             .iter()

@@ -2,6 +2,7 @@
 //! senders) and the session library, listens to the Action Menu over OSC, and publishes a [`Snapshot`] that
 //! the interface reads every frame. It keeps working while the window is hidden in the tray.
 
+use orbiters_core::locks::*;
 use crate::ipc::ToClient;
 use crate::mailbox::Mailbox;
 use crate::reconstruct::ReconstructHandle;
@@ -133,10 +134,10 @@ enum CapturePurpose { CameraOverlay, Short, Avatar }
 /// - `account_runtime` is let go before the account is published; its generation is read under `snapshot` through
 ///   `account_generation` (C-7).
 pub struct Controller {
-    snapshot: Mutex<Snapshot>,
+    snapshot: StartsOver<Snapshot>,
     /// What the interface reads: the snapshot as it was last handed out, swapped on every change. A copy shares every
     /// part with the snapshot (`orbiters_core::slice`): none is copied until the snapshot changes it.
-    published: Mutex<Arc<Snapshot>>,
+    published: Arc<Mutex<Arc<Snapshot>>>,
     /// The running capture's whole camera path; the snapshot holds it thinned ([`state::Trail`]). Taken after
     /// `snapshot`, never before.
     trail: Mutex<state::Trail>,
@@ -196,14 +197,14 @@ pub struct Controller {
     hide: Mutex<hide_self::HideRuntime>,
     avatar_changed_at: Mutex<Option<Instant>>,
     /// The Orbiters account's credential and a sign-in in progress (controller/account.rs).
-    account_runtime: Mutex<account::AccountRuntime>,
+    account_runtime: StartsOver<account::AccountRuntime>,
     /// Whether the member has what the assistant does from an account (controller/assistant_access.rs).
     assistant_access: Mutex<assistant_access::AssistantAccess>,
     /// `account_runtime`'s generation, readable under the snapshot's lock (controller/account.rs, C-7).
     account_generation: AtomicU64,
     /// The Orbiters identity's epoch, as `account_runtime` has it (controller/identity.rs): moved under its lock.
     identity_epoch: AtomicU64,
-    vrchat_login: Mutex<vrchat_login::Runtime>,
+    vrchat_login: StartsOver<vrchat_login::Runtime>,
     /// Home's launcher: friends, invites, boops, Play (controller/launcher.rs).
     launcher: Mutex<launcher::Runtime>,
     /// When Play last started VRChat ("starting" until it shows up).
@@ -601,10 +602,14 @@ impl Controller {
         let calibration = read_calibration();
         snapshot.steamvr.calibration = calibration.as_ref().map(calibration_info);
         let sides = Arc::<crate::bridge::sessions::Sides>::default();
+        let published = Arc::new(Mutex::new(Arc::new(snapshot.clone())));
+        let last_good = published.clone();
         // N4N0 lives in the controller and reaches it through a weak link: no cycle keeps either alive.
-        Arc::new_cyclic(|me| Self {
-            published: Mutex::new(Arc::new(snapshot.clone())),
-            snapshot: Mutex::new(snapshot),
+        Arc::new_cyclic(|me: &std::sync::Weak<Self>| Self {
+            published,
+            snapshot: StartsOver::new("the service snapshot", snapshot, move |snapshot| { // i18n: not shown (the log)
+                *snapshot = (**last_good.locked()).clone();
+            }),
             trail: Mutex::default(),
             publishes: AtomicU64::new(0),
             worker: Mutex::new(None),
@@ -640,11 +645,19 @@ impl Controller {
             avatar_before: Mutex::new(None),
             hide: Mutex::new(hide_self::HideRuntime::with_journal((!cfg!(test)).then(hide_self::masks_journal))),
             avatar_changed_at: Mutex::new(None),
-            account_runtime: Mutex::new(account::AccountRuntime::default()),
+            account_runtime: {
+                let owner = me.clone();
+                StartsOver::new("the Orbiters account", account::AccountRuntime::default(), move |runtime| { // i18n: not shown (the log)
+                    let generation = runtime.start_over();
+                    if let Some(owner) = owner.upgrade() {
+                        owner.account_generation.store(generation, Ordering::SeqCst);
+                    }
+                })
+            },
             assistant_access: Mutex::default(),
             account_generation: AtomicU64::new(0),
             identity_epoch: AtomicU64::new(orbiters_n4n0::FIRST_EPOCH),
-            vrchat_login: Mutex::new(vrchat_login::Runtime::default()),
+            vrchat_login: StartsOver::new("the VRChat sign-in", vrchat_login::Runtime::default(), vrchat_login::Runtime::start_over), // i18n: not shown (the log)
             launcher: Mutex::new(launcher::Runtime::default()),
             launcher_started: Mutex::new(None),
             bridge: Mutex::new(None),
@@ -709,11 +722,11 @@ impl Controller {
 
     /// What tracking smoothing's driver does now, as the service's keeper found it.
     pub fn set_tracking_note(&self, note: String) {
-        *self.tracking_note.lock().unwrap() = note;
+        *self.tracking_note.locked() = note;
     }
 
     pub fn tracking_note(&self) -> String {
-        self.tracking_note.lock().unwrap().clone()
+        self.tracking_note.locked().clone()
     }
 
     /// Starts OSC, the worker and the watchers.
@@ -767,14 +780,14 @@ impl Controller {
 
     /// The interface's context, repainted on every change.
     pub fn attach(&self, ctx: &egui::Context) {
-        *self.repaint.lock().unwrap() = Some(ctx.clone());
+        *self.repaint.locked() = Some(ctx.clone());
     }
 
     /// Posts the current state to `mailbox` now and every change from then on (until it closes). Notices that came
     /// while nothing showed them go first to one that does. Registered in the same turn as a publish, so no change
     /// falls between the first state and the next.
     pub fn subscribe(&self, mailbox: Arc<Mailbox>) {
-        let _turn = self.publishing.lock().unwrap();
+        let _turn = self.publishing.locked();
         mailbox.post_snapshot(self.view());
         mailbox.post(ToClient::Library { version: self.library_version() });
         if mailbox.shows_notices() {
@@ -782,14 +795,14 @@ impl Controller {
                 mailbox.post(ToClient::Notice { notice });
             }
         }
-        self.subscribers.lock().unwrap().push(mailbox);
+        self.subscribers.locked().push(mailbox);
     }
 
 
 
     /// Posts a message to every subscriber (forgetting those gone). Returns whether one that shows notices got it.
     fn broadcast(&self, msg: impl Fn() -> ToClient) -> bool {
-        let mut subs = self.subscribers.lock().unwrap();
+        let mut subs = self.subscribers.locked();
         subs.retain(|m| m.post(msg()));
         subs.iter().any(|m| m.shows_notices())
     }
@@ -807,12 +820,12 @@ impl Controller {
         }
         // The tray takes no notice: one that only it got waits for the next window.
         if !self.broadcast(|| ToClient::Notice { notice: notice.clone() }) {
-            let mut pending = self.notices.lock().unwrap();
+            let mut pending = self.notices.locked();
             pending.push(notice);
             let excess = pending.len().saturating_sub(8);
             pending.drain(..excess);
         }
-        if let Some(ctx) = self.repaint.lock().unwrap().as_ref() {
+        if let Some(ctx) = self.repaint.locked().as_ref() {
             orbiters_ui::anim::request_frame(ctx);
         }
     }
@@ -823,11 +836,11 @@ impl Controller {
     }
 
     pub fn view(&self) -> Arc<Snapshot> {
-        self.published.lock().unwrap().clone()
+        self.published.locked().clone()
     }
 
     pub fn take_notices(&self) -> Vec<Notice> {
-        std::mem::take(&mut *self.notices.lock().unwrap())
+        std::mem::take(&mut *self.notices.locked())
     }
 
     pub fn library_version(&self) -> u64 {
@@ -838,12 +851,12 @@ impl Controller {
     /// as a recorded one is.
     pub fn set_snapshot(&self, mut snapshot: Snapshot) {
         {
-            let mut s = self.snapshot.lock().unwrap();
+            let mut s = self.snapshot.locked();
             let trail = state::Trail::of(snapshot.capture.trail.clone());
             if trail.len() > state::Trail::SHOWN {
                 snapshot.capture.trail = trail.shown();
             }
-            *self.trail.lock().unwrap() = trail;
+            *self.trail.locked() = trail;
             *s = snapshot;
         }
         self.publish();
@@ -862,34 +875,35 @@ impl Controller {
     /// part is another allocation exactly when it changed.
     fn publish(&self) {
         use orbiters_core::slice::Parts;
-        let _turn = self.publishing.lock().unwrap();
+        let _turn = self.publishing.locked();
         let previous = self.view();
         let s = {
-            let mut s = self.snapshot.lock().unwrap();
+            let mut s = self.snapshot.locked();
             // With the snapshot held: the account this very state is for, and no other.
             let now = self.vrchat_stamp_of(&s.account);
-            vrchat_login::follow_orbiters_and_record(&mut s, &mut self.vrchat_login.lock().unwrap(), now.as_ref());
+            vrchat_login::follow_orbiters_and_record(&mut s, &mut self.vrchat_login.locked(), now.as_ref());
             s.settle(&previous);
-            s.clone()
+            let published = Arc::new(s.clone());
+            // Recovery needs the newest published value before another update can acquire the snapshot.
+            *self.published.locked() = published.clone();
+            published
         };
-        let s = Arc::new(s);
-        *self.published.lock().unwrap() = s.clone();
         self.publishes.fetch_add(1, Ordering::Relaxed);
-        self.subscribers.lock().unwrap().retain(|m| m.post_snapshot(s.clone()));
-        if let Some(ctx) = self.repaint.lock().unwrap().as_ref() {
+        self.subscribers.locked().retain(|m| m.post_snapshot(s.clone()));
+        if let Some(ctx) = self.repaint.locked().as_ref() {
             orbiters_ui::anim::request_frame(ctx);
         }
     }
 
     pub(crate) fn update<R>(&self, f: impl FnOnce(&mut Snapshot) -> R) -> R {
-        let r = f(&mut self.snapshot.lock().unwrap());
+        let r = f(&mut self.snapshot.locked());
         self.publish();
         r
     }
 
     /// Applies a change and publishes only when `f` reports one.
     fn update_if(&self, f: impl FnOnce(&mut Snapshot) -> bool) -> bool {
-        let changed = f(&mut self.snapshot.lock().unwrap());
+        let changed = f(&mut self.snapshot.locked());
         if changed {
             self.publish();
         }
@@ -902,9 +916,9 @@ impl Controller {
         if messages.is_empty() {
             return;
         }
-        self.notices.lock().unwrap().retain(|n| !matches!(n, Notice::Toast { message, .. } if messages.contains(message)));
+        self.notices.locked().retain(|n| !matches!(n, Notice::Toast { message, .. } if messages.contains(message)));
         self.broadcast(|| ToClient::Notice { notice: Notice::Retract { messages: messages.clone() } });
-        if let Some(ctx) = self.repaint.lock().unwrap().as_ref() {
+        if let Some(ctx) = self.repaint.locked().as_ref() {
             orbiters_ui::anim::request_frame(ctx);
         }
     }
@@ -920,15 +934,15 @@ impl Controller {
 
     /// Looks at the settings without copying them (the OSC receiving thread does, for every value VRChat sends).
     pub fn with_settings<R>(&self, f: impl FnOnce(&Settings) -> R) -> R {
-        f(&self.snapshot.lock().unwrap().settings)
+        f(&self.snapshot.locked().settings)
     }
 
     pub fn settings(&self) -> Settings {
-        (*self.snapshot.lock().unwrap().settings).clone()
+        (*self.snapshot.locked().settings).clone()
     }
 
     pub fn is_capturing(&self) -> bool {
-        self.snapshot.lock().unwrap().is_capturing()
+        self.snapshot.locked().is_capturing()
     }
 
     /// How many Stops were asked for (tests of the service's links).
@@ -940,7 +954,7 @@ impl Controller {
     fn ensure_worker(self: &Shared) -> anyhow::Result<()> {
         // A late OSC echo or a queued start while the app quits starts no worker.
         anyhow::ensure!(!self.quitting.load(Ordering::Relaxed), "{}", tr("Orbiters - N4N0 is quitting."));
-        let mut guard = self.worker.lock().unwrap();
+        let mut guard = self.worker.locked();
         if let Some(w) = guard.as_mut() {
             if w.alive() {
                 return Ok(());
@@ -962,7 +976,7 @@ impl Controller {
         let on_log = {
             let ctl = self.clone();
             move |line: String| {
-                let mut log = ctl.worker_log.lock().unwrap();
+                let mut log = ctl.worker_log.locked();
                 log.push_back(line);
                 while log.len() > 400 {
                     log.pop_front();
@@ -1015,8 +1029,8 @@ impl Controller {
             }
             if mine && s.capture.state != CaptureState::Idle {
                 // What the recording was for ends with it, before Idle shows (CTL-11 a).
-                self.burst.lock().unwrap().recording = false;
-                self.scan.lock().unwrap().recording = false;
+                self.burst.locked().recording = false;
+                self.scan.locked().recording = false;
                 s.capture.state = CaptureState::Idle;
                 s.capture.from_osc = false;
                 s.capture.error = Some(tr("The capture worker stopped unexpectedly.").into());
@@ -1038,13 +1052,13 @@ impl Controller {
     /// Sends to the worker that runs, never starting one: OSC values reach it from the OSC receiving thread, under
     /// the values' lock, which must not wait for a process to start. Gone meanwhile (the app quits): an error.
     fn send_if_running(&self, cmd: &WorkerCommand) -> anyhow::Result<()> {
-        let mut guard = self.worker.lock().unwrap();
+        let mut guard = self.worker.locked();
         guard.as_mut().ok_or_else(|| anyhow::anyhow!("{}", tr("the capture worker is not running")))?.send(cmd)
     }
 
     /// A 3D picture or a scan records a session of its own: none may run, nor still be being saved.
     pub(super) fn ensure_capture_idle(&self) -> anyhow::Result<()> {
-        match self.snapshot.lock().unwrap().capture.state {
+        match self.snapshot.locked().capture.state {
             CaptureState::Idle => Ok(()),
             CaptureState::Stopping => anyhow::bail!("{}", tr("The last recording is still being saved: try again in a moment.")),
             _ => anyhow::bail!("{}", tr("A recording is under way: stop it first.")),
@@ -1054,8 +1068,8 @@ impl Controller {
     /// A capture ended, or never started: a start asked for while the last session was being saved runs now, else
     /// a reconstruction that waited for the GPU.
     fn capture_ended(self: &Shared) {
-        *self.stopping_since.lock().unwrap() = None;
-        let pending = self.pending_start.lock().unwrap().take();
+        *self.stopping_since.locked() = None;
+        let pending = self.pending_start.locked().take();
         match pending {
             Some((source, importing, from_osc, generation)) => {
                 // Starting reads VRChat's current values over HTTP: not on the thread that told us.
@@ -1078,13 +1092,13 @@ impl Controller {
     /// A worker that has not finished saving a session long after it was asked to is stuck: it is restarted (its
     /// session stays as its last checkpoint left it). Called by the watchers every second.
     fn check_stopping(self: &Shared) {
-        let stuck = self.snapshot.lock().unwrap().capture.state == CaptureState::Stopping
-            && self.stopping_since.lock().unwrap().is_some_and(|t| t.elapsed() > STOP_LIMIT);
+        let stuck = self.snapshot.locked().capture.state == CaptureState::Stopping
+            && self.stopping_since.locked().is_some_and(|t| t.elapsed() > STOP_LIMIT);
         if stuck {
-            *self.stopping_since.lock().unwrap() = None;
+            *self.stopping_since.locked() = None;
             self.notify(NoticeKind::Error, tr("The capture worker did not finish saving the session: it was restarted. The session keeps what was saved."));
             // Dropping the handle ends the process; its end resets the state (`ensure_worker`'s exit).
-            let worker = self.worker.lock().unwrap().take();
+            let worker = self.worker.locked().take();
             drop(worker);
         }
     }
@@ -1109,15 +1123,15 @@ impl Controller {
             WorkerEvent::Started { session_dir, source } => {
                 // Worker events run off the UI thread. Save before publishing the new recording.
                 let mut content = orbiters_core::explicit::Content::parameters(
-                    self.osc_values.lock().unwrap().latest.keys().filter(|n| n.starts_with(PARAMETERS_PREFIX)).map(String::as_str),
+                    self.osc_values.locked().latest.keys().filter(|n| n.starts_with(PARAMETERS_PREFIX)).map(String::as_str),
                 );
-                let world = self.snapshot.lock().unwrap().vrchat.world.clone();
+                let world = self.snapshot.locked().vrchat.world.clone();
                 content.merge(&orbiters_core::explicit::local_avatar_labels(&world));
-                let avatar = match self.osc_values.lock().unwrap().latest.first(AVATAR_CHANGE) {
+                let avatar = match self.osc_values.locked().latest.first(AVATAR_CHANGE) {
                     Some(OscValue::Text(id)) => Some(id),
                     _ => None,
                 }
-                .or_else(|| self.snapshot.lock().unwrap().n4n0.avatar_id.clone());
+                .or_else(|| self.snapshot.locked().n4n0.avatar_id.clone());
                 content.merge(&orbiters_core::explicit::manifest_content(avatar.as_deref()));
                 if let Err(e) = content.save(&session_dir) {
                     self.notify(NoticeKind::Error, tr!("Could not save capture content flags: {error}", error = e));
@@ -1131,20 +1145,20 @@ impl Controller {
                     s.capture.source = Some(source);
                     s.capture.error = None;
                     s.capture.trail.clear();
-                    self.trail.lock().unwrap().clear();
+                    self.trail.locked().clear();
                     s.capture.coverage = None;
                 });
             }
             // Published with the next stats (four times a second).
-            WorkerEvent::Coverage(map) => self.snapshot.lock().unwrap().capture.coverage = Some(map),
+            WorkerEvent::Coverage(map) => self.snapshot.locked().capture.coverage = Some(map),
             WorkerEvent::Hips { position, rotation } => self.rig_hips(position, rotation),
             WorkerEvent::Stats(stats) => {
                 let missing_s = stats.strip_missing_s;
                 let over_limit = {
-                    let mut s = self.snapshot.lock().unwrap();
+                    let mut s = self.snapshot.locked();
                     if let Some(p) = stats.position {
                         // The snapshot's path only when the whole one grew: a camera standing still copies nothing.
-                        let mut trail = self.trail.lock().unwrap();
+                        let mut trail = self.trail.locked();
                         if trail.push(p) {
                             s.capture.trail = trail.shown();
                         }
@@ -1173,16 +1187,16 @@ impl Controller {
                 let resized = reason == "resized";
                 let restarting = reason == "restarted" || resized;
                 // The session the worker says it saved, not whatever the snapshot names by now (verify2).
-                let session = Some(session_dir).filter(|d| !d.as_os_str().is_empty()).or_else(|| self.snapshot.lock().unwrap().capture.session_dir.clone());
+                let session = Some(session_dir).filter(|d| !d.as_os_str().is_empty()).or_else(|| self.snapshot.locked().capture.session_dir.clone());
                 if !restarting {
                     self.put_vrchat_back();
                 }
                 // Whether this recording was a scan, taken BEFORE Idle is published: a scan started after Idle sets
                 // the flag for its own recording, which this save must neither take nor clear (CTL-11 a, C-2).
                 let was_scan = if restarting {
-                    self.scan.lock().unwrap().recording
+                    self.scan.locked().recording
                 } else {
-                    std::mem::take(&mut self.scan.lock().unwrap().recording)
+                    std::mem::take(&mut self.scan.locked().recording)
                 };
                 // The same for a 3D picture (its flag, what it is of, who it left out), and the reason it has no
                 // keyframe, all before Idle: after it, the next picture's own are there (verify-controller).
@@ -1224,7 +1238,7 @@ impl Controller {
                 if resized {
                     // A 3D picture's or a scan's part at the old size is reconstructed on its own (a reconstruction
                     // takes one frame size); the part after it when the recording ends.
-                    let part = self.burst.lock().unwrap().recording || was_scan;
+                    let part = self.burst.locked().recording || was_scan;
                     if let Some(dir) = session.clone().filter(|_| part) {
                         if let Err(e) = self.queue_reconstruction(dir) {
                             self.notify(NoticeKind::Warning, tr!("A part of the recording, at another resolution, is not reconstructed: {error}", error = e));
@@ -1254,7 +1268,7 @@ impl Controller {
             }
             WorkerEvent::Error { message } => {
                 // While recording, the same error can come for every frame (a full disk): told once until it changes.
-                let repeated = self.snapshot.lock().unwrap().capture.error.as_deref() == Some(message.as_str());
+                let repeated = self.snapshot.locked().capture.error.as_deref() == Some(message.as_str());
                 self.update(|s| {
                     s.capture.error = Some(message.clone());
                     if s.capture.state == CaptureState::Starting {
@@ -1275,7 +1289,7 @@ impl Controller {
         if self.own_game() {
             return self.mac_world();
         }
-        (*self.snapshot.lock().unwrap().vrchat.world).clone()
+        (*self.snapshot.locked().vrchat.world).clone()
     }
 
     fn current_world(&self) -> Option<WorldInfo> {
@@ -1332,7 +1346,7 @@ impl Controller {
         rollover: bool,
         claim: Option<(impl FnOnce(), impl FnOnce())>,
     ) -> anyhow::Result<Option<u64>> {
-        let _start = self.capture_start_gate.lock().unwrap();
+        let _start = self.capture_start_gate.locked();
         let exclusive = claim.is_some();
         anyhow::ensure!(self.stop_generation.load(Ordering::Acquire) == stop_generation, "{}", tr("Finish the current capture first."));
         if rollover { anyhow::ensure!(matches!(self.view().capture.state,CaptureState::Recording|CaptureState::Paused), "{}", tr("Finish the current capture first.")); }
@@ -1353,11 +1367,11 @@ impl Controller {
         if !importing && !settings.consent_acknowledged {
             anyhow::bail!("{}", tr("Please read and accept the capture notice first (Photos & captures)."));
         }
-        if self.snapshot.lock().unwrap().capture.state == CaptureState::Stopping {
+        if self.snapshot.locked().capture.state == CaptureState::Stopping {
             anyhow::ensure!(!rollover, "{}", tr("Finish the current capture first."));
             // The last session is still being saved: this one starts once it is (`capture_ended`), and gets its number
             // then (a start refused or queued takes none: it would end what the last flight still owes).
-            *self.pending_start.lock().unwrap() = Some((source, importing, from_osc, stop_generation));
+            *self.pending_start.locked() = Some((source, importing, from_osc, stop_generation));
             return Ok(None);
         }
         // Accepted: what it is for, then its number, under the gate (nothing else starts in between).
@@ -1396,25 +1410,25 @@ impl Controller {
             s.capture.error = None;
             s.capture.stats = None;
             s.capture.trail.clear();
-            self.trail.lock().unwrap().clear();
+            self.trail.locked().clear();
             s.capture.coverage = None;
             s.capture.from_osc = from_osc;
-            s.capture.photo_3d = self.burst.lock().unwrap().recording;
-            s.capture.picture = self.burst.lock().unwrap().picture_mode();
+            s.capture.photo_3d = self.burst.locked().recording;
+            s.capture.picture = self.burst.locked().picture_mode();
             s.capture.left_out = Default::default();
             s.capture.no_strip = None;
         });
         if !importing {
             self.capture_takes_the_gpu();
         }
-        *self.last_source.lock().unwrap() = (!importing).then_some(source);
+        *self.last_source.locked() = (!importing).then_some(source);
         let record_parameters = !importing && settings.osc.enabled && settings.osc.record_parameters;
         // VRChat only sends values when they change: its OSCQuery tree has the current ones.
         let fetch_started = clock::now_ns();
         // A 3D picture always needs VRChat's camera streaming over Spout; a recording, as the setting says.
         let drive_camera = {
-            let mut owners=self.camera_stream_owners.lock().unwrap();
-            let drive = !importing && settings.osc.enabled && spout && (settings.osc.drive_camera || self.burst.lock().unwrap().recording || owners[1]);
+            let mut owners=self.camera_stream_owners.locked();
+            let drive = !importing && settings.osc.enabled && spout && (settings.osc.drive_camera || self.burst.locked().recording || owners[1]);
             // Reserve before querying: QR completion cannot restore the producer midway through this read.
             if drive { owners[0]=true; }
             drive
@@ -1430,14 +1444,14 @@ impl Controller {
             self.switch_kit_on(&vrchat);
             self.start_rig();
             // After the kit's toggle: the avatar's layer only hides while the kit records.
-            let world = self.burst.lock().unwrap().picture_mode() == Some(orbiters_core::settings::PictureMode::World);
+            let world = self.burst.locked().picture_mode() == Some(orbiters_core::settings::PictureMode::World);
             self.start_hide_self(&vrchat, drive_camera, world);
         }
         let sent = {
-            let mut osc = self.osc_values.lock().unwrap();
+            let mut osc = self.osc_values.locked();
             // A stop came while VRChat's values were read: nothing starts. Checked under the lock `stop_capture`
             // takes to send its Stop, so a stop that comes later reaches the worker after this Start.
-            if self.snapshot.lock().unwrap().capture.state == CaptureState::Stopping
+            if self.snapshot.locked().capture.state == CaptureState::Stopping
                 || self.stop_generation.load(Ordering::Acquire) != stop_generation
                 || (spout && self.view().camera_open_said != Some(true)) {
                 None
@@ -1509,7 +1523,7 @@ impl Controller {
 
     /// Stops `owner`'s own recording, never one started after it, and calls off no start asked since.
     pub(super) fn stop_recording_of(self: &Shared, owner: u64) {
-        let _gate = self.capture_start_gate.lock().unwrap();
+        let _gate = self.capture_start_gate.locked();
         if !self.owns_recording(owner) {
             return;
         }
@@ -1521,7 +1535,7 @@ impl Controller {
     /// Does `effect` (an OSC message, the rig, a mask) for `owner`'s recording only: checked and done under the start
     /// gate, so no other recording can begin between the check and the effect. Whether it was done.
     pub(super) fn for_recording(&self, owner: u64, effect: impl FnOnce()) -> bool {
-        let _gate = self.capture_start_gate.lock().unwrap();
+        let _gate = self.capture_start_gate.locked();
         let ours = self.owns_recording(owner);
         if ours {
             effect();
@@ -1533,7 +1547,7 @@ impl Controller {
     /// the recording was a picture's or a scan's) goes, and the start is stopped when it is still under way, all under
     /// the gate; nothing when another recording began since (its flag and recording are its own).
     pub(super) fn give_up_start_of(self: &Shared, owner: u64, flag: impl FnOnce()) {
-        let _gate = self.capture_start_gate.lock().unwrap();
+        let _gate = self.capture_start_gate.locked();
         if !self.no_recording_since(owner) {
             return;
         }
@@ -1549,12 +1563,12 @@ impl Controller {
     /// is copied out and the snapshot let go BEFORE the fallback: `why_no_strip_now` takes `osc_values`, and a start
     /// meanwhile holds `osc_values` and waits for `snapshot` (`start_segment`): the two would wait for each other (C-1).
     fn no_strip_reason(&self) -> state::NoStrip {
-        let said = self.snapshot.lock().unwrap().capture.no_strip;
+        let said = self.snapshot.locked().capture.no_strip;
         said.unwrap_or_else(|| self.why_no_strip_now())
     }
 
     fn put_vrchat_back(&self) {
-        self.osc_values.lock().unwrap().forwarding = false;
+        self.osc_values.locked().forwarding = false;
         self.stop_rig();
         // Before the camera, which may close and take the mask's message with it, and the kit, whose toggle ends the hiding.
         self.restore_hide_self();
@@ -1578,8 +1592,8 @@ impl Controller {
     fn acquire_camera_stream(self: &Shared, owner: usize, vrchat: &[(String, OscValue)]) -> bool {
         // Several VRChats: only the target's camera may stream (they all name their sender VRCSender1).
         let shared_name = self.view().camera_open_said != Some(false) && self.quiet_other_streams();
-        let mut owners = self.camera_stream_owners.lock().unwrap();
-        let mut evidence=self.osc_values.lock().unwrap();
+        let mut owners = self.camera_stream_owners.locked();
+        let mut evidence=self.osc_values.locked();
         if self.received_camera_closed(&evidence) || self.view().camera_open_said==Some(false) { owners[owner]=false; drop(evidence); drop(owners); self.unquiet_unless_streaming(); return false; }
         owners[owner] = true;
         let value = |path: &str| vrchat.iter().find(|(p, _)| p == path).map(|(_, v)| v.clone());
@@ -1591,7 +1605,7 @@ impl Controller {
         if mode == STREAM_MODE && streaming && !shared_name {
             return true;
         }
-        self.camera_before.lock().unwrap().get_or_insert(CameraState { mode, streaming });
+        self.camera_before.locked().get_or_insert(CameraState { mode, streaming });
         if streaming && shared_name {
             // The target streamed already, under the name the others just left: it announces its own picture again.
             let _ = self.with_osc(|o| o.send(CAMERA_STREAMING, vec![rosc::OscType::Bool(false)]));
@@ -1607,8 +1621,8 @@ impl Controller {
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(400));
             // Unless the camera was put back meanwhile (the start failed).
-            let owners = ctl.camera_stream_owners.lock().unwrap();
-            if owners.iter().any(|on| *on) && ctl.view().camera_open_said != Some(false) && !ctl.received_camera_closed(&ctl.osc_values.lock().unwrap()) && ctl.camera_before.lock().unwrap().is_some() {
+            let owners = ctl.camera_stream_owners.locked();
+            if owners.iter().any(|on| *on) && ctl.view().camera_open_said != Some(false) && !ctl.received_camera_closed(&ctl.osc_values.locked()) && ctl.camera_before.locked().is_some() {
                 let _ = ctl.with_osc(|o| o.send(CAMERA_STREAMING, vec![rosc::OscType::Bool(true)]));
             }
         });
@@ -1619,7 +1633,7 @@ impl Controller {
     fn switch_kit_on(&self, vrchat: &[(String, OscValue)]) {
         let on = |name: &str| vrchat.iter().any(|(p, v)| p.strip_prefix(PARAMETERS_PREFIX) == Some(name) && v.truthy());
         let (record, depth) = (on(RECORD_PARAMETER), on(DEPTH_FRAMES_PARAMETER));
-        self.avatar_before.lock().unwrap().get_or_insert(AvatarToggles { depth });
+        self.avatar_before.locked().get_or_insert(AvatarToggles { depth });
         let _ = self.with_osc(|o| {
             if !record {
                 o.send(&format!("{PARAMETERS_PREFIX}{RECORD_PARAMETER}"), vec![rosc::OscType::Bool(true)])?;
@@ -1634,7 +1648,7 @@ impl Controller {
     /// The capture kit's toggles back (first forgotten, so their echo is the person's again): record off, as no recording
     /// runs any more, and depth frames as they were.
     fn restore_kit(&self) {
-        let Some(before) = self.avatar_before.lock().unwrap().take() else { return };
+        let Some(before) = self.avatar_before.locked().take() else { return };
         let _ = self.with_osc(|o| {
             o.send(&format!("{PARAMETERS_PREFIX}{RECORD_PARAMETER}"), vec![rosc::OscType::Bool(false)])?;
             o.send(&format!("{PARAMETERS_PREFIX}{DEPTH_FRAMES_PARAMETER}"), vec![rosc::OscType::Bool(before.depth)])
@@ -1644,8 +1658,8 @@ impl Controller {
     /// The record toggle changed in VRChat: start or stop, unless it is an avatar reload's reset of a toggle the app
     /// drives (then switch it back on).
     fn on_record_toggle(self: &Shared, on: bool) {
-        let driven = self.avatar_before.lock().unwrap().is_some();
-        let reloading = self.avatar_changed_at.lock().unwrap().is_some_and(|t| t.elapsed() < AVATAR_RELOAD_GRACE);
+        let driven = self.avatar_before.locked().is_some();
+        let reloading = self.avatar_changed_at.locked().is_some_and(|t| t.elapsed() < AVATAR_RELOAD_GRACE);
         if driven && !on && reloading && self.is_capturing() {
             self.switch_kit_on(&[]);
             return;
@@ -1660,22 +1674,22 @@ impl Controller {
     /// switched on again once it settled. One thread waits for that whatever the number of changes (a burst of them, or
     /// datagrams posing as VRChat's, starts no thread each), counting from the newest.
     fn on_avatar_changed(self: &Shared) {
-        *self.avatar_changed_at.lock().unwrap() = Some(Instant::now());
-        if self.avatar_before.lock().unwrap().is_none() || !self.is_capturing() || self.kit_rearm.swap(true, Ordering::AcqRel) {
+        *self.avatar_changed_at.locked() = Some(Instant::now());
+        if self.avatar_before.locked().is_none() || !self.is_capturing() || self.kit_rearm.swap(true, Ordering::AcqRel) {
             return;
         }
         let ctl = self.clone();
         let spawned = std::thread::Builder::new().name("kit-rearm".into()).spawn(move || {
             // The avatar's parameters take a moment to exist after the change message.
             loop {
-                let since = ctl.avatar_changed_at.lock().unwrap().map_or(KIT_SETTLE, |t| t.elapsed());
+                let since = ctl.avatar_changed_at.locked().map_or(KIT_SETTLE, |t| t.elapsed());
                 if since >= KIT_SETTLE {
                     break;
                 }
                 std::thread::sleep(KIT_SETTLE - since);
             }
             ctl.kit_rearm.store(false, Ordering::Release);
-            if ctl.avatar_before.lock().unwrap().is_some() && ctl.is_capturing() {
+            if ctl.avatar_before.locked().is_some() && ctl.is_capturing() {
                 ctl.switch_kit_on(&[]);
                 // The new avatar's rig rests at its hips until told to follow again.
                 ctl.rig_avatar_changed();
@@ -1694,22 +1708,22 @@ impl Controller {
 
     /// The other VRChats' Spout Stream back on, unless a recording or a code scan still streams here.
     fn unquiet_unless_streaming(&self) {
-        if !self.camera_stream_owners.lock().unwrap().iter().any(|on| *on) {
+        if !self.camera_stream_owners.locked().iter().any(|on| *on) {
             self.unquiet_other_streams();
         }
     }
 
     fn release_camera_stream(&self, owner: usize) {
-        let mut owners = self.camera_stream_owners.lock().unwrap();
+        let mut owners = self.camera_stream_owners.locked();
         owners[owner] = false;
         if owners.iter().any(|on| *on) { return; }
         self.unquiet_other_streams();
-        let Some(before) = self.camera_before.lock().unwrap().take() else { return };
+        let Some(before) = self.camera_before.locked().take() else { return };
         let _ = self.with_osc(|o| {
             o.send(CAMERA_STREAMING, vec![rosc::OscType::Bool(before.streaming)])?;
             // Closing the real camera wins over restoration. Writing a nonzero Mode while closed
             // changes its stored query value and would falsely certify the next live start.
-            if self.view().camera_open_said == Some(false) || self.received_camera_closed(&self.osc_values.lock().unwrap()) { return Ok(()); }
+            if self.view().camera_open_said == Some(false) || self.received_camera_closed(&self.osc_values.locked()) { return Ok(()); }
             self.camera_mode_command(before.mode);
             o.send(CAMERA_MODE, vec![rosc::OscType::Int(before.mode)])
         });
@@ -1718,13 +1732,13 @@ impl Controller {
     fn performance_spec(&self, settings: &Settings) -> PerformanceSpec {
         let p = &settings.performance;
         // The stored calibration's clock reading may come from before a restart: date it by its age instead.
-        let calibration = self.calibration.lock().unwrap().clone().map(|s| {
+        let calibration = self.calibration.locked().clone().map(|s| {
             let age_ns = unix_ms().saturating_sub(s.utc_ms) as i64 * 1_000_000;
             Calibration { time_ns: clock::now_ns() as i64 - age_ns, ..s.calibration }
         });
         PerformanceSpec {
             mic: p.record_mic.then(|| p.mic_device.clone()),
-            game_audio_pid: if p.record_game_audio { self.snapshot.lock().unwrap().vrchat.pid } else { None },
+            game_audio_pid: if p.record_game_audio { self.snapshot.locked().vrchat.pid } else { None },
             tracking_hz: p.record_tracking.then_some(p.tracking_rate_hz),
             calibration: p.record_tracking.then_some(calibration).flatten(),
         }
@@ -1734,7 +1748,7 @@ impl Controller {
     pub fn calibrated(self: &Shared, calibration: Calibration) {
         let stored = StoredCalibration { utc_ms: unix_ms(), calibration };
         let info = calibration_info(&stored);
-        *self.calibration.lock().unwrap() = Some(stored.clone());
+        *self.calibration.locked() = Some(stored.clone());
         self.update(|s| s.steamvr.calibration = Some(info.clone()));
         if self.is_capturing() {
             if let Err(e) = self.send(&WorkerCommand::Calibration { calibration: Box::new(stored.calibration.clone()) }) {
@@ -1770,7 +1784,7 @@ impl Controller {
 
     /// Reads again whether the avatar worn has the capture kit, for what offers 3D pictures. Published only when it changed.
     pub fn follow_worn_kit(self: &Shared) {
-        let epoch=self.kit_epoch.lock().unwrap().clone();
+        let epoch=self.kit_epoch.locked().clone();
         let kit = if self.view().vrchat.running { self.worn_avatar_has_kit() } else { None };
         self.apply_kit_observation(&epoch,kit);
         if self.view().camera_open_said.is_none() {
@@ -1799,17 +1813,17 @@ impl Controller {
     }
 
     fn invalidate_kit(&self, avatar: Option<String>) {
-        let mut epoch=self.kit_epoch.lock().unwrap();
+        let mut epoch=self.kit_epoch.locked();
         epoch.0=epoch.0.wrapping_add(1);
         epoch.1=avatar;
         self.update(|s| s.worn_kit=None);
     }
 
     fn apply_kit_observation(&self, observed: &(u64,Option<String>), kit: Option<bool>) -> bool {
-        let epoch=self.kit_epoch.lock().unwrap();
+        let epoch=self.kit_epoch.locked();
         if *epoch != *observed { return false; }
         if let Some(expected)=&epoch.1 {
-            if !self.osc_values.lock().unwrap().latest.get(AVATAR_CHANGE).is_some_and(|(v,_)| matches!(v.first(),Some(OscValue::Text(id)) if id==expected)) { return false; }
+            if !self.osc_values.locked().latest.get(AVATAR_CHANGE).is_some_and(|(v,_)| matches!(v.first(),Some(OscValue::Text(id)) if id==expected)) { return false; }
         }
         self.update_if(|s| {
             let changed=s.worn_kit!=kit;
@@ -1839,7 +1853,7 @@ impl Controller {
             changed
         });
         {
-            let mut since = self.headset_off_since.lock().unwrap();
+            let mut since = self.headset_off_since.locked();
             match in_use {
                 Some(false) => {
                     since.get_or_insert_with(Instant::now);
@@ -1858,7 +1872,7 @@ impl Controller {
 
     /// The headset has been off long enough for reconstructions held for VRChat to start ([`HEADSET_BREAK`]).
     fn headset_on_break(&self) -> bool {
-        self.headset_off_since.lock().unwrap().is_some_and(|t| t.elapsed() >= HEADSET_BREAK)
+        self.headset_off_since.locked().is_some_and(|t| t.elapsed() >= HEADSET_BREAK)
     }
 
     /// Current values from VRChat's OSCQuery service (empty when it is not running or not found). The request runs
@@ -1872,7 +1886,7 @@ impl Controller {
         if camera.iter().any(|(p, _)| p == CAMERA_MODE) {
             values.extend(camera);
         } else {
-            let osc = self.osc_values.lock().unwrap();
+            let osc = self.osc_values.locked();
             for path in [CAMERA_MODE, CAMERA_STREAMING] {
                 if let Some(value) = osc.latest.get(path).and_then(|(v, _)| v.first().cloned()) {
                     values.push((path.to_string(), value));
@@ -2011,7 +2025,7 @@ impl Controller {
             }
         }
         if !locomotion.is_empty() {
-            let mut subs = self.subscribers.lock().unwrap();
+            let mut subs = self.subscribers.locked();
             // Only the readers that show things (the overlay, a window): the tray's mailbox would only keep them.
             subs.retain(|m| !m.shows_notices() || m.post(ToClient::Locomotion { values: locomotion.clone() }));
         }
@@ -2042,7 +2056,7 @@ impl Controller {
             Some(OscValue::Int(mode)) => Some(*mode != 0),
             _ => None,
         });
-        let mut osc = self.osc_values.lock().unwrap();
+        let mut osc = self.osc_values.locked();
         let mode = messages.iter().rev().find(|(p,_)| p == CAMERA_MODE).and_then(|(_,v)| match v.first() { Some(OscValue::Int(m)) => Some(*m), _ => None });
         let echo = mode.is_some_and(|mode| osc.camera_command.is_some_and(|(written,_)| written == mode));
         if echo { eprintln!("camera Mode app echo ignored at {at_ns}: {mode:?}"); } // i18n: not shown (diagnostics)
@@ -2082,7 +2096,7 @@ impl Controller {
                 }
                 changed
             });
-            if !open { self.camera_scan.lock().unwrap().take(); self.release_camera_stream(1); }
+            if !open { self.camera_scan.locked().take(); self.release_camera_stream(1); }
         }
     }
 
@@ -2174,7 +2188,7 @@ impl Controller {
     /// A new query, never a value written by the app or a cached Mode from an earlier connection.
     fn require_live_camera(&self) -> anyhow::Result<()> {
         let open = self.camera_values().iter().any(|(p, v)| p == CAMERA_MODE && matches!(v, OscValue::Int(_)) && v.truthy());
-        let received = self.osc_values.lock().unwrap().camera_received == Some(true);
+        let received = self.osc_values.locked().camera_received == Some(true);
         let now = clock::now_ns();
         let seen = self.view().orbit.camera_panel_seen_ns.is_some_and(|at| at > 0 && at <= now && now-at < 2_000_000_000);
         anyhow::ensure!(open && self.view().camera_open_said == Some(true) && (received || seen), "{}", tr("Open VRChat's camera first"));
@@ -2182,7 +2196,7 @@ impl Controller {
     }
 
     fn camera_mode_command(&self, mode: i32) {
-        let mut osc=self.osc_values.lock().unwrap();
+        let mut osc=self.osc_values.locked();
         let now=clock::now_ns();
         osc.camera_command=Some((mode,now));
         osc.camera_commanded.insert(mode,now);
@@ -2207,7 +2221,7 @@ impl Controller {
         match of {
             StopOf::Person => self.stop_capture_now(),
             StopOf::Recording(number) => {
-                let _gate = self.capture_start_gate.lock().unwrap();
+                let _gate = self.capture_start_gate.locked();
                 if !self.owns_recording(number) {
                     return Ok(());
                 }
@@ -2220,14 +2234,14 @@ impl Controller {
     fn stop_capture_now(self: &Shared) -> anyhow::Result<()> {
         self.stop_generation.fetch_add(1, Ordering::AcqRel);
         // A start waiting for the last session to be saved is called off too.
-        self.pending_start.lock().unwrap().take();
+        self.pending_start.locked().take();
         if !self.is_capturing() {
             return Ok(());
         }
         self.update(|s| s.capture.state = CaptureState::Stopping);
-        self.stopping_since.lock().unwrap().get_or_insert_with(Instant::now);
+        self.stopping_since.locked().get_or_insert_with(Instant::now);
         let sent = {
-            let mut osc = self.osc_values.lock().unwrap();
+            let mut osc = self.osc_values.locked();
             self.flush_osc(&mut osc);
             osc.forwarding = false;
             self.send(&WorkerCommand::Stop)
@@ -2287,12 +2301,15 @@ impl Controller {
     /// slider's changes sent, and the echo would fight a radial still moving).
     fn apply_settings(self: &Shared, f: impl FnOnce(&mut Settings), echo: bool) {
         let (revision, settings) = {
-            let mut s = self.snapshot.lock().unwrap();
+            let mut s = self.snapshot.locked();
             let previous = s.settings.clone();
-            f(&mut s.settings);
-            if s.settings == previous {
+            // A copy: whole or not at all, should `f` panic halfway.
+            let mut next = previous.clone();
+            f(&mut next);
+            if next == previous {
                 return;
             }
+            s.settings = next;
             if previous.booster.level != s.settings.booster.level && s.settings.booster.level == orbiters_booster::Level::Off {
                 self.booster.cancel_work();
             }
@@ -2304,7 +2321,7 @@ impl Controller {
             if previous.development != s.settings.development {
                 use_environment(s.settings.development);
             }
-            self.settings_changes.lock().unwrap().waiting.push_back(SettingsChange { previous, settings: s.settings.clone(), echo });
+            self.settings_changes.locked().waiting.push_back(SettingsChange { previous, settings: s.settings.clone(), echo });
             (revision, s.settings.clone())
         };
         self.publish();
@@ -2318,12 +2335,12 @@ impl Controller {
         struct Acting<'a>(&'a Mutex<SettingsChanges>);
         impl Drop for Acting<'_> {
             fn drop(&mut self) {
-                self.0.lock().unwrap_or_else(|e| e.into_inner()).acting = false;
+                self.0.locked().acting = false;
             }
         }
         loop {
             let change = {
-                let mut changes = self.settings_changes.lock().unwrap();
+                let mut changes = self.settings_changes.locked();
                 if changes.acting {
                     return;
                 }
@@ -2387,7 +2404,7 @@ impl Controller {
     /// Hands the settings to the writing thread (started on first use). One writer, so saves never race; it keeps
     /// the newest of a burst (by `revision`, not by arrival) and writes it once nothing changed for [`SAVE_QUIET`].
     fn queue_save(self: &Shared, revision: u64, settings: Settings) {
-        let mut writer = self.settings_writer.lock().unwrap();
+        let mut writer = self.settings_writer.locked();
         match &*writer {
             SettingsWriter::Idle => {
                 let (tx, rx) = mpsc::channel::<(u64, Settings)>();
@@ -2450,7 +2467,7 @@ impl Controller {
     /// Writes the settings still waiting, and stops the writing thread (the app quits). The slot stays closed, held
     /// through the join: nothing writes beside the last flush, and what comes after it is written by `queue_save`.
     fn flush_settings(self: &Shared) {
-        let mut writer = self.settings_writer.lock().unwrap();
+        let mut writer = self.settings_writer.locked();
         if let SettingsWriter::Running(tx, thread) = std::mem::replace(&mut *writer, SettingsWriter::Closed) {
             drop(tx);
             let _ = thread.join();
@@ -2459,7 +2476,7 @@ impl Controller {
         // write may have failed: the newest applied settings are written here, tried a few times, and a failure is
         // said (verify2-controller). Revision and settings read together under the snapshot's lock, where both change.
         let (revision, settings) = {
-            let s = self.snapshot.lock().unwrap();
+            let s = self.snapshot.locked();
             (self.settings_revision.load(Ordering::SeqCst), (*s.settings).clone())
         };
         if revision <= self.settings_written.load(Ordering::SeqCst) {
@@ -2499,13 +2516,13 @@ impl Controller {
     }
 
     fn start_osc(self: &Shared) {
-        let _one = self.osc_starting.lock().unwrap();
+        let _one = self.osc_starting.locked();
         self.start_osc_with(true);
     }
 
     /// Runs `f` with the OSC service when it runs (tests point it at a stand-in VRChat).
     pub fn with_osc<R>(&self, f: impl FnOnce(&OscService) -> R) -> Option<R> {
-        self.osc.lock().unwrap().as_ref().map(f)
+        self.osc.locked().as_ref().map(f)
     }
 
     /// Makes VRChat find the OSC service again (the Reconnect button, or VRChat quiet for a while): without it VRChat
@@ -2518,7 +2535,7 @@ impl Controller {
     /// Starts OSC; without `advertise` nothing listens beyond the loopback interface (tests).
     pub fn start_osc_with(self: &Shared, advertise: bool) {
         // The service before goes outside the lock: stopping it waits for its receiving thread, which may be calling in.
-        let before = self.osc.lock().unwrap().take();
+        let before = self.osc.locked().take();
         drop(before);
         // No VRChat is asked any more over the service that went: a camera answer of it is no one's now.
         self.camera_route_changed();
@@ -2552,11 +2569,11 @@ impl Controller {
     fn start_osc_on(self: &Shared, network: Network, discovery: orbiters_core::osc::Discovery, ports: orbiters_core::osc::Ports) {
         let generation=self.osc_generation.fetch_add(1,Ordering::AcqRel)+1;
         self.camera_route_changed();
-        self.camera_scan.lock().unwrap().take();
+        self.camera_scan.locked().take();
         self.release_camera_stream(1);
         self.invalidate_kit(None);
         self.update(|s| { s.camera_tools.qr_generation+=1; s.camera_tools.qr=camera_tools::Qr::Off; s.camera_open_said = None; s.orbit.camera_panel_seen_ns = None; });
-        { let mut osc=self.osc_values.lock().unwrap(); osc.camera_received=None; osc.camera_closed_at=None; osc.camera_command=None; osc.camera_commanded.clear(); }
+        { let mut osc=self.osc_values.locked(); osc.camera_received=None; osc.camera_closed_at=None; osc.camera_command=None; osc.camera_commanded.clear(); }
         let parameter = RECORD_PARAMETER.to_string();
         let ctl = self.clone();
         let wanted = vec![parameter.clone()];
@@ -2572,7 +2589,7 @@ impl Controller {
                     service.lend(lent.query.map(|q| (std::net::SocketAddr::from(([127, 0, 0, 1], lent.osc_in)), q)));
                 }
                 let (port, adv) = (service.osc_port, service.advertising());
-                let replaced = self.osc.lock().unwrap().replace(service);
+                let replaced = self.osc.locked().replace(service);
                 drop(replaced);
                 self.update(|s| *s.osc = state::OscStatus { enabled: true, listening: true, advertising: adv, port: Some(port), ..Default::default() });
                 let ctl = self.clone();
@@ -2598,7 +2615,7 @@ impl Controller {
     }
 
     pub fn worker_log(&self) -> Vec<String> {
-        self.worker_log.lock().unwrap().iter().cloned().collect()
+        self.worker_log.locked().iter().cloned().collect()
     }
 
     /// Stops OSC and the workers. A running capture starts being saved first (its last OSC values with it), while
@@ -2608,7 +2625,7 @@ impl Controller {
     pub fn shutdown(self: &Shared) {
         self.osc_generation.fetch_add(1,Ordering::AcqRel);
         self.stop_bridge();
-        self.pending_start.lock().unwrap().take();
+        self.pending_start.locked().take();
         self.change_queue(VecDeque::clear);
         if let Err(e) = self.stop_capture_now() {
             eprintln!("stopping the capture: {e:#}");
@@ -2622,9 +2639,9 @@ impl Controller {
         self.stop_avatar_gun();
         self.put_vrchat_back();
         // Stopped outside the lock: stopping waits for the receiving thread.
-        let osc = self.osc.lock().unwrap().take();
+        let osc = self.osc.locked().take();
         drop(osc);
-        let worker = self.worker.lock().unwrap().take();
+        let worker = self.worker.locked().take();
         if let Some(worker) = worker {
             worker.quit();
         }
@@ -2632,11 +2649,11 @@ impl Controller {
         // limit it is killed: the file it was writing goes, whole or not at all.
         if self.pause_reconstruction() {
             let until = Instant::now() + QUIT_PAUSE_LIMIT;
-            while self.reconstruction.lock().unwrap().is_some() && Instant::now() < until {
+            while self.reconstruction.locked().is_some() && Instant::now() < until {
                 std::thread::sleep(Duration::from_millis(20));
             }
         }
-        *self.reconstruction.lock().unwrap() = None;
+        *self.reconstruction.locked() = None;
         self.flush_settings();
     }
 
@@ -2676,7 +2693,7 @@ impl Controller {
     pub(crate) fn reconstruction_waits_for(&self) -> &'static str {
         if self.is_capturing() {
             mark("after the capture")
-        } else if self.reconstruction.lock().unwrap().is_some() {
+        } else if self.reconstruction.locked().is_some() {
             mark("after the ones before it")
         } else {
             mark("once VRChat closes or the headset has been off a minute")
@@ -2693,7 +2710,7 @@ impl Controller {
         if self.booster.holds_reconstructions() && !self.headset_on_break() {
             return true;
         }
-        self.settings().reconstruct_while_playing == WhilePlaying::AfterVrchat && self.snapshot.lock().unwrap().vrchat.runs_here() && !self.headset_on_break()
+        self.settings().reconstruct_while_playing == WhilePlaying::AfterVrchat && self.snapshot.locked().vrchat.runs_here() && !self.headset_on_break()
     }
 
     /// The person's own VRChat runs on this Mac, through the engine (elsewhere its process is seen).
@@ -2705,14 +2722,14 @@ impl Controller {
     /// Whether VRChat runs on this very Mac, through the engine: what looks at the Mac now and then does so less often beside it
     /// (its CPU, its GPU and N4N0 share one budget of power and heat, docs/mac-performance.md).
     pub(crate) fn game_on_this_mac(&self) -> bool {
-        !orbiters_core::osc::VRCHAT_RUNS_HERE && matches!(self.snapshot.lock().unwrap().launcher.game, orbiters_core::launcher::Game::Running(_))
+        !orbiters_core::osc::VRCHAT_RUNS_HERE && matches!(self.snapshot.locked().launcher.game, orbiters_core::launcher::Game::Running(_))
     }
 
     /// VRChat started or closed. A run goes where the setting has it beside VRChat (pausing, and going on there) and those
     /// held for VRChat start once it closes.
     pub(crate) fn vrchat_changed(self: &Shared, running: bool) {
         // Preparing uploads in the background goes on beside VRChat only while SteamVR's frame timing paces it.
-        if running && !self.snapshot.lock().unwrap().steamvr.running {
+        if running && !self.snapshot.locked().steamvr.running {
             crate::upload_prep::pause();
         }
         self.follow_while_playing();
@@ -2725,8 +2742,8 @@ impl Controller {
     /// so it never stays on a GPU that is not its to use. Held for VRChat, it pauses until VRChat closes or the next
     /// break, whenever it started; on the wrong GPU, it goes on on the right one (the worker's state fits both).
     fn follow_while_playing(self: &Shared) {
-        let Some(integrated) = self.reconstruction.lock().unwrap().as_ref().filter(|r| !r.told).map(|r| r.integrated) else { return };
-        let playing_there = self.settings().reconstruct_while_playing == WhilePlaying::IntegratedGpu && self.snapshot.lock().unwrap().vrchat.running;
+        let Some(integrated) = self.reconstruction.locked().as_ref().filter(|r| !r.told).map(|r| r.integrated) else { return };
+        let playing_there = self.settings().reconstruct_while_playing == WhilePlaying::IntegratedGpu && self.snapshot.locked().vrchat.running;
         let says = if self.held_for_vrchat() {
             Some(tr("VRChat is running: the reconstruction is paused. It continues from where it was once VRChat closes or the headset has been off a minute."))
         } else if integrated && !playing_there {
@@ -2763,7 +2780,7 @@ impl Controller {
     /// this paused one (not one already pausing, or one whose end was told).
     pub(crate) fn pause_reconstruction(&self) -> bool {
         let dir = {
-            let mut guard = self.reconstruction.lock().unwrap();
+            let mut guard = self.reconstruction.locked();
             let Some(r) = guard.as_mut().filter(|r| !r.told) else { return false };
             r.told = true;
             r.pausing = Some(Instant::now());
@@ -2792,7 +2809,7 @@ impl Controller {
     /// A worker that was asked to pause and stays on the GPU is stuck: it goes, and its session goes on from its last
     /// checkpoint. Called by the watchers every second.
     fn check_pausing(&self) {
-        let mut guard = self.reconstruction.lock().unwrap();
+        let mut guard = self.reconstruction.locked();
         if let Some(r) = guard.as_mut().filter(|r| !r.freed && r.pausing.is_some_and(|t| pause_overdue(t.elapsed(), r.seen.map(|s| s.elapsed())))) {
             eprintln!("the reconstruction did not leave the GPU in time after it was asked to pause (seen: {}): it was stopped", r.seen.is_some());
             r.freed = true;
@@ -2853,8 +2870,8 @@ impl Controller {
         if self.is_capturing() {
             anyhow::bail!("{}", tr("Finish the capture first: reconstruction takes the whole GPU."));
         }
-        let integrated = self.settings().reconstruct_while_playing == WhilePlaying::IntegratedGpu && self.snapshot.lock().unwrap().vrchat.runs_here();
-        let mut guard = self.reconstruction.lock().unwrap();
+        let integrated = self.settings().reconstruct_while_playing == WhilePlaying::IntegratedGpu && self.snapshot.locked().vrchat.runs_here();
+        let mut guard = self.reconstruction.locked();
         if guard.is_some() {
             anyhow::bail!("{}", tr("A reconstruction is already running."));
         }
@@ -2867,7 +2884,7 @@ impl Controller {
         let on_log = {
             let ctl = self.clone();
             move |line: String| {
-                let mut log = ctl.worker_log.lock().unwrap();
+                let mut log = ctl.worker_log.locked();
                 log.push_back(format!("reconstruct: {line}"));
                 while log.len() > 400 {
                     log.pop_front();
@@ -2901,7 +2918,7 @@ impl Controller {
 
     /// The session being reconstructed.
     pub(crate) fn running_reconstruction(&self) -> Option<PathBuf> {
-        self.reconstruction.lock().unwrap().as_ref().map(|r| r.dir.clone())
+        self.reconstruction.locked().as_ref().map(|r| r.dir.clone())
     }
 
     /// Reconstructs `dir` after the sessions already waiting (now when nothing runs and nothing records). Whether it
@@ -2942,7 +2959,7 @@ impl Controller {
 
     /// Changes the waiting list and shows it.
     fn change_queue<R>(&self, f: impl FnOnce(&mut VecDeque<PathBuf>) -> R) -> R {
-        let mut queue = self.reconstruct_queue.lock().unwrap();
+        let mut queue = self.reconstruct_queue.locked();
         let r = f(&mut queue);
         let waiting: Vec<PathBuf> = queue.iter().cloned().collect();
         drop(queue);
@@ -2955,7 +2972,7 @@ impl Controller {
     /// Starts the first waiting session when nothing runs, nothing records and VRChat does not hold them.
     pub(crate) fn next_reconstruction(self: &Shared) {
         loop {
-            if self.quitting.load(Ordering::Relaxed) || self.is_capturing() || self.reconstruction.lock().unwrap().is_some() || self.held_for_vrchat() {
+            if self.quitting.load(Ordering::Relaxed) || self.is_capturing() || self.reconstruction.locked().is_some() || self.held_for_vrchat() {
                 return;
             }
             let Some(dir) = self.change_queue(VecDeque::pop_front) else {
@@ -2977,7 +2994,7 @@ impl Controller {
     /// done goes (stopping still means stopping). Returns whether there was one.
     pub fn stop_reconstruction(self: &Shared) -> bool {
         {
-            let mut guard = self.reconstruction.lock().unwrap();
+            let mut guard = self.reconstruction.locked();
             if let Some(r) = guard.as_mut() {
                 r.told = true;
                 r.stopped = true;
@@ -2989,7 +3006,7 @@ impl Controller {
                 return true;
             }
         }
-        let paused = self.snapshot.lock().unwrap().reconstruction.as_ref().filter(|j| j.paused).map(|j| j.session_dir.clone());
+        let paused = self.snapshot.locked().reconstruction.as_ref().filter(|j| j.paused).map(|j| j.session_dir.clone());
         let Some(dir) = paused else { return false };
         self.unqueue_reconstruction(&dir);
         self.next_reconstruction();
@@ -3030,18 +3047,18 @@ impl Controller {
             }),
             // It saw the pause: it has longer (bounded) to read back and give the GPU back.
             ReconstructEvent::PauseSeen => {
-                if let Some(r) = self.reconstruction.lock().unwrap().as_mut() {
+                if let Some(r) = self.reconstruction.locked().as_mut() {
                     r.seen = Some(Instant::now());
                 }
             }
             // Off the GPU; only its file is left, however long the disk takes beside a capture's frames.
             ReconstructEvent::Pausing => {
-                if let Some(r) = self.reconstruction.lock().unwrap().as_mut() {
+                if let Some(r) = self.reconstruction.locked().as_mut() {
                     r.freed = true;
                 }
             }
             ReconstructEvent::Paused { kept, message } => {
-                if let Some(r) = self.reconstruction.lock().unwrap().as_mut() {
+                if let Some(r) = self.reconstruction.locked().as_mut() {
                     r.freed = true;
                 }
                 if !kept {
@@ -3090,8 +3107,8 @@ impl Controller {
                 self.bump_library();
             }
             ReconstructEvent::Error { message } => {
-                if let Some(session) = self.snapshot.lock().unwrap().reconstruction.as_ref().map(|job| job.session_dir.clone()) {
-                    self.reconstruction_failures.lock().unwrap().insert(session, message.clone());
+                if let Some(session) = self.snapshot.locked().reconstruction.as_ref().map(|job| job.session_dir.clone()) {
+                    self.reconstruction_failures.locked().insert(session, message.clone());
                 }
                 self.mark_reconstruction_over();
                 self.notify(NoticeKind::Error, tr!("Reconstruction failed: {message}", message = message));
@@ -3109,7 +3126,7 @@ impl Controller {
             return;
         }
         let (vrchat, steamvr) = {
-            let s = self.snapshot.lock().unwrap();
+            let s = self.snapshot.locked();
             (s.vrchat.runs_here(), s.steamvr.running)
         };
         if vrchat && !steamvr {
@@ -3121,7 +3138,7 @@ impl Controller {
         let started = crate::upload_prep::start_next(
             integrated,
             move |line| {
-                let mut log = log.worker_log.lock().unwrap();
+                let mut log = log.worker_log.locked();
                 log.push_back(format!("prepare upload: {line}")); // i18n: not shown
                 while log.len() > 400 {
                     log.pop_front();
@@ -3136,7 +3153,7 @@ impl Controller {
 
     /// It finished or failed, also if a pause was asked too late for it: nothing of it waits any more.
     fn mark_reconstruction_over(&self) {
-        let mut guard = self.reconstruction.lock().unwrap();
+        let mut guard = self.reconstruction.locked();
         if let Some(r) = guard.as_mut() {
             r.told = true;
             r.pausing = None;
@@ -3146,7 +3163,7 @@ impl Controller {
     }
 
     fn on_reconstruct_exit(self: &Shared) {
-        let ended = self.reconstruction.lock().unwrap().take();
+        let ended = self.reconstruction.locked().take();
         let mut keep_on_show = false;
         if let Some(r) = ended {
             if !r.told {
@@ -3346,7 +3363,7 @@ fn refresh_storage(ctl: &Shared) {
     // The session being written counts through its own stats (the Stats handler adds them, `Stopped` its final
     // size): its folder is left out here, or it would count twice and stop recordings early.
     let current = {
-        let s = ctl.snapshot.lock().unwrap();
+        let s = ctl.snapshot.locked();
         (s.capture.state != CaptureState::Idle).then(|| s.capture.session_dir.clone()).flatten()
     };
     let sessions: Vec<_> = sessions.into_iter().filter(|s| current.as_ref() != Some(&s.dir)).collect();
@@ -3596,15 +3613,15 @@ fn spawn_watchers(ctl: Shared) {
                 // A world joined: the avatar's default state goes back once it loaded there.
                 ctl.n4n0.states_log(&events, log.live());
                 let (state, split_session) = {
-                    let s = ctl.snapshot.lock().unwrap();
+                    let s = ctl.snapshot.locked();
                     (s.capture.state, s.settings.split_on_world_change)
                 };
                 let paused = state == CaptureState::Paused;
                 if split.take(state == CaptureState::Recording || paused, Instant::now()) {
                     if split_session {
-                        let source = ctl.last_source.lock().unwrap().clone();
+                        let source = ctl.last_source.locked().clone();
                         if let Some(source) = source {
-                            let from_osc = ctl.snapshot.lock().unwrap().capture.from_osc;
+                            let from_osc = ctl.snapshot.locked().capture.from_osc;
                             match ctl.start_segment(source, false, from_osc, ctl.stop_generation.load(Ordering::Acquire), true) {
                                 Ok(()) => {
                                     // A paused recording stays paused in the new world: its Pause follows the Start.
@@ -3645,13 +3662,13 @@ fn spawn_watchers(ctl: Shared) {
 
                 // OSC: the last values of a quiet second reach the worker, and the status follows VRChat.
                 {
-                    let mut osc = ctl.osc_values.lock().unwrap();
+                    let mut osc = ctl.osc_values.locked();
                     if osc.forwarding {
                         ctl.flush_osc(&mut osc);
                     }
                     let values = osc.latest.len();
                     drop(osc);
-                    let (found, received) = ctl.osc.lock().unwrap().as_ref().map_or((false, None), |o| (o.vrchat_query().is_some(), o.last_received_ns()));
+                    let (found, received) = ctl.osc.locked().as_ref().map_or((false, None), |o| (o.vrchat_query().is_some(), o.last_received_ns()));
                     let quiet = received.map_or(u64::MAX, |t| orbiters_core::clock::now_ns().saturating_sub(t));
                     let receiving = quiet < OSC_QUIET.as_nanos() as u64;
                     ctl.update_if(|s| {
@@ -3698,7 +3715,7 @@ fn spawn_watchers(ctl: Shared) {
                     }
                 }
                 // How often the state was published, once a minute (this loop turns once a second, and a little more).
-                let readers = ctl.subscribers.lock().unwrap().len();
+                let readers = ctl.subscribers.locked().len();
                 if let Some(line) = rate.second(ctl.publishes(), readers) {
                     publish_log(&line);
                 }
@@ -4694,6 +4711,42 @@ mod tests {
         assert!(received(&vrchat, Duration::from_millis(200)).is_empty(), "VRChat's camera and kit untouched");
         ctl.shutdown();
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// XCT-31: a thread that panics in a change of the state takes nobody with it: every other goes on changing it and
+    /// publishing. (Before, the lock it held was poisoned, and each one that came after panicked in turn.)
+    #[test]
+    fn a_panic_under_the_snapshot_does_not_stop_the_service() {
+        let ctl = Controller::new(Settings::default());
+        let c = ctl.clone();
+        let panicked = std::thread::spawn(move || {
+            c.update(|s| {
+                s.n4n0.photo_countdown = Some(9);
+                s.capture.error = Some("half a change".into());
+                panic!("in a change of the state, on purpose");
+            })
+        });
+        assert!(panicked.join().is_err());
+        for n in [3, 2, 1] {
+            let c = ctl.clone();
+            std::thread::spawn(move || c.update(|s| s.n4n0.photo_countdown = Some(n))).join().expect("the next change is made");
+            assert_eq!(ctl.view().n4n0.photo_countdown, Some(n), "and published");
+            assert!(ctl.view().capture.error.is_none(), "the panicking update was discarded");
+        }
+        // The settings are changed whole or not at all.
+        let before = ctl.settings();
+        let c = ctl.clone();
+        let panicked = std::thread::spawn(move || {
+            c.update_settings(|s| {
+                s.storage_limit_gb = 1.0;
+                panic!("in a change of the settings, on purpose");
+            })
+        });
+        assert!(panicked.join().is_err());
+        assert_eq!(ctl.settings(), before, "nothing of half a change");
+        ctl.update_settings(|s| s.storage_limit_gb = 2.0);
+        assert_eq!(ctl.view().settings.storage_limit_gb, 2.0);
+        ctl.shutdown();
     }
 
     #[test]

@@ -15,6 +15,7 @@
 //! whether it was made at all: a reading that failed is never taken for one that shows no frame. What it finds is one
 //! decision per session ([`publish`], [`of`]), which Home (the restart it offers), the VRChat bridge (`renderer_lost`) and
 //! the incident capture all use.
+use orbiters_core::locks::*;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -224,7 +225,7 @@ static NOW: Mutex<Option<(String, Picture, Instant)>> = Mutex::new(None);
 
 /// What the follower saw of session `session` (`None`: no session runs).
 pub(crate) fn publish(seen: Option<(String, Picture)>) {
-    *NOW.lock().unwrap() = seen.map(|(session, picture)| (session, picture, Instant::now()));
+    *NOW.locked() = seen.map(|(session, picture)| (session, picture, Instant::now()));
 }
 
 fn fresh(seen: &Option<(String, Picture, Instant)>, now: Instant) -> Option<(&str, Picture)> {
@@ -235,12 +236,12 @@ fn fresh(seen: &Option<(String, Picture, Instant)>, now: Instant) -> Option<(&st
 /// The picture of session `session`, the one decision Home, the bridge and the incident capture share: not observable
 /// when it is not the session followed, or nothing was seen of it lately.
 pub(crate) fn of(session: &str) -> Picture {
-    fresh(&NOW.lock().unwrap(), Instant::now()).filter(|(s, _)| *s == session).map_or(Picture::Unobservable, |(_, picture)| picture)
+    fresh(&NOW.locked(), Instant::now()).filter(|(s, _)| *s == session).map_or(Picture::Unobservable, |(_, picture)| picture)
 }
 
 /// The session whose picture is lost (confirmed), if the session running now is one.
 pub(crate) fn lost() -> Option<String> {
-    fresh(&NOW.lock().unwrap(), Instant::now()).filter(|(_, picture)| *picture == Picture::Lost).map(|(session, _)| session.to_owned())
+    fresh(&NOW.locked(), Instant::now()).filter(|(_, picture)| *picture == Picture::Lost).map(|(session, _)| session.to_owned())
 }
 
 /// Held by a test that publishes: what is published is one for the whole process.

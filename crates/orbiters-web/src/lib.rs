@@ -80,6 +80,15 @@ impl Shared {
         }
     }
 }
+/// The page's state if nobody has it now, also after a thread panicked with it.
+fn free(shared: &Mutex<Shared>) -> Option<std::sync::MutexGuard<'_, Shared>> {
+    match shared.try_lock() {
+        Ok(held) => Some(held),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
+
 /// All methods are nonblocking: bounded command mailbox and a latest-frame slot.
 /// `poll` returns None on brief contention; retain the previous snapshot then.
 pub struct WebPage {
@@ -106,7 +115,7 @@ impl WebPage {
         let closing = closed.clone();
         std::thread::Builder::new().name("camera-web".into()).spawn(move || {
             if let Err(e) = engine::run(width, height, rx, s.clone(), closing, loopback) {
-                let mut s = s.lock().unwrap();
+                let mut s = s.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 s.note(format!("engine stopped: {e:#}")); // i18n: not shown (a log's line)
                 s.state.load = Load::Failed(display_text(&format!("{e:#}"), 1024));
             }
@@ -135,7 +144,7 @@ impl WebPage {
     }
     /// `(state, latest frame, changed)`. Upload only when changed is true.
     pub fn poll(&mut self) -> Option<(State, Option<Frame>, bool)> {
-        let s = self.shared.try_lock().ok()?;
+        let s = free(&self.shared)?;
         let seq = s.frame.as_ref().map_or(0, |f| f.sequence);
         let changed = seq != self.seen;
         self.seen = seq;
@@ -144,11 +153,11 @@ impl WebPage {
     /// Whether the engine is up and a navigation starts at once (started ahead of a link: Request 18). False while it
     /// starts, and once it failed or closed.
     pub fn ready(&self) -> bool {
-        self.shared.try_lock().is_ok_and(|s| s.ready && !matches!(s.state.load, Load::Failed(_) | Load::Closed))
+        free(&self.shared).is_some_and(|s| s.ready && !matches!(s.state.load, Load::Failed(_) | Load::Closed))
     }
     /// What the engine noted since the last call (when it started, loaded, first drew; what failed), for a log.
     pub fn notes(&self) -> Vec<String> {
-        self.shared.try_lock().map(|mut s| std::mem::take(&mut s.notes)).unwrap_or_default()
+        free(&self.shared).map(|mut s| std::mem::take(&mut s.notes)).unwrap_or_default()
     }
     /// Signals shutdown without joining on the overlay thread. Poll until Closed for cleanup completion.
     pub fn close(&self) {

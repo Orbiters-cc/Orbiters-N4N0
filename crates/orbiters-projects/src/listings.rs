@@ -1,11 +1,12 @@
 //! The repositories' listings as they were last downloaded, read once for each version of them (PRJ-20): each look at a project's
 //! packages read every listing three or four times, twice only to learn that it is one. What is read is kept while a project is shown
 //! ([`hold`]) and let go of after.
+use orbiters_core::locks::*;
 use crate::vpm::{Listed, Package};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 
 /// What tells one version of a file from another: its length and when it was written. `None`: it is not there.
@@ -16,7 +17,7 @@ pub(crate) fn stamp(path: &Path) -> Stamp {
 }
 
 fn lock<T>(of: &Mutex<T>) -> MutexGuard<'_, T> {
-    of.lock().unwrap_or_else(PoisonError::into_inner)
+    of.locked()
 }
 
 /// Whether each listing looked at is one ([`crate::vpm::unusable_cache`]), by its stamp.

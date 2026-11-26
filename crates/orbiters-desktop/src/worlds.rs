@@ -8,6 +8,7 @@ pub mod at_once;
 mod picture_cache;
 pub mod profile_pictures;
 
+use orbiters_core::locks::*;
 use egui::{ColorImage, TextureHandle, TextureOptions};
 use orbiters_contracts::qoi;
 use orbiters_core::account::{Api, Server};
@@ -33,7 +34,7 @@ pub fn sessions(root: &Path) -> Vec<SessionSummary> {
 /// a time, so neither saves over what the other just added.
 fn shot_index_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
-    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    LOCK.locked()
 }
 
 /// A world with what this computer has of it.
@@ -269,7 +270,7 @@ static PICTURE_WAKE: Mutex<Vec<egui::Context>> = Mutex::new(Vec::new());
 /// Has the folder scan ask `ctx` for a frame whenever [`picture_revision`] changes. Nothing told a page that the scan
 /// had found pictures, so Photos & captures drew itself ten times a second to look.
 pub fn wake_on_pictures(ctx: &egui::Context) {
-    let mut woken = PICTURE_WAKE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut woken = PICTURE_WAKE.locked();
     if !woken.contains(ctx) {
         woken.push(ctx.clone());
     }
@@ -277,20 +278,20 @@ pub fn wake_on_pictures(ctx: &egui::Context) {
 
 /// What the scan found so far, for the pages: the index, a new revision, and a frame to show it.
 fn publish_pictures(index: &visited::ShotIndex) {
-    *LIVE_PICTURES.lock().unwrap_or_else(|e| e.into_inner()) = Some(index.clone());
+    *LIVE_PICTURES.locked() = Some(index.clone());
     pictures_changed();
 }
 
 /// A new revision of the pictures, and a frame for the pages that show them.
 fn pictures_changed() {
     PICTURE_REVISION.fetch_add(1, std::sync::atomic::Ordering::Release);
-    for ctx in &*PICTURE_WAKE.lock().unwrap_or_else(|e| e.into_inner()) {
+    for ctx in &*PICTURE_WAKE.locked() {
         orbiters_ui::anim::request_frame(ctx);
     }
 }
 
 fn picture_index(file: &Path, dirs: Vec<PathBuf>) -> visited::ShotIndex {
-    let index = LIVE_PICTURES.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    let index = LIVE_PICTURES.locked().clone()
         .unwrap_or_else(|| visited::ShotIndex::load(file));
     picture_cache::set_index(&index);
     scan_pictures(file, dirs);
@@ -505,7 +506,7 @@ impl Infos {
                             Err(_) => cached.and_then(|c| c.page).map_or(Info::Unknown, |p| Info::Listed(Box::new(p))),
                         }
                     };
-                    k.lock().unwrap()[env_index(server)].insert(id, info);
+                    k.locked()[env_index(server)].insert(id, info);
                     ctx.request_repaint();
                     if !fresh {
                         // Gentle on Orbiters (and on VRChat behind it).
@@ -531,17 +532,17 @@ impl Infos {
                 keep.then(|| std::fs::read(file).ok().and_then(|b| serde_json::from_slice::<CachedInfo>(&b).ok())).flatten()?.page
             });
             if let Some(Some(page)) = kept {
-                self.known.lock().unwrap()[e].entry(id.to_string()).or_insert_with(|| Info::Listed(Box::new(page)));
+                self.known.locked()[e].entry(id.to_string()).or_insert_with(|| Info::Listed(Box::new(page)));
             }
             note_outbound(id);
             let _ = self.tx.send((server, id.to_string()));
         }
-        self.known.lock().unwrap()[e].get(id).cloned()
+        self.known.locked()[e].get(id).cloned()
     }
 
     /// The world's page when it was fetched already; asks for nothing.
     pub fn known(&self, id: &str) -> Option<Info> {
-        self.known.lock().unwrap()[env_index(Server::current())].get(id).cloned()
+        self.known.locked()[env_index(Server::current())].get(id).cloned()
     }
 
     /// Fetches it again (after sharing something there).
@@ -704,12 +705,12 @@ impl Pictures {
                     loop {
                         let next = {
                             let (lock, ready) = &*queue;
-                            let mut q = lock.lock().unwrap();
+                            let mut q = lock.locked();
                             while q.is_empty() {
                                 if stopped.load(std::sync::atomic::Ordering::Acquire) {
                                     return;
                                 }
-                                q = ready.wait(q).unwrap();
+                                q = ready.wait_locked(q);
                             }
                             if stopped.load(std::sync::atomic::Ordering::Acquire) {
                                 return;
@@ -723,13 +724,13 @@ impl Pictures {
                             if let Picture::Profile { scope, url, user } = &picture {
                                 // Kept, or VRCX's or VRCNext's copy: now. Else asked of VRChat; the answer comes later.
                                 let deliver = |image: Option<ColorImage>, interim: bool| {
-                                    done.lock().unwrap_or_else(|e| e.into_inner()).push((picture.clone(), Ok(image), interim));
+                                    done.locked().push((picture.clone(), Ok(image), interim));
                                     ctx.request_repaint();
                                 };
                                 let reply: profile_pictures::Reply = {
                                     let (done, ctx, picture) = (done.clone(), ctx.clone(), picture.clone());
                                     Box::new(move |image| {
-                                        done.lock().unwrap_or_else(|e| e.into_inner()).push((picture, Ok(image), false));
+                                        done.locked().push((picture, Ok(image), false));
                                         ctx.request_repaint();
                                     })
                                 };
@@ -756,7 +757,7 @@ impl Pictures {
                             Ok(None) => continue,
                             Err(()) => Err(()),
                         };
-                        done.lock().unwrap_or_else(|e| e.into_inner()).push((picture, image, false));
+                        done.locked().push((picture, image, false));
                         ctx.request_repaint();
                     }
                 })
@@ -781,7 +782,7 @@ impl Pictures {
         if now != self.frame {
             (self.frame_before, self.frame) = (self.frame, now);
         }
-        for (p, image, interim) in std::mem::take(&mut *self.done.lock().unwrap_or_else(|e| e.into_inner())) {
+        for (p, image, interim) in std::mem::take(&mut *self.done.locked()) {
             // One no longer wanted (scrolled past while it was decoded) is dropped.
             let Some(kept) = self.slots.get_mut(&p) else { continue };
             if interim {
@@ -823,7 +824,7 @@ impl Pictures {
                         if now - since >= wait {
                             kept.slot = Slot::Loading { tries };
                             let (lock, ready) = &*self.queue;
-                            lock.lock().unwrap_or_else(|e| e.into_inner()).push(picture.clone());
+                            lock.locked().push(picture.clone());
                             ready.notify_one();
                         } else {
                             self.wake.request_repaint_after(std::time::Duration::from_secs_f64(since + wait - now));
@@ -833,7 +834,7 @@ impl Pictures {
                     Slot::Loading { .. } => {
                         // (Not in the queue: a loader has it, or VRChat is being asked for it.)
                         let (lock, _) = &*self.queue;
-                        let mut q = lock.lock().unwrap();
+                        let mut q = lock.locked();
                         if let Some(i) = q.iter().position(|p| p == picture) {
                             let p = q.remove(i);
                             q.push(p);
@@ -868,7 +869,7 @@ impl Pictures {
                 self.start();
                 self.slots.insert(picture.clone(), Kept { slot: Slot::Loading { tries: 0 }, used: now, interim: interim.clone() });
                 let (lock, ready) = &*self.queue;
-                lock.lock().unwrap().push(picture.clone());
+                lock.locked().push(picture.clone());
                 ready.notify_one();
                 interim
             }
@@ -931,7 +932,7 @@ impl Pictures {
         {
             let (lock, _) = &*self.queue;
             let slots = &self.slots;
-            lock.lock().unwrap().retain(|p| slots.get(p).is_some_and(|k| !stale(k)));
+            lock.locked().retain(|p| slots.get(p).is_some_and(|k| !stale(k)));
         }
         self.slots.retain(|_, k| !stale(k));
         let bytes = |k: &Kept| {
@@ -967,7 +968,7 @@ impl Pictures {
 impl Drop for Pictures {
     fn drop(&mut self) {
         let (lock, ready) = &*self.queue;
-        let mut queue = lock.lock().unwrap();
+        let mut queue = lock.locked();
         queue.clear();
         self.stopped.store(true, std::sync::atomic::Ordering::Release);
         ready.notify_all();

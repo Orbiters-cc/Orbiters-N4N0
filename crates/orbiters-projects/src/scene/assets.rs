@@ -11,6 +11,7 @@
 //! needed, on several threads. The GUIDs read are kept in the app's cache with each `.meta` file's modification time
 //! (never in the project), so the next index only lists the folders and reads the metas that changed.
 
+use orbiters_core::locks::*;
 use super::Limits;
 use std::collections::HashMap;
 use std::io::Read as _;
@@ -60,7 +61,7 @@ impl Assets {
 
     /// The file a GUID names.
     pub fn path(&self, guid: &str) -> Option<PathBuf> {
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.state.locked();
         if let Some(p) = s.inserted.get(guid) {
             return Some(p.clone());
         }
@@ -85,7 +86,7 @@ impl Assets {
     }
 
     pub fn len(&self) -> usize {
-        let s = self.state.lock().unwrap();
+        let s = self.state.locked();
         self.library.len().max(s.scanned.len()) + s.inserted.len()
     }
 
@@ -95,7 +96,7 @@ impl Assets {
 
     /// The project's files named `name` (any case), nearest to `near` first (the same folder, then up the tree).
     pub fn named(&self, name: &str, near: Option<&Path>) -> Vec<PathBuf> {
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.state.locked();
         if s.names.is_none() {
             // Within the build's limits: a folder linked into Assets can lead to a whole disk.
             let mut names: HashMap<String, Vec<PathBuf>> = HashMap::new();
@@ -244,7 +245,7 @@ fn scan(project: &Path, cache: Option<&Path>, phase: u8, limits: &Limits, read: 
                 if k.is_multiple_of(64) && limits.check("").is_err() {
                     break;
                 }
-                *guids[i].lock().unwrap() = read_meta_guid(&metas[i].0);
+                *guids[i].locked() = read_meta_guid(&metas[i].0);
                 read.fetch_add(1, Ordering::Relaxed);
             });
         }

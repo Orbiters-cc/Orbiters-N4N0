@@ -31,6 +31,7 @@ pub mod ui;
 pub mod walk;
 pub mod worlds;
 
+use orbiters_core::locks::*;
 use crate::backend::{Ctl, Remote};
 use crate::ipc::{Client, Endpoint, N4n0Command, Role};
 use anyhow::Context as _;
@@ -905,7 +906,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     let boost = booster::Host::new(&steamvr);
     let mut t = Teardown { steamvr: &steamvr, overlay: &overlay, backend: &backend, main, state, walk, world, menu, coverage, floating, orbit, booster: boost, translate: translate::TranslateHost::default(), steamvr_gone: false };
     // Orbiters' translation service is reached through the desktop service, which holds the account's credential.
-    *translate::REMOTE.lock().unwrap_or_else(|e| e.into_inner()) = Some({
+    *translate::REMOTE.locked() = Some({
         let backend = backend.clone();
         Arc::new(move |batch: &orbiters_translate::provider::Batch| backend.translate(batch.clone()).map_err(Into::into))
     });

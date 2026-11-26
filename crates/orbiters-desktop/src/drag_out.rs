@@ -9,6 +9,7 @@
 //! Windows' modal drag loop after that frame is on screen. The window does not repaint until the drop (winit keeps its
 //! events for later). Windows took the mouse button's release, so egui is told about it afterwards, and where the
 //! pointer is now.
+use orbiters_core::locks::*;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -40,12 +41,12 @@ static LAST: Mutex<Option<Outcome>> = Mutex::new(None);
 
 /// Asks for a drag of these files, run before the next frame.
 pub fn start(drag: Drag) {
-    *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some(drag);
+    *PENDING.locked() = Some(drag);
 }
 
 /// How the last drag ended, once.
 pub fn take_outcome() -> Option<Outcome> {
-    LAST.lock().unwrap_or_else(|e| e.into_inner()).take()
+    LAST.locked().take()
 }
 
 /// Puts these files on the clipboard as Explorer's Copy does (the same shell data object as a drag): pasted in a
@@ -76,17 +77,17 @@ pub fn run_pending(ctx: &egui::Context, raw: &mut egui::RawInput) {
     // went to it, and the frames in between see the cards as lifted.
     #[cfg(target_os = "macos")]
     {
-        if let Some(drag) = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        if let Some(drag) = PENDING.locked().take() {
             if let Err(e) = mac::drag(&drag, ctx.clone()) {
                 eprintln!("the drag could not start: {e}");
-                *ENDED.lock().unwrap_or_else(|e| e.into_inner()) = Some((Outcome::Failed, None));
+                *ENDED.locked() = Some((Outcome::Failed, None));
             }
         }
     }
     #[cfg(target_os = "macos")]
-    let Some((outcome, inside)) = ENDED.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+    let Some((outcome, inside)) = ENDED.locked().take() else { return };
     #[cfg(not(target_os = "macos"))]
-    let Some(drag) = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+    let Some(drag) = PENDING.locked().take() else { return };
     #[cfg(windows)]
     let (outcome, inside) = win::drag(&drag, ctx.pixels_per_point());
     #[cfg(not(any(windows, target_os = "macos")))]
@@ -100,7 +101,7 @@ pub fn run_pending(ctx: &egui::Context, raw: &mut egui::RawInput) {
         Some(pos) => raw.events.push(egui::Event::PointerMoved(pos)),
         None => raw.events.push(egui::Event::PointerGone),
     }
-    *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
+    *LAST.locked() = Some(outcome);
     ctx.request_repaint();
 }
 
@@ -108,6 +109,7 @@ pub fn run_pending(ctx: &egui::Context, raw: &mut egui::RawInput) {
 /// copy only, with the picture the page made under the cursor.
 #[cfg(target_os = "macos")]
 mod mac {
+    use orbiters_core::locks::*;
     use super::{Drag, Image, Outcome, ENDED};
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
@@ -144,7 +146,7 @@ mod mac {
             #[unsafe(method(draggingSession:endedAtPoint:operation:))]
             fn ended(&self, _: &NSDraggingSession, _: NSPoint, operation: NSDragOperation) {
                 let outcome = if operation.is_empty() { Outcome::Cancelled } else { Outcome::Copied };
-                *ENDED.lock().unwrap_or_else(|e| e.into_inner()) = Some((outcome, None));
+                *ENDED.locked() = Some((outcome, None));
                 if let Some(ctx) = self.ivars().ctx.get() {
                     ctx.request_repaint();
                 }

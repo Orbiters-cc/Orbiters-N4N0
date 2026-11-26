@@ -1,3 +1,4 @@
+use orbiters_core::locks::*;
 use orbiters_core::account::{self, Api, Server};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -83,7 +84,7 @@ fn public_listings(server: Server) -> Vec<Listing> {
     use std::sync::Mutex;
     // One look at a time, so a page asking for many packages fetches the directory once.
     static ONE: Mutex<()> = Mutex::new(());
-    let _one = ONE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _one = ONE.locked();
     let path = crate::icons::cache_dir().join(match server {
         Server::Production => "orbiters-listings.json",
         Server::Development => "orbiters-listings-development.json",

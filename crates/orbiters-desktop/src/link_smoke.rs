@@ -20,6 +20,7 @@
 //! It refuses to start while VRChat or SteamVR runs: the window is a GPU program beside the game, and the panels'
 //! process would find the game's window. The overlay in the headset needs SteamVR and is not part of this.
 
+use orbiters_core::locks::*;
 use crate::controller::Controller;
 use crate::ipc::{self, Endpoint, Role};
 use crate::link_between::{Between, Line};
@@ -131,7 +132,7 @@ fn start(name: &'static str, role: Role, mode: &str, extra: &[&str], service: &E
     let (done, output_done) = std::sync::mpsc::channel();
     std::thread::Builder::new().name("link-smoke-reader".into()).spawn(move || {
         for line in crate::worker::log_lines(out) {
-            let mut said = heard.lock().unwrap();
+            let mut said = heard.locked();
             if let Some(digest) = line.strip_prefix("state ") {
                 said.state = Some(digest.trim().to_string());
                 said.states += 1;
@@ -181,7 +182,7 @@ impl Run {
     /// Does `act`, then waits for every process to say it holds the service's state, having taken at least one more
     /// state than before.
     fn step(&mut self, what: &str, ctl: &crate::controller::Shared, shown: &[Shown], wait: Duration, act: &dyn Fn(&[Shown])) {
-        let before: Vec<u64> = shown.iter().map(|s| s.said.lock().unwrap().states).collect();
+        let before: Vec<u64> = shown.iter().map(|s| s.said.locked().states).collect();
         let began = Instant::now();
         let wait = wait.min(self.deadline.saturating_duration_since(began));
         act(shown);
@@ -189,7 +190,7 @@ impl Run {
         let mut took: Vec<Option<Duration>> = vec![None; shown.len()];
         while took.iter().any(Option::is_none) && began.elapsed() < wait {
             for (i, s) in shown.iter().enumerate() {
-                let said = s.said.lock().unwrap();
+                let said = s.said.locked();
                 if took[i].is_none() && said.state.as_deref() == Some(wanted.as_str()) && said.states > before[i] {
                     took[i] = Some(began.elapsed());
                 }
@@ -204,7 +205,7 @@ impl Run {
             .zip(&took)
             .map(|(s, took)| match took {
                 Some(took) => format!("{} in {} ms", s.name, took.as_millis()),
-                None => format!("{} NOT in step after {} ms (it says {:?}, the service holds {wanted})", s.name, wait.as_millis(), s.said.lock().unwrap().state),
+                None => format!("{} NOT in step after {} ms (it says {:?}, the service holds {wanted})", s.name, wait.as_millis(), s.said.locked().state),
             })
             .collect();
         println!("{} {what}: {}", if all { "ok  " } else { "FAIL" }, each.join("; "));
@@ -219,7 +220,7 @@ fn wait_closed(shown: &mut Shown, deadline: Instant) -> anyhow::Result<()> {
     while Instant::now() < deadline {
         if let Some(code) = shown.process.try_wait()? {
             drain_output(&shown.output_done, deadline)?;
-            anyhow::ensure!(code.success() && shown.said.lock().unwrap().ended, "{} did not report a clean disconnect", shown.name);
+            anyhow::ensure!(code.success() && shown.said.locked().ended, "{} did not report a clean disconnect", shown.name);
             println!("ok   {} reported disconnect and exited", shown.name);
             return Ok(());
         }

@@ -20,8 +20,8 @@ use super::Controller;
 use crate::state::{AccountState, AccountStatus, Snapshot};
 use orbiters_core::account::{Api, Server};
 use orbiters_core::launcher::{EngineSetup, EngineTrouble, Game, GameProfile, JoinStep, Joining, LauncherState, Notice, Source, StartTrouble, VerifiedFor};
-use orbiters_core::vrchat_api::Client;
-use std::sync::{Arc, Mutex};
+use orbiters_core::vrchat_api::ClientLock;
+use std::sync::Arc;
 
 /// Whose a VRChat account, its name and picture are to see: an Orbiters member of an environment, by the id Orbiters gives
 /// them, as controller/identity.rs knows them ([`Owner::of`]). Nobody else owns anything here: a credential whose member is
@@ -70,7 +70,7 @@ pub(super) struct By {
 
 /// A VRChat session the Orbiters member signed in now may use: its client, and whose it is, taken together.
 pub(super) struct Session {
-    pub(super) client: Arc<Mutex<Client>>,
+    pub(super) client: Arc<ClientLock>,
     pub(super) by: By,
 }
 
@@ -233,11 +233,11 @@ impl Controller {
             return None;
         }
         let (read, owner, epoch) = {
-            let rt = self.account_runtime.lock().unwrap();
+            let rt = self.account_runtime.locked();
             // The epoch moves under this lock: it is the account's beside it.
             (rt.read.is_some() || rt.unknown, installed(&rt).map(|(_, owner)| owner), self.identity_epoch())
         };
-        let mut login = self.vrchat_login.lock().unwrap();
+        let mut login = self.vrchat_login.locked();
         if read {
             // The account thread read it (or could not): from here on only what is installed counts.
             login.at_launch = None;
@@ -254,7 +254,7 @@ impl Controller {
         if matches!(view.account.state, AccountState::Unknown | AccountState::SignedOut | AccountState::Expired { .. }) {
             return None;
         }
-        let rt = self.account_runtime.lock().unwrap();
+        let rt = self.account_runtime.locked();
         let (server, owner) = installed(&rt)?;
         let token = rt.account.as_ref()?.token.clone();
         Some((Api::new(server), token, Stamp { epoch: self.identity_epoch(), owner }))
@@ -264,7 +264,7 @@ impl Controller {
     /// signed in to Orbiters here.
     pub(crate) fn stand_in_vrchat_member(&self, member: &str) {
         let stamp = Stamp { epoch: self.identity_epoch(), owner: Owner { member: member.to_string() } };
-        let mut rt = self.vrchat_login.lock().unwrap();
+        let mut rt = self.vrchat_login.locked();
         rt.at_launch = Some(stamp.owner.clone());
         (rt.status_for, rt.list_for) = (Some(stamp.clone()), Some(stamp));
     }
@@ -272,7 +272,7 @@ impl Controller {
     /// The VRChat session signed in and allowed for the Orbiters member now, and whose it is.
     pub(super) fn vrchat_session(&self) -> Option<Session> {
         let (client, stamp) = self.vrchat_granted()?;
-        let user = client.lock().unwrap().signed_in_user_id().map(str::to_owned)?;
+        let user = client.locked().signed_in_user_id().map(str::to_owned)?;
         Some(Session { client, by: By { stamp, user } })
     }
 
@@ -285,7 +285,7 @@ impl Controller {
             if !same(now.as_ref(), Some(stamp)) {
                 return false;
             }
-            let mut rt = self.vrchat_login.lock().unwrap();
+            let mut rt = self.vrchat_login.locked();
             let before = s.vrchat_login.clone();
             drop_foreign(&mut s.vrchat_login, &mut rt, now.as_ref());
             f(&mut s.vrchat_login, &mut rt);
@@ -337,7 +337,7 @@ impl Controller {
             if !(same(now.as_ref(), Some(&by.stamp)) && account) {
                 return false;
             }
-            let mut rt = self.vrchat_login.lock().unwrap();
+            let mut rt = self.vrchat_login.locked();
             let mut state = (*s.launcher).clone();
             f(&mut state);
             carry(&s.launcher, &mut state);
@@ -377,7 +377,7 @@ impl Controller {
             let mut state = list;
             carry(&s.launcher, &mut state);
             state.verified_for = Some(stamp.said(Some(user)));
-            self.vrchat_login.lock().unwrap().list_for = Some(stamp.clone());
+            self.vrchat_login.locked().list_for = Some(stamp.clone());
             *s.launcher = state;
             true
         })
@@ -398,7 +398,7 @@ impl Controller {
             }
             if !matches!(state.source, Source::SignedIn { .. }) {
                 state.verified_for = None;
-                self.vrchat_login.lock().unwrap().list_for = None;
+                self.vrchat_login.locked().list_for = None;
             }
             let changed = state != *s.launcher;
             if changed {
@@ -447,7 +447,7 @@ impl Controller {
             if by.is_some_and(|by| !same(now.as_ref(), Some(&by.stamp)) || s.vrchat_login.user.as_ref().is_none_or(|u| u.id != by.user)) {
                 return false;
             }
-            self.vrchat_login.lock().unwrap().joining_for = by.cloned();
+            self.vrchat_login.locked().joining_for = by.cloned();
             shown = true;
             let joining = Some(joining);
             let changed = s.launcher.joining != joining;

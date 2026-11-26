@@ -13,6 +13,7 @@
 //! OSC: what VRChat sends is only recorded on its receiving thread; every write goes from this module's own thread, one
 //! edge of a parameter per turn at most.
 
+use orbiters_core::locks::*;
 use super::{Controller, NoticeKind, Shared};
 use orbiters_contracts::avatar_gun::{self as gun, params, Event, Outcome};
 use orbiters_core::account::Api;
@@ -365,8 +366,8 @@ impl Controller {
             return;
         }
         let ctl = self.clone();
-        let _ = std::thread::Builder::new().name("avatar-gun".into()).spawn(move || loop {
-            if ctl.avatar_gun.lock().unwrap().stop {
+        std::thread::Builder::new().name("avatar-gun".into()).spawn(move || loop {
+            if ctl.avatar_gun.locked().stop {
                 return;
             }
             let fast = ctl.avatar_gun_turn();
@@ -375,7 +376,7 @@ impl Controller {
     }
 
     pub(super) fn stop_avatar_gun(&self) {
-        let mut rt = self.avatar_gun.lock().unwrap();
+        let mut rt = self.avatar_gun.locked();
         rt.stop = true;
         rt.streaming = None;
     }
@@ -384,7 +385,7 @@ impl Controller {
     pub(super) fn avatar_gun_parameter(&self, name: &str, value: &OscValue) {
         let Some(&param) = params::ALL.iter().find(|p| **p == name) else { return };
         let on = value.truthy();
-        let mut rt = self.avatar_gun.lock().unwrap();
+        let mut rt = self.avatar_gun.locked();
         if rt.values.insert(param, on) != Some(on) && rt.edges.len() < 64 {
             rt.edges.push((param, on));
         }
@@ -392,7 +393,7 @@ impl Controller {
 
     /// VRChat loaded an avatar (the OSC receiving thread): its tree is read once it settled.
     pub(super) fn avatar_gun_avatar(&self, id: &str) {
-        let mut rt = self.avatar_gun.lock().unwrap();
+        let mut rt = self.avatar_gun.locked();
         rt.avatar_at = Some(Instant::now());
         rt.values.clear();
         rt.edges.clear();
@@ -414,7 +415,7 @@ impl Controller {
         };
         let shown = self.view().avatar_gun.card.clone().filter(|c| c.id == card);
         let Some(shown) = shown else { return };
-        let hit = self.avatar_gun.lock().unwrap().hit.clone().filter(|h| h.card == card);
+        let hit = self.avatar_gun.locked().hit.clone().filter(|h| h.card == card);
         match (&shown.kind, main) {
             (CardKind::Ask, true) => {
                 if let Some(hit) = hit {
@@ -462,7 +463,7 @@ impl Controller {
 
     /// The hit of card `card` is over: another's stays.
     fn avatar_gun_release(&self, card: u64) {
-        let mut rt = self.avatar_gun.lock().unwrap();
+        let mut rt = self.avatar_gun.locked();
         if rt.hit.as_ref().is_some_and(|h| h.card == card) {
             rt.hit = None;
         }
@@ -472,12 +473,12 @@ impl Controller {
     /// allowed by the person or by the settings as they are now. Asked as each request is about to leave.
     fn avatar_gun_permitted(&self, hit: &Hit) -> bool {
         let (here, allow) = {
-            let s = self.snapshot.lock().unwrap();
+            let s = self.snapshot.locked();
             (s.vrchat.world.instance_hash().as_deref() == Some(hit.instance.as_str()), s.settings.avatar_gun.allow)
         };
         here && self.identity_epoch() == hit.to.epoch
             && (hit.allowed || decide(allow, hit.friend, None, true, false) == Decision::Change)
-            && self.avatar_gun.lock().unwrap().hit.as_ref().is_some_and(|h| h.card == hit.card)
+            && self.avatar_gun.locked().hit.as_ref().is_some_and(|h| h.card == hit.card)
     }
 
     /// The card `card` and its hit go.
@@ -520,7 +521,7 @@ impl Controller {
         let now = Instant::now();
         // The tree, once the avatar settled, and again now and then.
         let look = {
-            let rt = self.avatar_gun.lock().unwrap();
+            let rt = self.avatar_gun.locked();
             match rt.avatar_at {
                 Some(at) => now.duration_since(at) >= SETTLE,
                 None => rt.looked.is_none_or(|t| now.duration_since(t) >= LOOK_AGAIN),
@@ -534,7 +535,7 @@ impl Controller {
         let account = self.account_api().filter(|_| self.identity_epoch() == epoch).map(|(api, token)| Member { api, token, epoch });
         let instance = snap.vrchat.world.instance_hash().filter(|_| snap.vrchat.running);
         let (gun_worn, receiver) = {
-            let rt = self.avatar_gun.lock().unwrap();
+            let rt = self.avatar_gun.locked();
             (rt.gun, rt.receiver)
         };
         // The stream: while a gun is worn, or a receiver with hits allowed; opened again in another instance.
@@ -542,15 +543,15 @@ impl Controller {
         if let (true, Some(member), Some(instance)) = (want, account.as_ref(), instance.as_ref()) {
             self.avatar_gun_stream(member, instance);
         } else {
-            let mut rt = self.avatar_gun.lock().unwrap();
+            let mut rt = self.avatar_gun.locked();
             if rt.streaming.take().is_some() {
                 eprintln!("avatar gun: event stream closed (not needed)"); // i18n: not shown (a log's line)
             }
             rt.connected = false;
         }
         // What VRChat said since the last turn.
-        let edges = std::mem::take(&mut self.avatar_gun.lock().unwrap().edges);
-        let connected = self.avatar_gun.lock().unwrap().connected;
+        let edges = std::mem::take(&mut self.avatar_gun.locked().edges);
+        let connected = self.avatar_gun.locked().connected;
         let ready = loaded(settings.loaded.is_some(), gun_worn, account.is_some(), connected);
         for (param, on) in edges {
             match (param, on) {
@@ -560,7 +561,7 @@ impl Controller {
                 },
                 (params::CHOOSE, true) if gun_worn => {
                     let choose = {
-                        let mut rt = self.avatar_gun.lock().unwrap();
+                        let mut rt = self.avatar_gun.locked();
                         rt.choose += 1;
                         rt.choose
                     };
@@ -577,11 +578,11 @@ impl Controller {
         // AvatarGun/Loaded, again every LOADED_REFRESH_MS while the gun is worn.
         if gun_worn {
             let due = {
-                let rt = self.avatar_gun.lock().unwrap();
+                let rt = self.avatar_gun.locked();
                 rt.loaded_sent.is_none_or(|(was, at)| was != ready || now.duration_since(at) >= Duration::from_millis(gun::LOADED_REFRESH_MS))
             };
             if due && self.avatar_gun_send(params::LOADED, ready) {
-                let mut rt = self.avatar_gun.lock().unwrap();
+                let mut rt = self.avatar_gun.locked();
                 if rt.loaded_sent.is_none_or(|(was, _)| was != ready) {
                     eprintln!("avatar gun: Loaded {ready}"); // i18n: not shown (a log's line)
                 }
@@ -589,7 +590,7 @@ impl Controller {
             }
         }
         // Desktop mode's trigger: the left button while VRChat has the mouse (mouse-look) and the gun is out.
-        let out = self.avatar_gun.lock().unwrap().values.get(params::OUT).copied().unwrap_or(false);
+        let out = self.avatar_gun.locked().values.get(params::OUT).copied().unwrap_or(false);
         let reading = gun_worn && out && snap.n4n0.desktop_mode && snap.vrchat.pid.is_some();
         let pulled = reading && snap.vrchat.pid.is_some_and(|pid| {
             use orbiters_n4n0::Mouse;
@@ -597,7 +598,7 @@ impl Controller {
             m.down && m.front && !m.cursor
         });
         let pull_due = {
-            let rt = self.avatar_gun.lock().unwrap();
+            let rt = self.avatar_gun.locked();
             // One edge a turn, never two in one frame: a change waits for the turn after the last one.
             match rt.pull_sent {
                 Some((was, at)) => was != pulled && now.duration_since(at) >= TRIGGER_TURN,
@@ -605,18 +606,18 @@ impl Controller {
             }
         };
         if pull_due && self.avatar_gun_send(params::PULL, pulled) {
-            self.avatar_gun.lock().unwrap().pull_sent = Some((pulled, now));
+            self.avatar_gun.locked().pull_sent = Some((pulled, now));
         }
         // Shots that paired with nothing: forgotten.
         {
-            let mut rt = self.avatar_gun.lock().unwrap();
+            let mut rt = self.avatar_gun.locked();
             rt.shots.retain(|(_, at)| now.duration_since(*at) < Duration::from_secs(60));
         }
         // The card's time.
         let ms = now_ms();
         if let Some(card) = snap.avatar_gun.card.clone().filter(|c| !c.up(ms)) {
             if card.kind == CardKind::Ask {
-                let hit = self.avatar_gun.lock().unwrap().hit.clone().filter(|h| h.card == card.id);
+                let hit = self.avatar_gun.locked().hit.clone().filter(|h| h.card == card.id);
                 if let Some(hit) = hit {
                     eprintln!("avatar gun: {} not answered in time: refused", hit.shot); // i18n: not shown (a log's line)
                     self.avatar_gun_answer(&hit.to, &hit.shot, Outcome::Refused);
@@ -641,7 +642,7 @@ impl Controller {
     /// (VRChat's OSCQuery not found yet): what was known stays, and it is read again soon.
     fn avatar_gun_look(&self) {
         let values = self.with_osc(|o| o.vrchat_query()).flatten().and_then(|addr| orbiters_core::osc::vrchat_values(addr, Duration::from_millis(800)).ok());
-        let mut rt = self.avatar_gun.lock().unwrap();
+        let mut rt = self.avatar_gun.locked();
         rt.looked = Some(Instant::now());
         let Some(values) = values.filter(|v| v.iter().any(|(a, _)| a.starts_with(PARAMETERS_PREFIX))) else {
             // Asked again in a moment rather than at the next long look.
@@ -672,7 +673,7 @@ impl Controller {
     /// Keeps the stream of `member` open for `instance`: opened when it is not, opened anew in another instance.
     fn avatar_gun_stream(self: &Shared, member: &Member, instance: &str) {
         let number = {
-            let mut rt = self.avatar_gun.lock().unwrap();
+            let mut rt = self.avatar_gun.locked();
             if rt.streaming.as_ref().is_some_and(|(_, t, i, e)| *t != member.token || i != instance || *e != member.epoch) {
                 eprintln!("avatar gun: another instance or account: the event stream is opened again"); // i18n: not shown (a log's line)
                 rt.streaming = None;
@@ -694,7 +695,7 @@ impl Controller {
             let url = member.api.url(&format!("{}?instance={instance}", gun::routes::EVENTS));
             eprintln!("avatar gun: event stream opening"); // i18n: not shown (a log's line)
             let still = || {
-                let mut rt = ctl.avatar_gun.lock().unwrap();
+                let mut rt = ctl.avatar_gun.locked();
                 let current = !rt.stop && rt.streaming.as_ref().is_some_and(|(n, ..)| *n == number);
                 if current {
                     rt.connected = true;
@@ -718,7 +719,7 @@ impl Controller {
     /// The stream `number` ended, `well` or not: when the next one is tried, unless another took its place meanwhile (its
     /// waits are its own).
     fn avatar_gun_stream_ended(&self, number: u64, well: bool) {
-        let mut rt = self.avatar_gun.lock().unwrap();
+        let mut rt = self.avatar_gun.locked();
         if !rt.streaming.as_ref().is_some_and(|(n, ..)| *n == number) {
             return;
         }
@@ -736,7 +737,7 @@ impl Controller {
             return;
         };
         let shot = uuid::Uuid::new_v4().to_string();
-        self.avatar_gun.lock().unwrap().shots.push((shot.clone(), Instant::now()));
+        self.avatar_gun.locked().shots.push((shot.clone(), Instant::now()));
         let report = gun::ShotReport { instance: instance.to_string(), shot: shot.clone(), avatar };
         let (api, token) = (api.clone(), token.to_string());
         std::thread::spawn(move || match post(&api, &token, gun::routes::SHOTS, &report) {
@@ -780,14 +781,14 @@ impl Controller {
             }
             Event::Answer(answer) => {
                 eprintln!("avatar gun: shot {} answered {:?}", answer.shot, answer.result); // i18n: not shown (a log's line)
-                if self.avatar_gun.lock().unwrap().shots.iter().any(|(s, _)| *s == answer.shot) {
+                if self.avatar_gun.locked().shots.iter().any(|(s, _)| *s == answer.shot) {
                     let kind = if answer.result == Outcome::Changed { NoticeKind::Success } else { NoticeKind::Info };
                     self.notify(kind, shooter_says(answer.result, &answer.name));
                 }
             }
             Event::Crossed(crossed) => {
                 eprintln!("avatar gun: shot {} crossed another", crossed.shot); // i18n: not shown (a log's line)
-                if self.avatar_gun.lock().unwrap().shots.iter().any(|(s, _)| *s == crossed.shot) {
+                if self.avatar_gun.locked().shots.iter().any(|(s, _)| *s == crossed.shot) {
                     self.notify(NoticeKind::Info, tr(CROSSED));
                 }
             }
@@ -817,7 +818,7 @@ impl Controller {
             let avatar = gun::Avatar { name: hit.avatar.name.chars().take(gun::NAME_MOST).collect(), ..hit.avatar.clone() };
             // Decided and taken in one step: of two hits at once, one is.
             let (decision, pending) = {
-                let mut rt = ctl.avatar_gun.lock().unwrap();
+                let mut rt = ctl.avatar_gun.locked();
                 let decision = decide(allow, friend, rt.changed_at.map(|t| t.elapsed()), here, rt.hit.is_some());
                 rt.cards += 1;
                 let pending = Hit { shot: hit.shot.clone(), avatar, from: name, card: rt.cards, instance: instance.clone(), to: to.clone(), friend, allowed: false };
@@ -866,7 +867,7 @@ impl Controller {
             let worn = ctl.avatar_gun_worn();
             if ctl.avatar_gun_wear(&hit.avatar.id, || ctl.avatar_gun_permitted(&hit)) {
                 {
-                    let mut rt = ctl.avatar_gun.lock().unwrap();
+                    let mut rt = ctl.avatar_gun.locked();
                     // The avatar worn before, by hand: kept until the next change by hand, through several shots.
                     if rt.before.is_none() || rt.put_on.as_deref() != worn.as_deref() {
                         rt.before = worn;
@@ -899,7 +900,7 @@ impl Controller {
 
     /// Undo: back to the avatar worn before, by the same means; Orbiters tells the shooter.
     fn avatar_gun_undo(self: &Shared, hit: Hit) {
-        let Some(before) = self.avatar_gun.lock().unwrap().before.clone() else {
+        let Some(before) = self.avatar_gun.locked().before.clone() else {
             eprintln!("avatar gun: Undo, but the avatar worn before is not known"); // i18n: not shown (a log's line)
             self.avatar_gun_card(&hit, CardKind::Failed(Failure::UndoFailed), FAILED_FOR_MS);
             return;
@@ -911,7 +912,7 @@ impl Controller {
             // The person's own, whatever the settings say.
             if ctl.avatar_gun_wear(&before, || true) {
                 {
-                    let mut rt = ctl.avatar_gun.lock().unwrap();
+                    let mut rt = ctl.avatar_gun.locked();
                     (rt.before, rt.put_on) = (None, None);
                 }
                 ctl.avatar_gun_end(hit.card);
@@ -927,7 +928,7 @@ impl Controller {
 
     /// The avatar VRChat says is worn.
     fn avatar_gun_worn(&self) -> Option<String> {
-        match self.osc_values.lock().unwrap().latest.get(AVATAR_CHANGE).and_then(|(v, _)| v.first().cloned()) {
+        match self.osc_values.locked().latest.get(AVATAR_CHANGE).and_then(|(v, _)| v.first().cloned()) {
             Some(OscValue::Text(id)) if !id.is_empty() => Some(id),
             _ => self.view().n4n0.avatar_id.clone(),
         }
@@ -935,7 +936,7 @@ impl Controller {
 
     /// Whether VRChat said `/avatar/change` with `id` since `since_ns`.
     fn avatar_gun_echo(&self, id: &str, since_ns: u64) -> bool {
-        self.osc_values.lock().unwrap().latest.get(AVATAR_CHANGE).is_some_and(|(v, at)| *at >= since_ns && matches!(v.first(), Some(OscValue::Text(a)) if a == id))
+        self.osc_values.locked().latest.get(AVATAR_CHANGE).is_some_and(|(v, at)| *at >= since_ns && matches!(v.first(), Some(OscValue::Text(a)) if a == id))
     }
 
     /// Waits up to [`gun::CHANGE_WAIT_S`] for VRChat to say it wears `id`.

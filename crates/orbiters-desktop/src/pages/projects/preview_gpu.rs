@@ -9,6 +9,7 @@
 //! over the avatar pictures). Loading runs on a worker: one file read, pictures decoded on every core
 //! with their mipmaps, vertex and index blobs uploaded as they are, while the pipelines compile on another thread.
 
+use orbiters_core::locks::*;
 use eframe::egui_wgpu::wgpu;
 use orbiters_projects::preview::{self, Alpha, Cull, ImageFormat, Kind, Preview, Shading};
 use std::path::Path;
@@ -529,13 +530,13 @@ fn decode_and_upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview) ->
                     ImageFormat::Png => image::ImageFormat::Png,
                 };
                 match image::load_from_memory_with_format(p.blob(t.data), format) {
-                    Ok(img) => *out[i].lock().unwrap() = Some(upload_texture(device, queue, img.to_rgba8(), if t.linear { DATA } else { COLOR })),
+                    Ok(img) => *out[i].locked() = Some(upload_texture(device, queue, img.to_rgba8(), if t.linear { DATA } else { COLOR })),
                     Err(e) => eprintln!("project preview: picture {i}: {e}"),
                 }
             });
         }
     });
-    out.into_iter().map(|m| m.into_inner().unwrap()).collect()
+    out.into_iter().map(|m| m.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner)).collect()
 }
 
 /// A texture with its mip chain (box-filtered on the CPU), sRGB colours or linear data by `format`.

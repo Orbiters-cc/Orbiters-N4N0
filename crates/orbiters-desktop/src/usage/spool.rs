@@ -14,6 +14,7 @@
 //! session ends and starts again when the stamp changes: neither an install nor a session ties what was counted under the old
 //! notice ("never your account") to an account. The stamp itself stays on this computer.
 
+use orbiters_core::locks::*;
 use super::{clean, now_ms, Kind, Step};
 use crate::ipc::Role;
 use serde::{Deserialize, Serialize};
@@ -174,7 +175,7 @@ impl Spool {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.0.locked()
     }
 
     /// A link of `role` came: its session starts at its first step.

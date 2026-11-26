@@ -1,4 +1,5 @@
 //! The templates bundled with the app, put in its own cache (app data): what the copier of projects then copies from.
+use orbiters_core::locks::*;
 use crate::templates::{copy, Template};
 use anyhow::Context;
 use orbiters_i18n::tr;
@@ -10,7 +11,7 @@ use std::sync::{Arc, Mutex};
 /// available offline; VPM still downloads and resolves the SDK through its normal official repository.
 pub fn builtins(cache: &Path) -> anyhow::Result<Vec<Template>> {
     static MATERIALIZE: Mutex<()> = Mutex::new(());
-    let _one = MATERIALIZE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _one = MATERIALIZE.locked();
     let mut out = vec![];
     for (id, files) in crate::builtin_templates::TEMPLATES {
         let path = cache.join(id);

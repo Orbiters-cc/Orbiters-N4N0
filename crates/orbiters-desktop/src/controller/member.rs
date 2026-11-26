@@ -124,7 +124,7 @@ impl super::Controller {
 
     /// The member signed in, as the windows key what is theirs: the environment and the id.
     pub(super) fn member_key(&self) -> Option<String> {
-        let rt = self.account_runtime.lock().unwrap();
+        let rt = self.account_runtime.locked();
         rt.identity()?.key()
     }
 }

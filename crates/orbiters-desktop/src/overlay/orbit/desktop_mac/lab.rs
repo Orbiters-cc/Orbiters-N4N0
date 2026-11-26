@@ -6,6 +6,7 @@
 //!   does, and each `say`, is a line of JSON on its standard output.
 //! - `picture <window> <process> <width> <height> <out.png>`: one look's picture of a window.
 
+use orbiters_core::locks::*;
 use super::super::zones::{self, Zone};
 use super::keyboard::{self, Source};
 use super::{panel, Desk, Next};
@@ -189,13 +190,13 @@ struct Stub {
 
 impl Stub {
     fn say(&self, what: String) {
-        self.said.lock().unwrap().push(what);
+        self.said.locked().push(what);
     }
 }
 
 impl Backend for Stub {
     fn view(&self) -> Arc<Snapshot> {
-        self.view.lock().unwrap().clone()
+        self.view.locked().clone()
     }
     fn orbit_status(&self, status: crate::state::OrbitStatus) {
         self.say(format!("status {:?} {:?}", status.needs, status.note)); // i18n: not shown
@@ -345,7 +346,7 @@ fn desk(launcher: u32, host: Option<PathBuf>) -> anyhow::Result<()> {
                 ["button", to] => keys.button.set(*to == "down"),
                 // The engine gives VRChat's stream camera, and VRChat says over OSC that its camera is open, or closed, or nothing yet.
                 ["camera", said] => {
-                    let mut view = stub.view.lock().unwrap();
+                    let mut view = stub.view.locked();
                     let snap = Arc::make_mut(&mut view);
                     snap.launcher.camera = true;
                     snap.camera_open_said = match *said {
@@ -356,7 +357,7 @@ fn desk(launcher: u32, host: Option<PathBuf>) -> anyhow::Result<()> {
                 }
                 ["scroll"] => keys.scrolls.set(keys.scrolls.get() + 1),
                 ["pick", how, rest] => {
-                    let mut view = stub.view.lock().unwrap();
+                    let mut view = stub.view.locked();
                     let orbit = &mut Arc::make_mut(&mut view).settings.orbit;
                     orbit.wheel_pick = serde_json::from_value(serde_json::json!(how))?;
                     orbit.wheel_rest_ms = rest.parse()?;
@@ -392,7 +393,7 @@ fn desk(launcher: u32, host: Option<PathBuf>) -> anyhow::Result<()> {
                     post_key(mtm, code.parse()?, false);
                 }
                 ["hide-menus"] => {
-                    let mut view = stub.view.lock().unwrap();
+                    let mut view = stub.view.locked();
                     let snap = Arc::make_mut(&mut view);
                     snap.settings.orbit.wheel = false;
                     snap.settings.orbit.quick_menu = false;
@@ -429,7 +430,7 @@ fn desk(launcher: u32, host: Option<PathBuf>) -> anyhow::Result<()> {
         }
         let next = desk.turn();
         turns += 1;
-        for what in std::mem::take(&mut *stub.said.lock().unwrap()) {
+        for what in std::mem::take(&mut *stub.said.locked()) {
             println!("{}", serde_json::json!({ "at": began.elapsed().as_secs_f64(), "said": what }));
         }
         let doing = desk.doing();

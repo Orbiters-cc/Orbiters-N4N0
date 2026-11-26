@@ -12,6 +12,7 @@
 //! The detection ([`Detector`]) and what a capture keeps ([`redact`], [`retain`], [`tree`]) are pure and tested on every
 //! computer; the following and the capture run on a Mac only.
 
+use orbiters_core::locks::*;
 use orbiters_core::vrchat_log::{Account, Lines as LogLines};
 use std::path::{Path, PathBuf};
 
@@ -920,7 +921,7 @@ static PLAYER: std::sync::Mutex<Option<Player>> = std::sync::Mutex::new(None);
 
 /// The VRChat that runs now as the follower last saw it, while its launcher is that very process: the caller checks.
 pub(crate) fn player() -> Option<Player> {
-    PLAYER.lock().unwrap().clone()
+    PLAYER.locked().clone()
 }
 
 /// Who VRChat's log says is signed in, read from its start to its end as it grows: whole lines only.
@@ -1028,7 +1029,7 @@ pub(crate) fn follow(library: PathBuf, home: PathBuf, logs: PathBuf) {
         let Some(record) = record.filter(|r| !r.over()) else {
             current = None;
             super::picture::publish(None);
-            *PLAYER.lock().unwrap() = None;
+            *PLAYER.locked() = None;
             continue;
         };
         // Which process it is, is its number and its birth together: a record that does not say both names none.
@@ -1053,7 +1054,7 @@ pub(crate) fn follow(library: PathBuf, home: PathBuf, logs: PathBuf) {
         }
         let profile = followed.arguments.as_deref().and_then(orbiters_core::vrchat_launch::profile_told);
         let (account, account_id) = (signed_in.name().map(str::to_owned), signed_in.id().map(str::to_owned));
-        *PLAYER.lock().unwrap() = Some(Player { launcher, birth, profile, account, account_id, signed_out: signed_in.signed_out(), logged: followed.vrchat.is_some(), at: std::time::Instant::now() });
+        *PLAYER.locked() = Some(Player { launcher, birth, profile, account, account_id, signed_out: signed_in.signed_out(), logged: followed.vrchat.is_some(), at: std::time::Instant::now() });
         // Seconds since the supervisor accepted a Quit, from its record (both on the boot clock).
         let quit_since = record.quit_accepted.as_ref().and_then(|(boot, millis)| {
             let now = super::obelisk_cli::boot_clock();

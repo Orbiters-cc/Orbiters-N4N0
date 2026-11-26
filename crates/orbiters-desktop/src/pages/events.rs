@@ -10,6 +10,7 @@
 //! instance under way that takes no sign-ups, Orbiters' own VRChat account invites them there, as Home's Previous
 //! instances do (`orbiters_n4n0_core::invites`).
 
+use orbiters_core::locks::*;
 use super::{sharing, Cx, Job};
 use crate::worlds::{Picture, Pictures};
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Order, Painter, Pos2, Rect, Sense, TextureHandle, Ui, UiBuilder};
@@ -48,7 +49,7 @@ fn offset() -> UtcOffset {
     use std::sync::Mutex;
     static KEPT: Mutex<Option<(i64, UtcOffset)>> = Mutex::new(None);
     let t = now();
-    let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+    let mut kept = KEPT.locked();
     match *kept {
         Some((at, o)) if t - at < 60 => o,
         _ => {

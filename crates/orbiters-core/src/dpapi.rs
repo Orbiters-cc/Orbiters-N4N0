@@ -1,7 +1,6 @@
 //! Current-user protection shared by VRChat's session store and [`crate::sealed`]'s files (what was said to N4N0, the
 //! bridge's keys): Windows' DPAPI, on the Mac a key the login keychain keeps, on Linux a key in a file of the person's (see
 //! each [`crypt`]). Elsewhere there is none.
-use crate::locks::*;
 #[cfg(windows)]
 pub(crate) fn crypt(data: &[u8], entropy: &[u8], encrypt: bool) -> anyhow::Result<Vec<u8>> {
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
@@ -275,6 +274,7 @@ mod sealing {
 #[cfg(target_os = "macos")]
 mod mac {
     use super::sealing::{file_key, read_whole, KEY_FILE, KEY_LEN};
+    use crate::locks::*;
     use orbiters_i18n::tr;
     use ring::rand::{SecureRandom, SystemRandom};
     use security_framework::passwords::{delete_generic_password, get_generic_password};

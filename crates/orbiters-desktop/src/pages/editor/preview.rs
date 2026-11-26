@@ -2,6 +2,7 @@
 //! most [`PROXY`] pixels): the interface asks for the edit as it is now, and a request asked while one is made
 //! replaces it and stops it at its next layer (the newest settings win). Each layer works on every core (rayon).
 
+use orbiters_core::locks::*;
 use orbiters_ui::photo::render::{Renderer, Stage};
 use orbiters_ui::photo::{Edit, Rgba8};
 use std::sync::{Arc, Condvar, Mutex};
@@ -59,26 +60,26 @@ impl Preview {
     pub fn ask(&mut self, ask: Ask) {
         if self.last.as_ref() != Some(&ask) {
             self.last = Some(ask.clone());
-            self.shared.state.lock().unwrap_or_else(|e| e.into_inner()).asked = Some(ask);
+            self.shared.state.locked().asked = Some(ask);
             self.shared.wake.notify_one();
         }
     }
 
     /// The preview made since the last call.
     pub fn take(&self) -> Option<Made> {
-        self.shared.state.lock().unwrap_or_else(|e| e.into_inner()).made.take()
+        self.shared.state.locked().made.take()
     }
 
     /// Whether the last preview asked is not made yet.
     pub fn busy(&self) -> bool {
-        let s = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        let s = self.shared.state.locked();
         s.asked.is_some()
     }
 }
 
 impl Drop for Preview {
     fn drop(&mut self) {
-        self.shared.state.lock().unwrap_or_else(|e| e.into_inner()).quit = true;
+        self.shared.state.locked().quit = true;
         self.shared.wake.notify_one();
     }
 }
@@ -88,7 +89,7 @@ fn run(shared: &Shared, ctx: &egui::Context, inputs: &[Rgba8], full: (u32, u32))
     let refs: Vec<&Rgba8> = inputs.iter().collect();
     loop {
         let ask = {
-            let mut s = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = shared.state.locked();
             loop {
                 if s.quit {
                     return;
@@ -96,16 +97,16 @@ fn run(shared: &Shared, ctx: &egui::Context, inputs: &[Rgba8], full: (u32, u32))
                 if let Some(a) = s.asked.clone() {
                     break a;
                 }
-                s = shared.wake.wait(s).unwrap_or_else(|e| e.into_inner());
+                s = shared.wake.wait_locked(s);
             }
         };
         // Stopped as soon as something newer is asked.
         let mut still_wanted = |_: f32| {
-            let s = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            let s = shared.state.locked();
             !s.quit && s.asked.as_ref() == Some(&ask)
         };
         let image = renderer.render(&ask.edit, &refs, full, ask.stage, ask.size, &mut still_wanted);
-        let mut s = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = shared.state.locked();
         if let Some(image) = image {
             if s.asked.as_ref() == Some(&ask) {
                 s.asked = None;
@@ -115,7 +116,7 @@ fn run(shared: &Shared, ctx: &egui::Context, inputs: &[Rgba8], full: (u32, u32))
             let histogram = orbiters_ui::photo::histogram(&rgba, 64);
             let image = egui::ColorImage::from_rgba_unmultiplied([rgba.width as usize, rgba.height as usize], &rgba.pixels);
             drop(rgba);
-            let mut s = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = shared.state.locked();
             s.made = Some(Made { ask, image, histogram });
             drop(s);
             ctx.request_repaint();

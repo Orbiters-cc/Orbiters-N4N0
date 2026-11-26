@@ -4,6 +4,7 @@
 //! and attempts' logs of the project shown; the release list asked of Orbiters now and then, apart from all of it.
 //! What it shows: `unity6_card` (the panel's card), `unity6_sheet` (Try on Unity 6), the gallery's pills and rows.
 
+use orbiters_core::locks::*;
 use orbiters_i18n::{mark, tr};
 use super::state::State;
 use crate::pages::Job;
@@ -223,7 +224,7 @@ impl U6 {
         }
         // A trial being made shows in the gallery as soon as it is recorded.
         if let Some(run) = self.run.as_mut() {
-            if !run.shown && run.recorded.lock().unwrap().is_some() {
+            if !run.shown && run.recorded.locked().is_some() {
                 run.shown = true;
                 self.again = true;
             }
@@ -392,7 +393,7 @@ impl State {
             }
             if let (Err(e), Some(run)) = (&result, run) {
                 // Stopped before anything was recorded: back to the place, said why.
-                if run.recorded.lock().unwrap().is_none() {
+                if run.recorded.locked().is_none() {
                     self.u6.sheet.step = Step::Place;
                     self.u6.sheet.checked = None;
                     self.u6.error = Some(e.clone());
@@ -427,7 +428,7 @@ impl State {
                 Ok(high)
             };
             let recorded = |j: &trial::Job| {
-                *rec.lock().unwrap() = Some(j.id.clone());
+                *rec.locked() = Some(j.id.clone());
                 wake.request_repaint();
             };
             let open = |p: &Path| trial::is_open(p);

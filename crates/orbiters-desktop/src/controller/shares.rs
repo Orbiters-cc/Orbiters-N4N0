@@ -1,4 +1,5 @@
 //! Background jobs for the gallery and its sharing dialogs. No disk or HTTP work in the painting code.
+use orbiters_core::locks::*;
 use orbiters_core::{
     account::{self, Api, Server},
     explicit::Content,
@@ -289,7 +290,7 @@ fn share_all(entries: Vec<Entry>, report: Report, one: impl Fn(Entry) -> anyhow:
                 }
                 let result = one(entries[i].clone());
                 failed.fetch_or(result.is_err(), SeqCst);
-                *results[i].lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
+                *results[i].locked() = Some(result);
                 report(Stage::Items { done: done.fetch_add(1, SeqCst) + 1, total });
             });
         }
@@ -341,7 +342,7 @@ impl super::Controller {
             let last = Mutex::new(ago(std::time::Duration::from_secs(1)));
             let report = |stage: Stage| {
                 if let Stage::Sending { sent, total } = stage {
-                    let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut last = last.locked();
                     if sent < total && last.elapsed().as_millis() < 100 {
                         return;
                     }
@@ -396,7 +397,7 @@ impl super::Controller {
         let uploaded = records_path(server).ok().is_some_and(|p| read_records(&p).iter().any(|r| r.path == session));
         if uploaded
             || orbiters_core::reconstruction::read_report(&session).is_none()
-            || !AHEAD.lock().unwrap_or_else(|e| e.into_inner()).insert(session.clone())
+            || !AHEAD.locked().insert(session.clone())
         {
             return;
         }
@@ -404,7 +405,7 @@ impl super::Controller {
             let started = Instant::now();
             let failed = super::maps::web_preview(&session).err().map(|e| format!(", failed: {e}")).unwrap_or_default(); // i18n: not shown
             share_log(&format!("3D capture {} prepared ahead of its share in {:.2} s{failed}", session.display(), started.elapsed().as_secs_f64())); // i18n: not shown
-            AHEAD.lock().unwrap_or_else(|e| e.into_inner()).remove(&session);
+            AHEAD.locked().remove(&session);
         });
     }
 }
@@ -806,7 +807,7 @@ pub fn reconstructed(dir: &Path) {
 }
 
 fn mark_reconstructed(path: &Path, dir: &Path) {
-    let _records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
+    let _records = RECORDS.locked();
     let mut records = read_records(path);
     let mut changed = false;
     for r in records.iter_mut().filter(|r| r.path == dir && r.uploaded.kind == Kind::Capture) {
@@ -953,7 +954,7 @@ fn read_records(path: &Path) -> Vec<Record> {
 /// not send it again (CTL2-11 k). Pictures, and folders of that name that are not there, are left as they are.
 /// How many records moved.
 pub(crate) fn follow_moved_sessions(records_file: &Path, sessions_dir: &Path) -> usize {
-    let _records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
+    let _records = RECORDS.locked();
     let mut records = read_records(records_file);
     let mut moved = 0;
     for record in records.iter_mut().filter(|r| r.uploaded.kind == Kind::Capture) {
@@ -993,7 +994,7 @@ fn save_record(records: anyhow::Result<&Path>, entry: &Entry, item: &Item) -> an
 /// [`save_record`] with the splat edits its files on Orbiters were made with (`None`: those its record had).
 fn save_record_edits(records: anyhow::Result<&Path>, entry: &Entry, item: &Item, edits: Option<String>) -> anyhow::Result<()> {
     if let Some(local) = &entry.local {
-        let _records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
+        let _records = RECORDS.locked();
         let path = records?;
         let mut records = read_records(path);
         // The splat edits it was uploaded with stay known (the same item: the same files) until it is updated.
@@ -1058,7 +1059,7 @@ fn forget_record(path: &Path, dir: &Path, id: u64) {
 
 /// [`forget_record`] for an upload of either kind (a capture or a picture).
 fn forget_record_of(path: &Path, dir: &Path, kind: Kind, id: u64) {
-    let _records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
+    let _records = RECORDS.locked();
     let mut records = read_records(path);
     let before = records.len();
     records.retain(|r| !(r.path == dir && r.uploaded.kind == kind && r.uploaded.id == id));
@@ -1078,12 +1079,12 @@ impl Changing {
     fn of(entry: &Entry, report: Report) -> Self {
         let key = entry.local.as_ref().map_or_else(|| entry.key.clone(), |l| l.path().to_string_lossy().into_owned());
         let (set, wake) = &CHANGING;
-        let mut set = set.lock().unwrap_or_else(|e| e.into_inner());
+        let mut set = set.locked();
         if set.contains(&key) {
             report(Stage::Waiting);
         }
         while set.contains(&key) {
-            set = wake.wait(set).unwrap_or_else(|e| e.into_inner());
+            set = wake.wait_locked(set);
         }
         set.insert(key.clone());
         Self(key)
@@ -1092,7 +1093,7 @@ impl Changing {
 impl Drop for Changing {
     fn drop(&mut self) {
         let (set, wake) = &CHANGING;
-        set.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+        set.locked().remove(&self.0);
         wake.notify_all();
     }
 }
@@ -1273,7 +1274,7 @@ fn share_with_once(
             }
         };
         {
-            let _records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
+            let _records = RECORDS.locked();
             let file = records.as_ref().map_err(|e| anyhow::anyhow!("{e}"))?;
             let mut known = read_records(file);
             let local = entry.local.as_ref().unwrap();

@@ -16,6 +16,7 @@
 //! cover): one sort of the splats, then a few binary searches per candidate. Deterministic, with no sampling of what is
 //! counted.
 
+use orbiters_core::locks::*;
 use orbiters_reconstruct::gaussians::Gaussians;
 use std::f32::consts::PI;
 
@@ -258,7 +259,7 @@ fn in_parallel<T: Send + Default + Clone>(n: usize, f: impl Fn(usize) -> T + Syn
             s.spawn(|| loop {
                 let b = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let Some(block) = blocks.get(b) else { break };
-                let mut block = block.lock().unwrap_or_else(|e| e.into_inner());
+                let mut block = block.locked();
                 for (k, v) in block.iter_mut().enumerate() {
                     *v = f(b * BLOCK + k);
                 }

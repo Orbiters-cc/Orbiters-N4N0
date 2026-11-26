@@ -3,6 +3,7 @@
 //! shows; here its pictures are egui textures (in the retro look's green), and what it asks goes to the service
 //! over the backend.
 
+use orbiters_core::locks::*;
 use crate::backend::Ctl;
 use crate::ipc::N4n0Command;
 use crate::overlay::menu_retro;
@@ -58,9 +59,7 @@ impl Kept {
 
 impl Textures {
     fn of(&self, name: &str, image: ColorImage) -> (TextureHandle, TextureHandle) {
-        if let Ok(mut images) = self.images.lock() {
-            images.insert(name, image.clone());
-        }
+        self.images.locked().insert(name, image.clone());
         let green = menu_retro::phosphor(&image);
         (self.textures.load_texture(name, image, TextureOptions::LINEAR), self.textures.load_texture(format!("{name}-dots"), green, TextureOptions::LINEAR))
     }
@@ -154,7 +153,7 @@ impl MenuHost {
 
     /// A fetched picture's pixels by its name, for a canvas of another context.
     pub fn image(&self, key: &str) -> Option<ColorImage> {
-        self.0.pictures().images.lock().ok()?.get(key).cloned()
+        self.0.pictures().images.locked().get(key).cloned()
     }
 
     /// A thumbnail by its key once loaded, as the look draws it (`retro`: in its green).

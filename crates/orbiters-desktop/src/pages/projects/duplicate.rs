@@ -3,6 +3,7 @@
 //! Stop. Once copied its packages are restored, VCC and ALCOM list it, and it opens in the panel. Its scenes keep their
 //! blueprint IDs, which the dialog says: uploads from the copy update the same avatars and worlds.
 
+use orbiters_core::locks::*;
 use orbiters_i18n::{mark, tr};
 use super::art;
 use super::dialogs::{creating, inline_warning, note};
@@ -92,7 +93,7 @@ fn look(ctx: &egui::Context, state: &mut State, project: &Project) {
 
 /// What a finished copy says, with the links it left out.
 pub(super) fn with_left_out(said: String, progress: &templates::SharedProgress) -> String {
-    match progress.lock().unwrap().left_out() {
+    match progress.locked().left_out() {
         Some(left_out) => format!("{said}. {left_out}"),
         None => said,
     }
@@ -262,7 +263,7 @@ pub(super) fn footer(ui: &mut Ui, state: &mut State, path: &Path) {
         let name = state.dup.name.clone();
         let keep = templates::Keep { library: state.dup.library };
         state.copy_cancel = Arc::new(AtomicBool::new(false));
-        *state.copy_progress.lock().unwrap() = Default::default();
+        *state.copy_progress.locked() = Default::default();
         let cancel = state.copy_cancel.clone();
         let progress = state.copy_progress.clone();
         // A failure restoring the copy's packages is the copy's: its card's retry must change the copy, never the project
@@ -282,7 +283,7 @@ pub(super) fn footer(ui: &mut Ui, state: &mut State, path: &Path) {
         });
     }
     if busy {
-        let p = state.copy_progress.lock().unwrap().clone();
+        let p = state.copy_progress.locked().clone();
         if p.phase == mark("Copying project") && widgets::activated(&Button::new(tr("Stop copying")).variant(Variant::Ghost).id_salt("dup-stop").show(ui)) {
             state.copy_cancel.store(true, Ordering::Relaxed);
         }

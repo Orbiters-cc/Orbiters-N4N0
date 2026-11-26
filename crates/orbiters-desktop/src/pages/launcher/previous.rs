@@ -15,6 +15,7 @@
 //!
 //! [`Request::Instance`]: crate::controller::vrchat_data::Request::Instance
 
+use orbiters_core::locks::*;
 use super::destinations::{joinable_without_asking, kind_access, kinds, rejoinable, Places, Tone};
 use super::selection::{Asker, Destination, Offer, Origin, Outcome, Verified};
 use super::{access_icon, access_name, cover_uv, region_tag, Cx, State};
@@ -140,7 +141,7 @@ impl Previous {
 
     /// Pictures of the page and tests: the history's instances handed in (nothing read), the sheet up with `query`.
     pub fn stand_in(&mut self, rows: Vec<Visit>, query: &str) {
-        self.history.lock().unwrap_or_else(|e| e.into_inner()).rows = Some(rows);
+        self.history.locked().rows = Some(rows);
         self.staged = true;
         self.quiet = true;
         self.query = query.into();
@@ -171,7 +172,7 @@ impl Previous {
         self.query.clear();
         if !self.staged {
             // Read again (it changes as VRChat runs), unless a read is under way: its rows come.
-            let mut h = self.history.lock().unwrap_or_else(|e| e.into_inner());
+            let mut h = self.history.locked();
             if !h.reading {
                 h.rows = None;
             }
@@ -487,7 +488,7 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     };
     if let (false, Some(reader)) = (state.places.previous.staged, reader) {
         let start = {
-            let mut h = state.places.previous.history.lock().unwrap_or_else(|e| e.into_inner());
+            let mut h = state.places.previous.history.locked();
             let start = h.rows.is_none() && !h.reading;
             h.reading |= start;
             start
@@ -496,14 +497,14 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
             let (history, ctx2) = (state.places.previous.history.clone(), ctx.clone());
             let started = std::thread::Builder::new().name("where-previous-history".into()).spawn(move || {
                 let rows = reader();
-                let mut h = history.lock().unwrap_or_else(|e| e.into_inner());
+                let mut h = history.locked();
                 h.rows = Some(rows);
                 h.reading = false;
                 drop(h);
                 ctx2.request_repaint();
             });
             if started.is_err() {
-                let mut h = state.places.previous.history.lock().unwrap_or_else(|e| e.into_inner());
+                let mut h = state.places.previous.history.locked();
                 h.rows = Some(Vec::new());
                 h.reading = false;
             }
@@ -532,7 +533,7 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     // The head: its name, what it is, and close.
     let p = panel.painter().clone();
     widgets::text(&p, pos2(inner.left(), inner.top() + 14.0), Align2::LEFT_CENTER, &Txt::new(tr("Previous instances"), 20.0).weight(weight::SEMIBOLD).tracking(-0.01));
-    let rows = state.places.previous.history.lock().unwrap_or_else(|e| e.into_inner()).rows.clone();
+    let rows = state.places.previous.history.locked().rows.clone();
     let sub = match &rows {
         Some(rows) if !rows.is_empty() => tr_n("{count} instance you were in, newest first", "{count} instances you were in, newest first", rows.len() as u64),
         _ => tr("Instances you were in").into(),

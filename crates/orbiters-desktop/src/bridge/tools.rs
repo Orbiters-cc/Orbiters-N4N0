@@ -2,6 +2,7 @@
 //! done, and say when to use them and what comes back. A refusal always says why (`code`, `message`) and what to do next
 //! (`next`), and the state a model reads is one call away (`get_state`).
 
+use orbiters_core::locks::*;
 use super::game::{Failure, Feedback, FeedbackAccount, Find, GameWindow, LaunchPlan, OscArg, Seen, Shot};
 use super::input::{self, Hold, Input, MouseButton, KEYS, OSC_INPUTS};
 use super::person::{Paused, HOTKEY, RESUME_AFTER};
@@ -705,7 +706,7 @@ impl Bridge {
                 self.map_call(map, &s, args)
             }),
             "open_session" => {
-                let Ok(_one) = self.opening.try_lock() else {
+                let Some(_one) = self.opening.try_locked() else {
                     return Err(Failure::new(
                         "busy",
                         "Another open_session is starting a VRChat now.",
@@ -805,7 +806,7 @@ impl Bridge {
 
     /// One action at a time in a session (sessions act side by side).
     fn exclusively<T>(&self, s: &Session, action: impl FnOnce() -> Result<T, Failure>) -> Result<T, Failure> {
-        let Ok(_one) = s.action.try_lock() else {
+        let Some(_one) = s.action.try_locked() else {
             return Err(Failure::new("busy", "Another action is running in this session.", "Wait for its answer before starting the next: one at a time."));
         };
         action()
@@ -814,7 +815,7 @@ impl Bridge {
     /// The game this bridge started, or why not.
     fn ours(&self, s: &Session, seen: &Seen) -> Result<u32, Failure> {
         let (ours, candidate, created, closing) = {
-            let run = s.run.lock().unwrap();
+            let run = s.run.locked();
             (run.pid, run.candidate, run.created, run.closing_out.is_some())
         };
         if closing && ours.is_some() {
@@ -828,7 +829,7 @@ impl Bridge {
         // process later). One that is not is let go, never acted on.
         if let (Some(pid), Some(created), false) = (ours, created, candidate) {
             if matches!(s.game.identity(pid), super::game::Identity::Running(start) if start != created) || s.game.identity(pid) == super::game::Identity::Gone {
-                let mut run = s.run.lock().unwrap();
+                let mut run = s.run.locked();
                 if run.pid == Some(pid) {
                     run.pid = None;
                     run.created = None;
@@ -938,7 +939,7 @@ impl Bridge {
     /// found its window at 1777 by 1117, where the guide's camera icon at (640, 620) is not). Without activating it or bringing
     /// it to the front: the foreground stays whoever's it is. Whether it was put back.
     fn fit_window(&self, s: &Session, pid: u32, window: GameWindow) -> (GameWindow, bool) {
-        let Some((width, height)) = s.run.lock().unwrap().size else { return (window, false) };
+        let Some((width, height)) = s.run.locked().size else { return (window, false) };
         if (window.width, window.height) == (width, height) || window.width == 0 || window.height == 0 {
             return (window, false);
         }
@@ -972,7 +973,7 @@ impl Bridge {
         let seen = s.game.seen();
         // A side start that could not be resolved: said to the agent (get_state) and the person (the bridge's log), once.
         if let Some(said) = s.game.unresolved() {
-            let mut run = s.run.lock().unwrap();
+            let mut run = s.run.locked();
             if run.unproven.as_ref() != Some(&said) {
                 run.unproven = Some(said.clone());
                 drop(run);
@@ -981,16 +982,16 @@ impl Bridge {
         }
         // The account a side session's VRChat is signed in with: its private instances are a bridge session's own.
         if let Some((account, _)) = seen.session_account.as_ref().filter(|_| !s.is_main()) {
-            self.journal.lock().unwrap().account(account);
+            self.journal.locked().account(account);
         }
         // Whether the VRChat followed now is this start's own, as ITS command line says (read for that process only, and
         // not under the session's lock).
         let proof_for = {
-            let run = s.run.lock().unwrap();
+            let run = s.run.locked();
             run.going.clone().filter(|g| s.is_main() && g.started).zip(seen.pid)
         };
         let proven_pid = proof_for.filter(|(going, pid)| Self::launched_by_bridge(s, going, *pid)).map(|(_, pid)| pid);
-        let mut run = s.run.lock().unwrap();
+        let mut run = s.run.locked();
         let mut settled = false;
         // Closing what was somewhere it must not be: told only once its process is seen gone (or the time is up).
         if let Some(closing) = run.closing_out.clone() {
@@ -1080,7 +1081,7 @@ impl Bridge {
                     // bridge's own VRChat.
                     run.candidate = false;
                     let world = going.world_id.to_ascii_lowercase();
-                    self.journal.lock().unwrap().arrived(&world, seen.world_name.as_deref(), s.profile.unwrap_or(0));
+                    self.journal.locked().arrived(&world, seen.world_name.as_deref(), s.profile.unwrap_or(0));
                     if !run.been.contains(&world) {
                         run.been.push(world);
                     }
@@ -1157,7 +1158,7 @@ impl Bridge {
                 Some(window) => s.game.close(&window).map_err(|f| f.message),
                 None => Err("its window was not found".to_string()), // i18n: not shown (an AI client reads it)
             };
-            let mut run = s.run.lock().unwrap();
+            let mut run = s.run.locked();
             if let Some(closing) = run.closing_out.as_mut().filter(|c| !c.told) {
                 // The time to close counts from the close asked, as before.
                 closing.since = Instant::now();
@@ -1262,10 +1263,10 @@ impl Bridge {
         self.follow_game(s);
         let seen = s.game.seen();
         let (ours, going, event, pictures, unproven, closing) = {
-            let run = s.run.lock().unwrap();
+            let run = s.run.locked();
             (run.pid, run.going.clone(), run.event.clone(), run.pictures.clone(), run.unproven.clone(), run.closing_out.as_ref().map(|c| c.why.clone()))
         };
-        let started_by_bridge = ours.is_some() && ours == seen.pid && !s.run.lock().unwrap().candidate;
+        let started_by_bridge = ours.is_some() && ours == seen.pid && !s.run.locked().candidate;
         let window = seen.pid.filter(|_| started_by_bridge).and_then(|pid| s.game.window(pid));
         let camera_open = if started_by_bridge { s.game.camera_open() } else { None };
         let capture_kit = if started_by_bridge && seen.local_player.is_some() { s.game.capture_kit() } else { None };
@@ -1334,7 +1335,7 @@ impl Bridge {
             "pictures": picture_list,
             "orbiters": orbiters,
             "disks": disks,
-            "vrchats": self.opener.lock().unwrap().clone().map(|o| o.vrchats()).unwrap_or(Value::Array(Vec::new())),
+            "vrchats": self.opener.locked().clone().map(|o| o.vrchats()).unwrap_or(Value::Array(Vec::new())),
             "next": match &disk_warning { Some(w) => format!("{w} Then: {next}"), None => next },
             "disk_warning": disk_warning,
         });
@@ -1527,9 +1528,9 @@ impl Bridge {
     fn go_to_world_admitted(&self, s: &Session, args: &Value, call: &Call, world_id: &str, region: &str, seen: &Seen, pid: Option<u32>) -> Result<Answer, Failure> {
         let seen = seen.clone();
         // A destination made for a start that did not happen, of this world and region: resumed, not made again.
-        let resumed = s.is_main().then(|| s.run.lock().unwrap().kept.clone()).flatten().filter(|k| k.world_id == world_id && k.region == region && k.at.elapsed() < super::KEPT_FOR);
+        let resumed = s.is_main().then(|| s.run.locked().kept.clone()).flatten().filter(|k| k.world_id == world_id && k.region == region && k.at.elapsed() < super::KEPT_FOR);
         let every = self.timing.instance_every;
-        if let Some(wait) = s.run.lock().unwrap().last_instance.map(|at| at.elapsed()).filter(|e| *e < every).map(|e| every - e).filter(|_| resumed.is_none()) {
+        if let Some(wait) = s.run.locked().last_instance.map(|at| at.elapsed()).filter(|e| *e < every).map(|e| every - e).filter(|_| resumed.is_none()) {
             let seconds = wait.as_secs() + 1;
             return Err(Failure::new(
                 "too_soon",
@@ -1570,7 +1571,7 @@ impl Bridge {
             ));
         }
         {
-            let mut run = s.run.lock().unwrap();
+            let mut run = s.run.locked();
             run.last_instance = Some(Instant::now());
             run.event = None;
             run.left = false;
@@ -1665,24 +1666,24 @@ impl Bridge {
                 })?),
             };
             // Another profile for the main session must not be a side session's (two VRChats of one account) (BRIDGE-17 g).
-            if let Some(p) = profile.filter(|p| *p > 0 && self.sides.lock().unwrap().iter().any(|x| x.profile == Some(*p))) {
+            if let Some(p) = profile.filter(|p| *p > 0 && self.sides.locked().iter().any(|x| x.profile == Some(*p))) {
                 return Err(Failure::new("profile_in_use", format!("Profile {p} is a side session's."), "Use that session (pass its id), or another profile."));
             }
             let plan = LaunchPlan { world_id: world_id.to_string(), instance: instance.clone(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT, profile, osc: None, vr: false };
             // Beside side sessions, one launch at a time: a new VRChat is told apart by appearing after its launch.
-            let _one = self.launching.lock().unwrap();
-            if self.opener.lock().unwrap().clone().is_some_and(|o| o.eac().delete_pending) {
+            let _one = self.launching.locked();
+            if self.opener.locked().clone().is_some_and(|o| o.eac().delete_pending) {
                 return Err(sessions::Eac::stuck_failure());
             }
             s.game.launch(&plan)
         })();
         if let Err(failure) = start {
-            s.run.lock().unwrap().going = None;
+            s.run.locked().going = None;
             s.game.hold_reconstructions(false);
             return Err(failure);
         }
         {
-            let mut run = s.run.lock().unwrap();
+            let mut run = s.run.locked();
             // Launched into it: no longer a destination to resume.
             run.kept = None;
             if let Some(going) = run.going.as_mut() {
@@ -1712,7 +1713,7 @@ impl Bridge {
 
     fn is_going(&self, s: &Session) -> bool {
         self.follow_game(s);
-        s.run.lock().unwrap().going.is_some()
+        s.run.locked().going.is_some()
     }
 
     /// What became of a start: where it arrived, still on its way, or the failure.
@@ -1720,7 +1721,7 @@ impl Bridge {
         if !settled {
             return Ok(json!({ "arrived": false, "world_id": world_id, "next": "VRChat is still on its way: call wait_for with until in_world." }));
         }
-        let event = s.run.lock().unwrap().event.clone();
+        let event = s.run.locked().event.clone();
         let seen = s.game.seen();
         if let Some(event) = event {
             return Err(Self::start_failure(s, event, "Call close_vrchat and go on with the next world. If this is the first world, tell the person."));
@@ -1729,7 +1730,7 @@ impl Bridge {
         // Only the bridge's own proven VRChat's window is looked at.
         if let Some(window) = self.ours(s, &seen).ok().and_then(|pid| s.game.window(pid)) {
             // Measured once, at the first arrival after its launch: the reference until the next launch.
-            s.run.lock().unwrap().size.get_or_insert((window.width, window.height));
+            s.run.locked().size.get_or_insert((window.width, window.height));
         }
         let foreground = self.forward_on_arrival(s, &seen);
         let capture_kit = s.game.capture_kit();
@@ -1765,14 +1766,14 @@ impl Bridge {
 
     /// A start's failure: it did not arrive (`start_timeout`), or it landed elsewhere and was left (`landed_elsewhere`).
     fn start_failure(s: &Session, event: String, next: &str) -> Failure {
-        if s.run.lock().unwrap().crashed {
+        if s.run.locked().crashed {
             return Failure::new(
                 "start_crashed",
                 event,
                 "Call close_vrchat if get_state says VRChat still runs, then go on with the next world (go_to_world again for this one at most once). It is the engine's, not yours: say it in your report.",
             );
         }
-        if s.run.lock().unwrap().left {
+        if s.run.locked().left {
             Failure::new(
                 "landed_elsewhere",
                 event,
@@ -1831,11 +1832,11 @@ impl Bridge {
 
     fn close_and_wait(&self, s: &Session, pid: u32, call: &Call) -> Result<(), Failure> {
         let window = self.window_to_close(s, pid).ok_or_else(|| Failure::new("no_window", "VRChat has no window yet.", "Wait a moment and call get_state."))?;
-        s.run.lock().unwrap().closing = true;
+        s.run.locked().closing = true;
         let closed = s.game.close(&window).and_then(|()| self.wait_until(CLOSE_LIMIT, call, || !s.game.seen().running));
         {
             // In one step with what it says: the listener's next look finds either the game ours or nothing to tell.
-            let mut run = s.run.lock().unwrap();
+            let mut run = s.run.locked();
             run.closing = false;
             if matches!(closed, Ok(true)) {
                 run.pid = None;
@@ -1894,7 +1895,7 @@ impl Bridge {
         if until == "in_world" && done {
             let seen = s.game.seen();
             if !seen.running {
-                let event = s.run.lock().unwrap().event.clone();
+                let event = s.run.locked().event.clone();
                 return Err(event.map_or_else(
                     || Failure::new("vrchat_not_running", "VRChat is not running, and nothing is on its way.", "Call go_to_world."),
                     |event| Self::start_failure(s, event, "Go on with the next world. If this is the first world, tell the person."),
@@ -1927,7 +1928,7 @@ impl Bridge {
         if let Some(rig) = s.vr() {
             // The headset's left eye, as SteamVR composited it: mouse takes this picture's pixels for the laser.
             let shot = super::vr::eye_shot(&rig.eye()?, max_width)?;
-            *s.vr_shot.lock().unwrap() = Some((shot.width, shot.height));
+            *s.vr_shot.locked() = Some((shot.width, shot.height));
             let info = json!({
                 "timestamp": orbiters_core::visited::now(),
                 "vr": true,
@@ -2001,7 +2002,7 @@ impl Bridge {
         let still_ok = || {
             let seen = s.game.seen();
             if let Some(s) = seen.speed {
-                let mut most = speed.lock().unwrap();
+                let mut most = speed.locked();
                 *most = Some(most.map_or(s, |m: f32| m.max(s)));
             }
             Self::in_private_instance(&seen)
@@ -2011,7 +2012,7 @@ impl Bridge {
         // What the map shows ahead, before the avatar goes (none without a map of this world or a known avatar).
         let map = self.map_note_for_walk(s, direction, seconds.as_secs_f32(), run);
         let held = self.press_for(s, call, &holds, seconds, None, &still_ok)?;
-        let speed_seen = speed.lock().unwrap().or(s.game.seen().speed);
+        let speed_seen = speed.locked().or(s.game.seen().speed);
         self.map_walked(s, direction, held.as_secs_f64(), speed_seen, run);
         let note = match speed_seen {
             Some(s) if s < 0.1 => Some("VRChat reported no movement: blocked, seated, or a menu open. Look with screenshot."),
@@ -2107,7 +2108,7 @@ impl Bridge {
         if !matches!(action, "move" | "click") {
             return Err(Self::vr_session());
         }
-        let Some((width, height)) = *s.vr_shot.lock().unwrap() else {
+        let Some((width, height)) = *s.vr_shot.locked() else {
             return Err(Failure::new("no_screenshot", "Nothing was looked at yet in this VR session.", "Take a screenshot first: x and y are pixels of it."));
         };
         let (Some(x), Some(y)) = (args["x"].as_f64(), args["y"].as_f64()) else {
@@ -2168,7 +2169,7 @@ impl Bridge {
         let window = self.window(s, pid)?;
         // A point outside the size the coordinates are for lands nowhere: said before the window is focused or put back.
         if matches!(action, "move" | "click") {
-            let (width, height) = s.run.lock().unwrap().size.unwrap_or((window.width, window.height));
+            let (width, height) = s.run.locked().size.unwrap_or((window.width, window.height));
             if let (Some(x), Some(y)) = (args["x"].as_u64(), args["y"].as_u64()) {
                 if x >= u64::from(width) || y >= u64::from(height) {
                     return Err(Self::outside_window(x, y, width, height));
@@ -2368,10 +2369,10 @@ impl Bridge {
         struct Starting<'a>(&'a Session);
         impl Drop for Starting<'_> {
             fn drop(&mut self) {
-                self.0.run.lock().unwrap().starting_picture = false;
+                self.0.run.locked().starting_picture = false;
             }
         }
-        s.run.lock().unwrap().starting_picture = true;
+        s.run.locked().starting_picture = true;
         let _starting = Starting(s);
         s.game.take_picture(length, mode)?;
         // The session is known once the recording started: a new one, as the last recording's stays named meanwhile.
@@ -2389,8 +2390,8 @@ impl Bridge {
         }
         let session = seen.capture.session.clone().unwrap_or_default();
         // The recording the bridge started: the only one a Stop of the bridge's may end.
-        s.run.lock().unwrap().recording = Some(session.clone());
-        self.journal.lock().unwrap().pictured(super::journal::Picture {
+        s.run.locked().recording = Some(session.clone());
+        self.journal.locked().pictured(super::journal::Picture {
             session: file_name(&session),
             world_id: seen.world_id.clone(),
             world_name: seen.world_name.clone(),
@@ -2399,7 +2400,7 @@ impl Bridge {
             at: orbiters_core::visited::now(),
             freed: None,
         });
-        s.run.lock().unwrap().pictures.push(PictureRecord {
+        s.run.locked().pictures.push(PictureRecord {
             session: session.clone(),
             world_id: seen.world_id.clone(),
             world_name: seen.world_name.clone(),
@@ -2502,7 +2503,7 @@ impl Bridge {
     /// The session a call names (`session`), or main without one. A side session renews its lease with every call.
     pub(crate) fn session_of(&self, args: &Value, renew: bool) -> Result<Arc<Session>, Failure> {
         let Some(id) = args["session"].as_str().filter(|id| *id != sessions::MAIN) else { return Ok(self.main.clone()) };
-        let sides = self.sides.lock().unwrap();
+        let sides = self.sides.locked();
         let Some(s) = sides.iter().find(|s| s.id == id).cloned() else {
             let profile = id.split_once('-').and_then(|(p, _)| p.strip_prefix('p')).and_then(|p| p.parse::<u32>().ok());
             let taken = profile.is_some_and(|p| sides.iter().any(|s| s.profile == Some(p)));
@@ -2517,7 +2518,7 @@ impl Bridge {
             });
         };
         if renew {
-            if let Some(lease) = s.lease.lock().unwrap().as_mut() {
+            if let Some(lease) = s.lease.locked().as_mut() {
                 lease.last_call = Instant::now();
             }
         }
@@ -2533,7 +2534,7 @@ impl Bridge {
         if let Some(paused) = self.paused() {
             return Err(paused_failure(&paused));
         }
-        if let Err(wait) = self.focus.lock().unwrap().ask(&s.id, Instant::now()) {
+        if let Err(wait) = self.focus.locked().ask(&s.id, Instant::now()) {
             return Err(Failure::new(
                 "focus_busy",
                 "Another session is using the keyboard and the mouse: only one VRChat window can have them at a time.",
@@ -2544,7 +2545,7 @@ impl Bridge {
         if s.game.is_foreground(window) {
             return Ok(());
         }
-        let opener = self.opener.lock().unwrap().clone();
+        let opener = self.opener.locked().clone();
         let ours: Vec<u32> = self.sessions().iter().filter_map(|x| x.pid()).collect();
         if let Some(fg) = opener.as_ref().and_then(|o| o.foreground_pid()) {
             if opener.as_ref().is_some_and(|o| o.vrchat_pids().contains(&fg)) && !ours.contains(&fg) {
@@ -2589,14 +2590,14 @@ impl Bridge {
         if let Some(paused) = self.paused().filter(|p| !(args["vr"].as_bool() == Some(true) && matches!(p, super::person::Paused::Person { .. }))) {
             return Err(paused_failure(&paused));
         }
-        let Some(opener) = self.opener.lock().unwrap().clone() else {
+        let Some(opener) = self.opener.locked().clone() else {
             return Err(Failure::new("sessions_unavailable", "This bridge cannot open sessions here.", "Use the main session: tools without session."));
         };
         let owner = self.client_seen().map_or_else(|| "an MCP client".to_string(), |c| c.name);
         // The profile's session already: its own agent's, or one left alone long enough to take over.
-        let existing = self.sides.lock().unwrap().iter().find(|s| s.profile == Some(profile)).cloned();
+        let existing = self.sides.locked().iter().find(|s| s.profile == Some(profile)).cloned();
         if let Some(existing) = existing {
-            let lease = existing.lease.lock().unwrap().clone();
+            let lease = existing.lease.locked().clone();
             let stale = lease.as_ref().is_none_or(|l| l.stale(Instant::now()));
             if !stale || !args["take_over"].as_bool().unwrap_or(false) {
                 let idle = lease.as_ref().map_or(0, |l| l.last_call.elapsed().as_secs());
@@ -2613,15 +2614,15 @@ impl Bridge {
             // Taken over: the same VRChat, a new key; the old one is refused from now on.
             self.release_session(&existing);
             let renamed = Session::new(&sessions::new_id(profile), existing.profile, existing.osc, existing.game.clone());
-            *renamed.run.lock().unwrap() = std::mem::take(&mut *existing.run.lock().unwrap());
-            *renamed.vr.lock().unwrap() = existing.vr.lock().unwrap().take();
-            *renamed.lease.lock().unwrap() = Some(Lease { owner: owner.clone(), last_call: Instant::now() });
+            *renamed.run.locked() = std::mem::take(&mut *existing.run.locked());
+            *renamed.vr.locked() = existing.vr.locked().take();
+            *renamed.lease.locked() = Some(Lease { owner: owner.clone(), last_call: Instant::now() });
             {
-                let mut sides = self.sides.lock().unwrap();
+                let mut sides = self.sides.locked();
                 sides.retain(|s| s.id != existing.id);
                 sides.push(renamed.clone());
             }
-            self.focus.lock().unwrap().leave(&existing.id);
+            self.focus.locked().leave(&existing.id);
             opener.rename(&existing.id, &renamed.id);
             self.log(true, format!("session of profile {profile} taken over by {owner}"));
             return Ok(Answer::Data(json!({ "session": renamed.id, "profile": profile, "taken_over": true, "state": self.state(&renamed) })));
@@ -2641,9 +2642,9 @@ impl Bridge {
                 ));
             };
             let s = Session::new(&id, Some(profile), Some(osc), game);
-            *s.lease.lock().unwrap() = Some(Lease { owner: owner.clone(), last_call: Instant::now() });
-            s.run.lock().unwrap().pid = Some(pid);
-            self.sides.lock().unwrap().push(s.clone());
+            *s.lease.locked() = Some(Lease { owner: owner.clone(), last_call: Instant::now() });
+            s.run.locked().pid = Some(pid);
+            self.sides.locked().push(s.clone());
             let known = self.wait_until(Duration::from_secs(10), call, || {
                 let seen = s.game.seen();
                 seen.needs_sign_in || seen.session_account.is_some()
@@ -2693,19 +2694,19 @@ impl Bridge {
             }
         };
         let s = Session::new(&id, Some(profile), Some(osc), game);
-        *s.vr.lock().unwrap() = rig.clone();
-        *s.lease.lock().unwrap() = Some(Lease { owner: owner.clone(), last_call: Instant::now() });
+        *s.vr.locked() = rig.clone();
+        *s.lease.locked() = Some(Lease { owner: owner.clone(), last_call: Instant::now() });
         // A start that fails releases all it took: its OSC listener and its mark (2026-11-15 07:13: a failed start kept port
         // 9011 bound until the app restarted, and every open_session after it answered port_taken).
         // Listed before its launch (BRIDGE-6): Stop, the ticks and the profile's other callers see a start under way.
-        self.sides.lock().unwrap().push(s.clone());
+        self.sides.locked().push(s.clone());
         if let Err(mut failure) = self.launch_side(&s, LaunchPlan { world_id: String::new(), instance: String::new(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT, profile: Some(profile), osc: Some(osc), vr: rig.is_some() }, call) {
-            if s.run.lock().unwrap().given_up.is_some() {
+            if s.run.locked().given_up.is_some() {
                 // The launch went out and its VRChat has not come up (yet): said, so that it is not forgotten (its ports are
                 // freed; the next open_session of this profile takes that VRChat, by its own log, if it comes).
                 failure.message = format!("{} A VRChat of this launch may still come up: open_session with profile {profile} again takes it.", failure.message); // i18n: not shown (an AI client reads it)
             }
-            self.sides.lock().unwrap().retain(|x| x.id != s.id);
+            self.sides.locked().retain(|x| x.id != s.id);
             opener.forget(&id);
             if let Some(rig) = &rig {
                 rig.release();
@@ -2750,13 +2751,13 @@ impl Bridge {
     /// deletion (`eac_stuck`: no launch can work until Windows restarts). A launch that brings no VRChat up has its launcher
     /// ended (it hangs on its error window otherwise) and answers what Easy Anti-Cheat's launcher said.
     fn launch_side(&self, s: &Session, plan: LaunchPlan, call: &Call) -> Result<(), Failure> {
-        let opener = self.opener.lock().unwrap().clone().ok_or_else(|| Failure::new("sessions_unavailable", "This bridge cannot open sessions here.", "Use the main session."))?;
-        let _one = self.launching.lock().unwrap();
+        let opener = self.opener.locked().clone().ok_or_else(|| Failure::new("sessions_unavailable", "This bridge cannot open sessions here.", "Use the main session."))?;
+        let _one = self.launching.locked();
         // Easy Anti-Cheat of a VRChat that just closed: wait for it, within the call. Read every 2 s, not at every look: each
         // reading is a query of the service manager.
         let eac = std::sync::Mutex::new((opener.eac(), Instant::now()));
         let now = || {
-            let mut seen = eac.lock().unwrap();
+            let mut seen = eac.locked();
             if seen.1.elapsed() >= Duration::from_secs(2) {
                 *seen = (opener.eac(), Instant::now());
             }
@@ -2785,7 +2786,7 @@ impl Bridge {
         // The call ending early (client gone, person back) still leaves a start whose VRChat may come: it is looked for.
         let given_up = |failure: Failure| {
             let pid = s.game.seen().pid;
-            let mut run = s.run.lock().unwrap();
+            let mut run = s.run.locked();
             if pid.is_none() {
                 run.given_up = Some((Instant::now(), began, run.going.clone()));
             } else {
@@ -2800,11 +2801,11 @@ impl Bridge {
                 }
                 let said = opener.launcher_outcome(began);
                 let failed = said.as_ref().is_some_and(|(code, _)| sessions::launcher_said(*code) == sessions::LauncherSaid::Failed);
-                *outcome.lock().unwrap() = said;
+                *outcome.locked() = said;
                 failed
             })
             .map_err(given_up)?;
-        let loading = || outcome.lock().unwrap().as_ref().is_none_or(|(code, _)| sessions::launcher_said(*code) != sessions::LauncherSaid::Failed);
+        let loading = || outcome.locked().as_ref().is_none_or(|(code, _)| sessions::launcher_said(*code) != sessions::LauncherSaid::Failed);
         if launched.is_ok() && !started && s.game.seen().pid.is_none() && loading() {
             // The anti-cheat said it loaded (or nothing it knows): the game comes, a cold start after Windows restarted took the
             // longest. As long again.
@@ -2816,12 +2817,12 @@ impl Bridge {
             // looked for once more: a start is never answered failed while its VRChat runs.
             let ended = osc.map_or(0, |osc| opener.end_launcher(osc));
             pid = s.game.seen().pid.or_else(|| s.game.adopt(Some(began)));
-            let said = outcome.lock().unwrap().clone().or_else(|| opener.launcher_outcome(began));
+            let said = outcome.locked().clone().or_else(|| opener.launcher_outcome(began));
             let said_words = said.as_ref().map_or("no outcome".to_string(), |(c, w)| format!("{c}: {w}"));
             if pid.is_none() {
                 self.log(false, format!("VRChat did not come up ({said_words}); {ended} launcher process(es) of this start ended, no VRChat of it runs"));
                 launched?;
-                let mut run = s.run.lock().unwrap();
+                let mut run = s.run.locked();
                 run.pid = None;
                 run.given_up = Some((Instant::now(), began, run.going.clone()));
                 drop(run);
@@ -2829,7 +2830,7 @@ impl Bridge {
             }
             self.log(true, format!("VRChat of this start came up late ({said_words}): kept as this session's"));
         }
-        let mut run = s.run.lock().unwrap();
+        let mut run = s.run.locked();
         run.pid = pid;
         run.given_up = None;
         run.launched_at = Some(Instant::now());
@@ -2845,7 +2846,7 @@ impl Bridge {
             return;
         }
         let since = {
-            let mut run = s.run.lock().unwrap();
+            let mut run = s.run.locked();
             match &run.given_up {
                 Some((at, _, _)) if at.elapsed() > GIVEN_UP_WATCHED => {
                     run.given_up = None;
@@ -2856,7 +2857,7 @@ impl Bridge {
             }
         };
         let Some(pid) = s.game.adopt(Some(since)) else { return };
-        let mut run = s.run.lock().unwrap();
+        let mut run = s.run.locked();
         let Some((_, _, going)) = run.given_up.take() else { return };
         run.pid = Some(pid);
         let resumed = run.going.is_none() && going.is_some();
@@ -2872,7 +2873,7 @@ impl Bridge {
 
     /// `list_sessions`.
     fn list_sessions(&self) -> Value {
-        let opener = self.opener.lock().unwrap().clone();
+        let opener = self.opener.locked().clone();
         // A VRChat of a start given up on is its session's before the person's are counted.
         for s in self.sessions() {
             self.adopt_given_up(&s);
@@ -2882,7 +2883,7 @@ impl Bridge {
             .iter()
             .map(|s| {
                 let seen = s.game.seen();
-                let lease = s.lease.lock().unwrap().clone();
+                let lease = s.lease.locked().clone();
                 json!({
                     "session": if s.is_main() { sessions::MAIN.to_string() } else { short_id(&s.id) },
                     "profile": s.profile.unwrap_or(0),
@@ -2902,7 +2903,7 @@ impl Bridge {
             "persons_vrchats_running": persons,
             "vrchats": opener.as_ref().map(|o| o.vrchats()).unwrap_or(Value::Array(Vec::new())),
             "limit": opener.as_ref().map(|o| o.limit()),
-            "keyboard_and_mouse_turn": self.focus.lock().unwrap().holder().map(short_id),
+            "keyboard_and_mouse_turn": self.focus.locked().holder().map(short_id),
             "next": if self.capabilities().side_sessions {
                 "Your own session's full id is the one open_session gave you: pass it as session. Ids are not shown here, so that nobody drives another agent's session by accident."
             } else {
@@ -2927,7 +2928,7 @@ impl Bridge {
         // (2026-11-13). Signed in, it began two seconds after; never signed in, it is given 90 s.
         // The age of its VRChat (its launch), not of the session (BRIDGE-17 h): a session taken over has an old VRChat, and
         // a relaunch a young one.
-        let age = s.run.lock().unwrap().launched_at.map(|t| t.elapsed());
+        let age = s.run.locked().launched_at.map(|t| t.elapsed());
         let young = age.is_some_and(|a| a < Duration::from_secs(90)) && seen.session_account.is_none();
         if young {
             let wait = 90 - age.unwrap_or_default().as_secs();
@@ -2943,15 +2944,15 @@ impl Bridge {
             self.close_and_wait(s, pid, call)?;
         }
         // A start still under way held the reconstructions: given back with the session, which nobody follows any more (BRIDGE-11).
-        if s.run.lock().unwrap().going.take().is_some() {
+        if s.run.locked().going.take().is_some() {
             s.game.hold_reconstructions(false);
         }
-        self.sides.lock().unwrap().retain(|x| x.id != s.id);
-        self.focus.lock().unwrap().leave(&s.id);
-        if let Some(rig) = s.vr.lock().unwrap().take() {
+        self.sides.locked().retain(|x| x.id != s.id);
+        self.focus.locked().leave(&s.id);
+        if let Some(rig) = s.vr.locked().take() {
             rig.release();
         }
-        if let Some(opener) = self.opener.lock().unwrap().clone() {
+        if let Some(opener) = self.opener.locked().clone() {
             opener.forget(&s.id);
         }
         Ok(Answer::Data(json!({ "closed": true, "session": s.id, "next": "This session is gone: its id is refused from now on." })))
@@ -2959,7 +2960,7 @@ impl Bridge {
 
     /// What get_state says of the session itself.
     fn session_json(&self, s: &Session, seen: &Seen) -> Value {
-        let lease = s.lease.lock().unwrap().clone();
+        let lease = s.lease.locked().clone();
         json!({
             "id": if s.is_main() { sessions::MAIN.to_string() } else { s.id.clone() },
             "profile": s.profile.unwrap_or(0),
@@ -2969,7 +2970,7 @@ impl Bridge {
             "driven_by": lease.map(|l| l.owner),
             "paused_here": self.paused_in(s),
             "chosen_by_person": s.game.chosen_by_person(),
-            "keyboard_and_mouse_turn": self.focus.lock().unwrap().holder().map(|h| h == s.id),
+            "keyboard_and_mouse_turn": self.focus.locked().holder().map(|h| h == s.id),
         })
     }
 }
@@ -3029,7 +3030,7 @@ fn account_json(account: Option<&FeedbackAccount>) -> Value {
 
 impl Bridge {
     fn feedback_seam(&self) -> Result<Arc<dyn Feedback>, Failure> {
-        self.feedback.lock().unwrap().clone().ok_or_else(|| {
+        self.feedback.locked().clone().ok_or_else(|| {
             Failure::new("labels_unavailable", "World labels cannot be reached from this bridge.", "Go on without labels and tell the person.")
         })
     }
@@ -3139,10 +3140,10 @@ impl Bridge {
         {
             let seen = s.game.seen();
             let here = seen.in_world && seen.world_id.as_deref().is_some_and(|w| w.eq_ignore_ascii_case(&world));
-            let run = s.run.lock().unwrap();
+            let run = s.run.locked();
             let been = run.been.contains(&world)
                 || run.pictures.iter().any(|p| p.world_id.as_deref().is_some_and(|w| w.eq_ignore_ascii_case(&world)))
-                || self.journal.lock().unwrap().was_in(&world);
+                || self.journal.locked().was_in(&world);
             if !here && !been {
                 return Err(Failure::new(
                     "not_seen_here",

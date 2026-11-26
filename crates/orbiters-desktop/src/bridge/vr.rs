@@ -11,6 +11,7 @@
 //!
 //! The sandbox is development tooling, not shipped: a VR session exists only where the person set
 //! `experimental.vrchat_bridge_vr_sandbox` to that folder (Windows, Python with psutil).
+use orbiters_core::locks::*;
 // i18n: not shown (what an AI client reads in the tools' answers)
 use super::game::Failure;
 use serde_json::{json, Value};
@@ -85,7 +86,7 @@ impl SandboxRig {
         let last = text.lines().rev().find_map(|l| serde_json::from_str::<Value>(l.trim()).ok());
         match (out.status.success(), last) {
             (true, Some(answer)) => {
-                *self.renewed.lock().unwrap() = Some(Instant::now());
+                *self.renewed.locked() = Some(Instant::now());
                 Ok(answer)
             }
             _ => {
@@ -112,7 +113,7 @@ impl VrRig for SandboxRig {
     }
 
     fn keep(&self) {
-        let due = self.renewed.lock().unwrap().is_none_or(|t| t.elapsed() >= RENEW_EVERY);
+        let due = self.renewed.locked().is_none_or(|t| t.elapsed() >= RENEW_EVERY);
         if due {
             let _ = self.run(&["renew"], Duration::from_secs(20));
         }

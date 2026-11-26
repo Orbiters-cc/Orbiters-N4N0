@@ -10,6 +10,7 @@
 //! **For someone who has never heard of any of this:** each thing says what it does in its own words, and [`caption`] says in a sentence what is pointed at, near it. What
 //! cannot work here is not offered ([`Facts`]' `can_*`): no dead pages.
 
+use orbiters_core::locks::*;
 use super::zones::{self, Ring, Zone};
 use egui::epaint::{Mesh, RectShape, Vertex, WHITE_UV};
 use egui::{pos2, vec2, Align2, Color32, FontId, Painter, Pos2, Rect, Shape, Stroke, TextureId, Vec2};
@@ -1979,7 +1980,7 @@ thread_local! { static RENDER_STYLE: std::cell::RefCell<Option<RenderStyle>> = c
 fn render_settings() -> Option<OrbitSettings> { RENDER_STYLE.with(|s| s.borrow().as_ref().map(|s| s.settings)) }
 fn captured_finish_style() -> Option<(std::sync::Arc<Vec<[u8; 3]>>, bool)> {
     if let Some(style) = RENDER_STYLE.with(|s| s.borrow().clone()) { return style.finish; }
-    style_now(|s| s.lock().unwrap_or_else(|e| e.into_inner()).clone())
+    style_now(|s| s.locked().clone())
 }
 /// A job's complete immutable look, scoped to its rendering thread. No shared guard spans pixel work.
 pub(crate) fn with_render_style<T>(settings: OrbitSettings, draw: impl FnOnce() -> T) -> T {
@@ -1996,7 +1997,7 @@ pub fn set_style(o: &OrbitSettings) {
     let retro = o.theme == MenuLook::Retro;
     look::choose(o.accent, retro, !o.retro_pictures);
     let finish = retro.then(|| (std::sync::Arc::new(retro_ramp(o.retro_color)), o.retro_pictures));
-    style_now(|s| *s.lock().unwrap_or_else(|e| e.into_inner()) = finish);
+    style_now(|s| *s.locked() = finish);
 }
 
 /// How high a sheet's head is, above its page.

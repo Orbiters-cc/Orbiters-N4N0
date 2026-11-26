@@ -16,6 +16,7 @@
 //!   it could not be read, kept as a failure until its files change, and the worker goes on with the next job.
 //! - **The worker stops with the app**: dropping the [`Builder`] stops the job running at its next check.
 
+use orbiters_core::locks::*;
 use super::preview_gpu::{self, Pipelines};
 use eframe::egui_wgpu::wgpu;
 use egui::ColorImage;
@@ -69,7 +70,7 @@ struct Shared {
 impl Shared {
     /// The queue, also after a panic while it was held (a job's panic is caught outside it; this is for the rest).
     fn queue(&self) -> MutexGuard<'_, Queue> {
-        self.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.queue.locked()
     }
 }
 
@@ -185,7 +186,7 @@ fn next(shared: &Shared) -> Option<(Job, bool, Arc<AtomicBool>)> {
             q.running = Some(Running { project, guid, cancel: cancel.clone() });
             return Some((job, q.scene_light, cancel));
         }
-        q = shared.wake.wait(q).unwrap_or_else(std::sync::PoisonError::into_inner);
+        q = shared.wake.wait_locked(q);
     }
 }
 

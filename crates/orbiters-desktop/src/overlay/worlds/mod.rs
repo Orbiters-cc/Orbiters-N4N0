@@ -42,6 +42,7 @@ pub mod timing_lab;
 pub mod view;
 
 mod paint_snapshot;
+use orbiters_core::locks::*;
 pub(crate) use paint_snapshot::PaintSnapshot;
 
 use super::{Canvas, Presenter};
@@ -2874,7 +2875,7 @@ static SIDE_LOADS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn one_load_at_a_time<T>(progress: &Progress, load: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
     progress.check()?;
-    let _turn = SIDE_LOADS.lock().unwrap_or_else(|e| e.into_inner());
+    let _turn = SIDE_LOADS.locked();
     progress.check()?;
     load()
 }

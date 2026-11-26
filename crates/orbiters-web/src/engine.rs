@@ -116,12 +116,12 @@ pub fn run(w: u32, h: u32, rx: Receiver<Command>, shared: Arc<Mutex<Shared>>, cl
     let profile = match lifetime::Profile::new(&closed) {
         Ok(p) => p,
         Err(_) if closed.load(Ordering::Relaxed) => {
-            shared.lock().unwrap().state.load = Load::Closed;
+            shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).state.load = Load::Closed;
             return Ok(());
         }
         Err(e) => return Err(e),
     };
-    shared.lock().unwrap().note(format!("engine: private profile ready after {} ms", begun.elapsed().as_millis())); // i18n: not shown (a log's line)
+    shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).note(format!("engine: private profile ready after {} ms", begun.elapsed().as_millis())); // i18n: not shown (a log's line)
     let proxy = network::Proxy::with(loopback)?;
     let result = unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
@@ -133,7 +133,7 @@ pub fn run(w: u32, h: u32, rx: Receiver<Command>, shared: Arc<Mutex<Shared>>, cl
     drop(profile);
     if result.is_ok() || closed.load(Ordering::Relaxed) {
         anyhow::ensure!(!path.exists(), "private browser cleanup pending");
-        shared.lock().unwrap().state.load = Load::Closed;
+        shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).state.load = Load::Closed;
         return Ok(());
     }
     result
@@ -167,7 +167,7 @@ unsafe fn run_sta(
     let env = pump_wait(&envrx, &closed, Duration::from_secs(15))
         .map_err(|e| anyhow::anyhow!("WebView2 runtime unavailable or startup failed: {e}"))?
         .ok_or_else(|| anyhow::anyhow!("environment missing"))?;
-    shared.lock().unwrap().note(format!("engine: browser started after {} ms", begun.elapsed().as_millis())); // i18n: not shown (a log's line)
+    shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).note(format!("engine: browser started after {} ms", begun.elapsed().as_millis())); // i18n: not shown (a log's line)
     let env7: ICoreWebView2Environment7 = env.cast()?;
     let actual = string(|p| env7.UserDataFolder(p))?;
     verify_profile(std::path::Path::new(&actual), &profile.path)?;
@@ -264,7 +264,7 @@ unsafe fn run_sta(
                     *nav.borrow_mut() = id;
                     *p.borrow_mut() = None;
                     *live.borrow_mut() = false;
-                    let mut s = s.lock().unwrap();
+                    let mut s = s.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let host = url::Url::parse(&url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
                     s.note(format!("{} {host} ({} ms into it)", if redirected.as_bool() { "redirected to" } else { "opening" }, since(&at))); // i18n: not shown (a log's line)
                     s.state.url = display_text(&url, 8192);
@@ -295,7 +295,7 @@ unsafe fn run_sta(
                 let mut ok = BOOL(0);
                 a.IsSuccess(&mut ok)?;
                 *live.borrow_mut() = ok.as_bool();
-                let mut s = s.lock().unwrap();
+                let mut s = s.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 s.state.load = if ok.as_bool() {
                     s.note(format!("loaded after {} ms", since(&at))); // i18n: not shown (a log's line)
                     Load::Loaded
@@ -324,7 +324,7 @@ unsafe fn run_sta(
                 a.NavigationId(&mut id)?;
                 if id == *nav.borrow() {
                     *live.borrow_mut() = true;
-                    s.lock().unwrap().note(format!("committed after {} ms", since(&at))); // i18n: not shown (a log's line)
+                    s.lock().unwrap_or_else(std::sync::PoisonError::into_inner).note(format!("committed after {} ms", since(&at))); // i18n: not shown (a log's line)
                 }
             }
             Ok(())
@@ -345,7 +345,7 @@ unsafe fn run_sta(
                 a.NavigationId(&mut id)?;
                 if id == *nav.borrow() {
                     *live.borrow_mut() = true;
-                    s.lock().unwrap().note(format!("content read after {} ms", since(&at))); // i18n: not shown (a log's line)
+                    s.lock().unwrap_or_else(std::sync::PoisonError::into_inner).note(format!("content read after {} ms", since(&at))); // i18n: not shown (a log's line)
                 }
             }
             Ok(())
@@ -356,7 +356,7 @@ unsafe fn run_sta(
     web.add_DocumentTitleChanged(
         &DocumentTitleChangedEventHandler::create(Box::new(move |web, _| {
             if let Some(web) = web {
-                s.lock().unwrap().state.title = display_text(&string(|p| web.DocumentTitle(p))?, 512);
+                s.lock().unwrap_or_else(std::sync::PoisonError::into_inner).state.title = display_text(&string(|p| web.DocumentTitle(p))?, 512);
             }
             Ok(())
         })),
@@ -397,7 +397,7 @@ unsafe fn run_sta(
             if let Some(web) = web {
                 let url = string(|p| web.Source(p))?;
                 if validate(&url).is_ok() {
-                    s.lock().unwrap().state.url = display_text(&url, 8192);
+                    s.lock().unwrap_or_else(std::sync::PoisonError::into_inner).state.url = display_text(&url, 8192);
                 }
             }
             Ok(())
@@ -460,7 +460,7 @@ unsafe fn run_sta(
     let process_failed = failed.clone();
     web.add_ProcessFailed(
         &ProcessFailedEventHandler::create(Box::new(move |_, _| {
-            let mut s = s.lock().unwrap();
+            let mut s = s.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             s.note("the page's process failed".into()); // i18n: not shown (a log's line)
             s.state.load = Load::Failed("WebView2 page process failed".into());
             *process_failed.borrow_mut() = true;
@@ -486,7 +486,7 @@ unsafe fn run_sta(
     )?;
     cdp(&web, "Page.setInterceptFileChooserDialog", serde_json::json!({"enabled":true}), &closed)?;
     {
-        let mut s = shared.lock().unwrap();
+        let mut s = shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.ready = true;
         s.note(format!("engine ready after {} ms", begun.elapsed().as_millis())); // i18n: not shown (a log's line)
     }
@@ -534,13 +534,13 @@ unsafe fn run_sta(
                 Ok(Command::Navigate(url)) => {
                     *active.borrow_mut() = false;
                     *pending.borrow_mut() = None;
-                    shared.lock().unwrap().frame = None;
+                    shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).frame = None;
                     web.Navigate(PCWSTR(wide(&url).as_ptr()))?;
                 }
                 Ok(Command::Resize(w, h)) => {
                     dimensions = (w, h);
                     *pending.borrow_mut() = None;
-                    shared.lock().unwrap().frame = None;
+                    shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).frame = None;
                     controller.SetBounds(RECT { left: 0, top: 0, right: w as i32, bottom: h as i32 })?;
                     if capturing {
                         cdp(&web, "Page.stopScreencast", serde_json::json!({}), &closed)?;
@@ -591,7 +591,7 @@ unsafe fn run_sta(
             cdp_async(&web, "Input.dispatchMouseEvent", serde_json::json!({"type":"mouseWheel","x":x,"y":y,"button":"none","buttons":if pressed{1}else{0},"deltaX":dx,"deltaY":dy}), &failures)?;
         }
         if failures.get() > 0 {
-            shared.lock().unwrap().note(format!("{} page calls failed", failures.replace(0))); // i18n: not shown (a log's line)
+            shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).note(format!("{} page calls failed", failures.replace(0))); // i18n: not shown (a log's line)
         }
         // The newest picture, as soon as one came, at most 40 a second: acknowledging it is what lets Chromium send the next
         // (at most one waits), so a page that does not change sends nothing, and one that scrolls is seen scrolling.
@@ -608,7 +608,7 @@ unsafe fn run_sta(
                 if !current_frame(frame_navigation, *navigation.borrow(), *active.borrow()) {
                     continue;
                 }
-                let mut s = shared.lock().unwrap();
+                let mut s = shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 // A blank page (one flat colour) before the page is loaded is the moment between its commit and its first
                 // paint: not shown, the panel goes on saying it opens.
                 if !drawn.get() && s.state.load != Load::Loaded && flat(&rgba) {

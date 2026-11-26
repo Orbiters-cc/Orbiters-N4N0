@@ -1,3 +1,4 @@
+use orbiters_core::locks::*;
 use orbiters_i18n::{mark, tr, tr_n};
 use super::thumb_cache;
 use crate::pages::{Cx, Job};
@@ -884,7 +885,7 @@ impl State {
                 // What is shown already: a picture that is the same is neither kept again nor shown again.
                 let known: HashMap<String, u64> = ids.iter().filter_map(|id| Some((id.clone(), *self.thumb_sums.get(id)?))).collect();
                 let versions = self.thumb_versions.clone();
-                let requested_versions = versions.lock().unwrap().clone();
+                let requested_versions = versions.locked().clone();
                 self.thumb_job = Job::spawn(ctx, move || {
                     use crate::controller::vrchat_data::{Request, Response};
                     let mut images = HashMap::new();
@@ -907,7 +908,7 @@ impl State {
                         }
                     }
                     // Hold through disk writes: an upload cannot be overwritten by an older response.
-                    let current = versions.lock().unwrap();
+                    let current = versions.locked();
                     let mut same = Vec::new();
                     let images = images
                         .into_iter()
@@ -964,7 +965,7 @@ impl State {
     }
     fn apply_thumb_batch(&mut self, ctx: &egui::Context, batch: ThumbBatch) {
         let (images, same, errors, requested_versions) = batch;
-        let current = self.thumb_versions.lock().unwrap().clone();
+        let current = self.thumb_versions.locked().clone();
         self.thumb_fresh.extend(same.into_iter().filter(|id| current.get(id) == requested_versions.get(id)));
         for (id, (image, sum)) in images {
             if current.get(&id) != requested_versions.get(&id) {
@@ -1665,7 +1666,7 @@ impl State {
             "projects-busy" => {
                 self.selected = Some(first.path.clone());
                 self.fixture_action = Some(tr!("Duplicating {name}…", name = SAMPLE_PROJECT));
-                *self.copy_progress.lock().unwrap() = templates::Progress {
+                *self.copy_progress.locked() = templates::Progress {
                     copied: 1840,
                     total: 4310,
                     file: "Assets/MasculineCanine/Textures/Body_Albedo.png".into(),
@@ -1794,7 +1795,7 @@ impl State {
                 self.duplicate = true;
                 self.new_name = "My avatars copy".into(); // i18n: not shown (sample data of the screenshot scenes)
                 self.fixture_action = Some(tr("Creating project…").into());
-                *self.copy_progress.lock().unwrap() = templates::Progress {
+                *self.copy_progress.locked() = templates::Progress {
                     copied: 1840,
                     total: 4310,
                     file: "Assets/MasculineCanine/Textures/Body_Albedo.png".into(),
@@ -1989,7 +1990,7 @@ impl State {
                 };
                 if name == "projects-duplicate-copying" {
                     self.fixture_action = Some(tr!("Duplicating {name}…", name = SAMPLE_PROJECT));
-                    *self.copy_progress.lock().unwrap() = templates::Progress {
+                    *self.copy_progress.locked() = templates::Progress {
                         copied: 1840,
                         total: 4310,
                         file: "Assets/MasculineCanine/Textures/Body_Albedo.png".into(),

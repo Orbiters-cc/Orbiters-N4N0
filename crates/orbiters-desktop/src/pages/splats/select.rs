@@ -19,6 +19,7 @@
 //! removed once the selection is left or the view closed ([`redraw_picture`], from the camera the worker drew it
 //! from); the worker's own picture waits beside it until nothing is removed.
 
+use orbiters_core::locks::*;
 use super::*;
 use egui::{PointerButton, Pos2};
 use orbiters_i18n::{mark, tr, tr_ctx};
@@ -42,7 +43,7 @@ pub fn pictures() -> u64 {
 static WRITING: Mutex<()> = Mutex::new(());
 
 fn writing() -> std::sync::MutexGuard<'static, ()> {
-    WRITING.lock().unwrap_or_else(|e| e.into_inner())
+    WRITING.locked()
 }
 
 /// Why a view's splats or edits no longer go together with the PLY on the disk.

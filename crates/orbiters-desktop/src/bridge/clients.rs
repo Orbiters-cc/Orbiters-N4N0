@@ -22,6 +22,7 @@
 //! present. The keeper asks for [`Registrations::repair`] each time the bridge opens and after a new token: an entry with old values is
 //! rewritten, and the log and Settings say so, with what cannot be fixed from here: a session already open keeps what it read.
 
+use orbiters_core::locks::*;
 use serde::{Deserialize, Serialize};
 use orbiters_i18n::tr;
 use std::path::{Path, PathBuf};
@@ -685,13 +686,13 @@ impl Registrations {
     }
 
     pub fn statuses(&self) -> Vec<ClientStatus> {
-        self.slots.lock().unwrap().iter().map(|s| s.status.clone()).collect()
+        self.slots.locked().iter().map(|s| s.status.clone()).collect()
     }
 
     /// Takes the turn of a client, or of all of them. One with a command running is left out; unless this is only a look
     /// (`step` `None`, and the running command ends with a look anyway), what is asked is kept as its next ([`Slot::next`]).
     fn begin(&self, client: Option<Client>, step: Option<Step>, wanted: &Wanted) -> Vec<Arc<dyn ClientCli>> {
-        let mut slots = self.slots.lock().unwrap();
+        let mut slots = self.slots.locked();
         let mut free = Vec::new();
         for slot in slots.iter_mut().filter(|s| client.is_none_or(|c| c == s.status.client)) {
             if !slot.status.busy {
@@ -710,7 +711,7 @@ impl Registrations {
 
     /// Ends a client's command. What was asked meanwhile, if anything, is the one it goes on with: the client stays busy.
     fn end(&self, client: Client, outcome: Outcome) -> Option<(Step, Wanted)> {
-        let mut slots = self.slots.lock().unwrap();
+        let mut slots = self.slots.locked();
         let slot = slots.iter_mut().find(|s| s.status.client == client)?;
         let next = slot.next.take();
         slot.status.busy = next.is_some();
@@ -749,7 +750,7 @@ impl Registrations {
     /// Looks at what each client has. Often asked (each visit of Settings), so at most so often.
     pub fn check(self: &Arc<Self>, wanted: Wanted) {
         {
-            let mut last = self.last_check.lock().unwrap();
+            let mut last = self.last_check.locked();
             if last.is_some_and(|at| at.elapsed() < CHECK_AT_MOST_EVERY) {
                 return;
             }

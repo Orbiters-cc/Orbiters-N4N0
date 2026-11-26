@@ -13,6 +13,7 @@
 //! - Nothing here deletes a project's files: the tab has no such thing. Remove from the list wants the exact path of a
 //!   listed project and `confirm`, and its files stay. Kill Unity wants `confirm` too.
 
+use orbiters_core::locks::*;
 use super::game::Failure;
 use super::person::Paused;
 use super::tools::{paused_failure, Answer};
@@ -87,11 +88,11 @@ impl Progress {
         match self {
             Progress::None => Value::Null,
             Progress::Copy(p) => {
-                let p = p.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let p = p.locked().clone();
                 json!({ "phase": p.phase, "copied": p.copied, "total": p.total, "file": p.file })
             }
             Progress::Storage(p) => {
-                let p = p.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let p = p.locked().clone();
                 json!({ "fraction": p.fraction(), "cancellable": p.cancellable(), "detail": p })
             }
         }
@@ -119,11 +120,11 @@ struct Job {
 
 impl Job {
     fn done(&self) -> bool {
-        self.end.lock().unwrap().is_some()
+        self.end.locked().is_some()
     }
 
     fn json(&self) -> Value {
-        let end = self.end.lock().unwrap();
+        let end = self.end.locked();
         let (state, result, failure, seconds) = match end.as_ref() {
             None => ("running", Value::Null, Value::Null, self.begun.elapsed().as_secs_f64()),
             Some((Ok(result), at)) => ("done", result.clone(), Value::Null, at.duration_since(self.begun).as_secs_f64()),
@@ -759,7 +760,7 @@ impl Projects {
 
     /// The person took control back: what can be stopped stops.
     pub fn stop_all(&self) {
-        for job in &self.jobs.lock().unwrap().list {
+        for job in &self.jobs.locked().list {
             if job.cancellable && !job.done() {
                 job.cancel.store(true, Ordering::Relaxed);
             }
@@ -843,7 +844,7 @@ impl Projects {
         work: impl FnOnce() -> Outcome + Send + 'static,
     ) -> Result<Value, Failure> {
         let job = {
-            let mut jobs = self.jobs.lock().unwrap();
+            let mut jobs = self.jobs.locked();
             if let Some(running) = jobs.list.iter().find(|j| j.lane == lane && !j.done()) {
                 return Err(Failure::new(
                     "busy",
@@ -878,13 +879,13 @@ impl Projects {
         let spawned = std::thread::Builder::new().name("bridge-unity-job".into()).spawn(move || {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
                 .unwrap_or_else(|_| Err(Failure::new("crashed", "The job stopped on an error of its own.", "Look at the project with unity_get_project, and tell the person.")));
-            *running.end.lock().unwrap() = Some((outcome, Instant::now()));
+            *running.end.locked() = Some((outcome, Instant::now()));
             if let Some(host) = host {
                 host.changed();
             }
         });
         if spawned.is_err() {
-            *job.end.lock().unwrap() = Some((Err(Failure::new("no_thread", "The job could not start.", "Try again in a moment.")), Instant::now()));
+            *job.end.locked() = Some((Err(Failure::new("no_thread", "The job could not start.", "Try again in a moment.")), Instant::now()));
         }
         let wait = Duration::from_secs_f64(number(args, "wait_s", 30.0).clamp(0.0, LONGEST_WAIT_S));
         Self::wait(&job, wait, call);
@@ -899,14 +900,14 @@ impl Projects {
     }
 
     fn job(&self, id: u64) -> Result<Arc<Job>, Failure> {
-        self.jobs.lock().unwrap().list.iter().find(|j| j.id == id).cloned().ok_or_else(|| {
+        self.jobs.locked().list.iter().find(|j| j.id == id).cloned().ok_or_else(|| {
             Failure::new("no_such_job", format!("There is no job {id} (finished jobs are kept for a while only)."), "Call unity_get_job without a job to list them.")
         })
     }
 
     fn get_job(&self, args: &Value, call: &Call) -> Result<Value, Failure> {
         let Some(id) = args["job"].as_u64() else {
-            let jobs = self.jobs.lock().unwrap();
+            let jobs = self.jobs.locked();
             return Ok(json!({ "jobs": jobs.list.iter().rev().map(|j| j.json()).collect::<Vec<_>>() }));
         };
         let job = self.job(id)?;
@@ -934,7 +935,7 @@ impl Projects {
 
     /// A Library move of this project running.
     fn moving_library(&self, path: &Path) -> Option<u64> {
-        self.jobs.lock().unwrap().list.iter().find(|j| j.lane == Lane::Storage && !j.done() && j.project.as_deref().is_some_and(|p| discovery::same(p, path))).map(|j| j.id)
+        self.jobs.locked().list.iter().find(|j| j.lane == Lane::Storage && !j.done() && j.project.as_deref().is_some_and(|p| discovery::same(p, path))).map(|j| j.id)
     }
 
     // -----------------------------------------------------------------------------------------------------------------
@@ -943,7 +944,7 @@ impl Projects {
 
     /// The projects as the last look found them: the running look's, or the one kept on disk.
     fn scan(&self) -> Scan {
-        self.scan.lock().unwrap().clone().unwrap_or_else(discovery::cached)
+        self.scan.locked().clone().unwrap_or_else(discovery::cached)
     }
 
     /// The project at `path` (as the scan lists it, else read from its folder), or why not.
@@ -984,10 +985,10 @@ impl Projects {
             let cancel = Arc::new(AtomicBool::new(false));
             let (scan_now, scanning, stop) = (self.scan(), self.scan.clone(), cancel.clone());
             let job = self.spawn(Lane::Scan, "Looking for Unity projects on this computer".into(), None, true, Progress::None, cancel, None, &json!({ "wait_s": number(args, "wait_s", 0.0) }), call, move || {
-                let publish = |s: &Scan| *scanning.lock().unwrap() = Some(s.clone());
+                let publish = |s: &Scan| *scanning.locked() = Some(s.clone());
                 let found = discovery::discover(scan_now, true, &stop, publish).map_err(|e| failed("scan_failed", e, "Try again; the projects found so far are listed."))?;
                 let count = found.projects.len();
-                *scanning.lock().unwrap() = Some(found);
+                *scanning.locked() = Some(found);
                 Ok(json!({ "projects": count }))
             })?;
             started = Some(job);
@@ -1011,7 +1012,7 @@ impl Projects {
                 v
             })
             .collect();
-        let scanning = self.jobs.lock().unwrap().list.iter().any(|j| j.lane == Lane::Scan && !j.done());
+        let scanning = self.jobs.locked().list.iter().any(|j| j.lane == Lane::Scan && !j.done());
         Ok(json!({
             "projects": projects,
             "hidden_left_out": if include_hidden { 0 } else { scan.projects.iter().filter(|p| hidden::contains(&hidden, &p.path)).count() },
@@ -1083,7 +1084,7 @@ impl Projects {
         if let (Some(host), false) = (self.host.get(), project.worlds.is_empty()) {
             out["worlds_here"] = json!(project.worlds.iter().map(|w| json!({ "world_id": w.id, "here": host.world_here(&w.id), "uploads": host.uploads(&w.id) })).collect::<Vec<_>>());
         }
-        if let Some((change, packages)) = self.missing.lock().unwrap().get(&discovery::key(&path)) {
+        if let Some((change, packages)) = self.missing.locked().get(&discovery::key(&path)) {
             out["missing_packages"] = json!({ "packages": packages, "after": format!("{change:?}"), "next": "Call unity_missing_packages to find and add their repositories." });
         }
         Ok(out)
@@ -1145,7 +1146,7 @@ impl Projects {
     ) -> Outcome {
         match done {
             Ok(()) => {
-                missing.lock().unwrap().remove(key);
+                missing.locked().remove(key);
                 let installed = block_on(vpm::view(root, Some(path), false))
                     .map(|v| v.packages.into_iter().filter_map(|p| Some(json!({ "name": p.name, "version": p.installed? }))).collect::<Vec<_>>())
                     .unwrap_or_default();
@@ -1167,7 +1168,7 @@ impl Projects {
                     let message = format!("{e:#}");
                     let packages = missing::parse(&message);
                     if !packages.is_empty() {
-                        missing.lock().unwrap().insert(key.to_string(), (change, packages.clone()));
+                        missing.locked().insert(key.to_string(), (change, packages.clone()));
                         return Err(Failure::new(
                             "packages_not_listed",
                             message,
@@ -1258,7 +1259,7 @@ impl Projects {
         let key = discovery::key(&project.path);
         let (change, packages) = match text(args, "error") {
             Some(error) => (vpm::Change::Resolve, missing::parse(error)),
-            None => self.missing.lock().unwrap().get(&key).cloned().unwrap_or((vpm::Change::Resolve, vec![])),
+            None => self.missing.locked().get(&key).cloned().unwrap_or((vpm::Change::Resolve, vec![])),
         };
         if packages.is_empty() {
             return Err(Failure::new(
@@ -1632,7 +1633,7 @@ impl Projects {
         self.spawn(Lane::Action, label, Some(location.join(&name)), true, Progress::Copy(progress), cancel, None, args, call, move || {
             let path = block_on(templates::duplicate(&orbiters_projects::vcc_dir(), &source, &location, &name, keep, &c, &p))
                 .map_err(|e| failed("duplicate_failed", e, "Read the message: a copy kept and listed is said there, and unity_list_projects shows it."))?;
-            let left_out = p.lock().unwrap().left_out.clone();
+            let left_out = p.locked().left_out.clone();
             Ok(json!({ "path": path, "listed": true, "links_to_nothing_left_out": left_out, "in_creator_companion": false, "note": "It is in Orbiters' list; VCC and ALCOM list it once the person adds its folder there. Its scenes keep their blueprint IDs: uploads from it update the same avatars and worlds." }))
         })
     }
@@ -1727,7 +1728,7 @@ impl Projects {
         let request: Arc<Mutex<Option<String>>> = Arc::default();
         let probe = {
             let (request, path) = (request.clone(), path.clone());
-            Box::new(move || match request.lock().unwrap().as_deref() {
+            Box::new(move || match request.locked().as_deref() {
                 Some(id) => match orbiters_projects::setup::read_result(&path, id) {
                     Ok(Some(r)) => json!({ "setup": r.status, "message": r.message, "installed": r.installed.iter().map(|i| json!({ "asset_id": i.asset_id, "version": i.version })).collect::<Vec<_>>() }),
                     Ok(None) => json!({ "setup": "waiting", "unity_open": orbiters_projects::unity_open(&path), "next": "The Toolkit in Unity finishes it: open the project (unity_editor open) if it is not, and look again." }),
@@ -1771,7 +1772,7 @@ impl Projects {
                 orbiters_projects::setup::write(&path, &r, leave).map_err(|e| failed("setup_failed", e, "Tell the person."))?;
                 outcome["setup_request"] = json!(r.id);
                 outcome["next"] = json!("The Toolkit in Unity adds N4N0 to the avatar and saves the scene: open the project (unity_editor open), then unity_get_job shows the setup's result under result.now.");
-                *request.lock().unwrap() = Some(r.id);
+                *request.locked() = Some(r.id);
             }
             if open_unity && live().is_some() {
                 // The person came back meanwhile: Unity is not opened in front of them.

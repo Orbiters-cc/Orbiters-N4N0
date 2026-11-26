@@ -13,6 +13,7 @@
 //! On macOS the devices are Core Audio's (`orbiters_sound::coreaudio`), for the microphone pickers and the tests of a
 //! device. Nothing sets a default there: setting them is for SteamVR, which does not run on a Mac.
 
+use orbiters_core::locks::*;
 pub use orbiters_core::settings::AudioEndpoint;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -118,7 +119,7 @@ impl Meters {
     pub fn start() -> Self {
         let (now, seen, stop) = (Arc::<Mutex<MicLevels>>::default(), Arc::new(Mutex::new(Instant::now())), Arc::new(AtomicBool::new(false)));
         if MADE_UP_MICS.load(Ordering::Relaxed) {
-            *now.lock().unwrap_or_else(|e| e.into_inner()) = made_up();
+            *now.locked() = made_up();
             return Self { now, seen, stop, thread: None };
         }
         let (t_now, t_seen, t_stop) = (now.clone(), seen.clone(), stop.clone());
@@ -128,7 +129,7 @@ impl Meters {
 
     /// Something looks at them now.
     pub fn looked_at(&self) {
-        *self.seen.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+        *self.seen.locked() = Instant::now();
         if let Some(thread) = &self.thread {
             thread.unpark();
         }
@@ -141,7 +142,7 @@ impl Meters {
     }
 
     pub fn levels(&self) -> MicLevels {
-        self.now.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.now.locked().clone()
     }
 }
 
@@ -160,7 +161,7 @@ fn watch(now: &Mutex<MicLevels>, seen: &Mutex<Instant>, stop: &AtomicBool) {
     let mut listed: Option<Instant> = None;
     let mut default_id = None;
     while !stop.load(Ordering::Relaxed) {
-        let looked = seen.lock().unwrap_or_else(|e| e.into_inner()).elapsed() < METERS_CLOSE_AFTER;
+        let looked = seen.locked().elapsed() < METERS_CLOSE_AFTER;
         if !looked {
             open.clear();
             listed = None;
@@ -186,7 +187,7 @@ fn watch(now: &Mutex<MicLevels>, seen: &Mutex<Instant>, stop: &AtomicBool) {
                 .collect();
         }
         let mics = open.iter().map(|(endpoint, meter)| MicLevel { endpoint: endpoint.clone(), peak: meter.as_ref().and_then(imp::Meter::peak) }).collect();
-        *now.lock().unwrap_or_else(|e| e.into_inner()) = MicLevels { mics, default_id: default_id.clone(), read: true };
+        *now.locked() = MicLevels { mics, default_id: default_id.clone(), read: true };
         std::thread::sleep(Duration::from_millis(33));
     }
 }

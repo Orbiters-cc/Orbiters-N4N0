@@ -16,6 +16,7 @@
 //! THAT answer says (its `explorer`, with the upload's for a picture uploaded by this share): reading the points before
 //! and after would count another share or a removal in between.
 
+use orbiters_core::locks::*;
 use super::Shared;
 use crate::controller::shares::{Outcome, ShareJob};
 use orbiters_core::account::Server;
@@ -450,7 +451,7 @@ impl super::Controller {
         let snap = self.view();
         let server = if snap.settings.development { Server::Development } else { Server::Production };
         let now = Instant::now();
-        let mut s = self.explorer.lock().unwrap();
+        let mut s = self.explorer.locked();
         // Arrival.
         let world = &snap.vrchat.world;
         let here = world.world_id.clone().filter(|_| snap.vrchat.running && world.in_world).filter(|w| ex::is_world_id(w));
@@ -550,7 +551,7 @@ impl super::Controller {
         let ctl = self.clone();
         std::thread::spawn(move || {
             let lookup = orbiters_core::account::Api::new(server).world_public_capture(&world_id).ok().flatten();
-            let mut s = ctl.explorer.lock().unwrap();
+            let mut s = ctl.explorer.locked();
             s.lookups.insert(world_id.clone(), (lookup, Instant::now()));
             if notice && lookup.is_some_and(|l| !l.has_public) && s.here.as_ref().is_some_and(|h| h.0 == world_id) {
                 s.candidate = Some((world_id.clone(), Instant::now()));
@@ -587,7 +588,7 @@ impl super::Controller {
         let world_id = snap.vrchat.world.world_id.clone().unwrap_or_default();
         let server = if snap.settings.development { Server::Development } else { Server::Production };
         let would_earn = {
-            let mut s = self.explorer.lock().unwrap();
+            let mut s = self.explorer.locked();
             s.public = None;
             s.people = None;
             s.lookups.get(&world_id).filter(|(_, at)| at.elapsed() < LOOKUP_KEPT).and_then(|(l, _)| l.and_then(|l| l.next_earns))
@@ -611,7 +612,7 @@ impl super::Controller {
             Command::NoticeTake { .. } | Command::NoticeDismiss { .. } => {
                 let account = account_key(&self.view());
                 let pressed = {
-                    let mut s = self.explorer.lock().unwrap();
+                    let mut s = self.explorer.locked();
                     let told = s.told.get_or_insert_with(|| Told::read(&told_path()));
                     let pressed = notice_pressed(&command, status.notice.as_ref(), told, &account);
                     if pressed == Pressed::Closed {
@@ -629,7 +630,7 @@ impl super::Controller {
             }
             Command::NoticeHeld { id } => {
                 // Held behind a menu: its time starts again, up to HOLD_MAX after it came.
-                let mut s = self.explorer.lock().unwrap();
+                let mut s = self.explorer.locked();
                 let first = *s.held.get_or_insert_with(Instant::now);
                 drop(s);
                 if first.elapsed() < HOLD_MAX {
@@ -665,7 +666,7 @@ impl super::Controller {
             Some(o) if o.busy() => return,
             _ => {
                 let would_earn = {
-                    let mut s = self.explorer.lock().unwrap();
+                    let mut s = self.explorer.locked();
                     s.public = None;
                     s.people = None;
                     s.lookups.get(&here.world_id).filter(|(_, at)| at.elapsed() < LOOKUP_KEPT).and_then(|(l, _)| l.and_then(|l| l.next_earns))
@@ -711,7 +712,7 @@ impl super::Controller {
             let uploads = crate::controller::shares::uploads(server);
             let found = share_here(&world, &captures_of(&sessions_dir, &world, &uploads), public_now);
             // Still in that world: else the next look is under way.
-            let here = ctl.explorer.lock().unwrap().here.as_ref().map(|h| h.0.clone());
+            let here = ctl.explorer.locked().here.as_ref().map(|h| h.0.clone());
             if here.as_deref() != Some(world.as_str()) {
                 return;
             }
@@ -775,7 +776,7 @@ impl super::Controller {
             match ctl.menu_capture_share(ask, epoch) {
                 Ok(()) => {
                     let asked = Asked { public, people: recipients.iter().map(|r| r.0.clone()).collect(), since: Instant::now(), ask: ask_again, epoch, retried: false, retry_at: None, skip_job: None };
-                    let mut s = ctl.explorer.lock().unwrap();
+                    let mut s = ctl.explorer.locked();
                     if public {
                         s.public = Some(asked);
                     } else {

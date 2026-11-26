@@ -139,7 +139,7 @@ fn one_read_gives_sections_groups_invites_and_boops() {
             (200, json!([{"id": "not_2", "type": "boop", "senderUserId": A, "createdAt": "2026-11-18T09:01:00Z", "details": {"emojiId": "default_heart"}, "data": {"boopingUserDisplayName": "Nova"}}])),
         ],
     );
-    let (state, groups, worn) = read_signed_in(&Mutex::new(client)).unwrap();
+    let (state, groups, worn) = read_signed_in(&ClientLock::new(client)).unwrap();
     assert_eq!(groups, [("group_0".to_string(), "best".to_string())]);
     let sections: Vec<(GroupKind, usize)> = state.groups.iter().map(|g| (g.kind, g.members.len())).collect();
     assert_eq!(sections, [(GroupKind::Favourite, 1), (GroupKind::InGame, 1), (GroupKind::Website, 0), (GroupKind::Offline, 1)]);
@@ -839,7 +839,7 @@ fn a_press_made_on_account_as_list_never_goes_out_with_bs_session() {
 #[test]
 fn the_send_itself_checks_whose_session_it_is() {
     let (client, calls) = orbiters_core::vrchat_api::test_client(Arc::new(orbiters_core::vrchat_api::Gate::for_duration(Duration::from_secs(60))), vec![]);
-    let client = Mutex::new(client);
+    let client = ClientLock::new(client);
     assert!(send_as(&client, "usr_aaaa", |c| c.boop(A, None)).is_err(), "the session became another account's");
     assert!(calls.lock().unwrap().is_empty());
 }

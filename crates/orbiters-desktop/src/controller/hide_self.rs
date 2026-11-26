@@ -46,6 +46,7 @@
 //! recording's start. The app still reads it back after [`CONFIRM`] and, if VRChat kept the mask off, lets the avatar go
 //! and says so.
 
+use orbiters_core::locks::*;
 use super::Shared;
 use crate::controller::NoticeKind;
 use crate::state::NoStrip;
@@ -269,18 +270,18 @@ impl super::Controller {
 
     /// The mask as VRChat last said it: what it sent since, else what its tree said at the start.
     fn local_user(&self) -> Option<bool> {
-        let heard = self.osc_values.lock().unwrap().latest.get(LOCAL_PLAYER).and_then(|(v, _)| v.first().map(OscValue::truthy));
-        heard.or(self.hide.lock().unwrap().mask)
+        let heard = self.osc_values.locked().latest.get(LOCAL_PLAYER).and_then(|(v, _)| v.first().map(OscValue::truthy));
+        heard.or(self.hide.locked().mask)
     }
 
     /// Whether this recording holds the wearer's avatar hidden.
     pub(super) fn hiding_self(&self) -> bool {
-        self.hide.lock().unwrap().hiding
+        self.hide.locked().hiding
     }
 
     /// Whether Remote User is off for this recording's sake.
     pub(super) fn hiding_others(&self) -> bool {
-        self.hide.lock().unwrap().others_off
+        self.hide.locked().others_off
     }
 
     /// A recording starts: `vrchat` is VRChat's tree as read for it. `world`: it is a picture of the world. With an avatar to
@@ -289,7 +290,7 @@ impl super::Controller {
         let (kit, listed) = avatar_support(vrchat);
         let mask = value_of(vrchat, LOCAL_PLAYER).map(OscValue::truthy).or_else(|| self.local_user());
         {
-            let mut hide = self.hide.lock().unwrap();
+            let mut hide = self.hide.locked();
             hide.may_drive = may_drive;
             hide.always = world;
             hide.kit = kit;
@@ -304,7 +305,7 @@ impl super::Controller {
 
     fn apply_plan(self: &Shared, plan: Plan, listed: bool) {
         let Plan::Hide { turn_mask_on } = plan else { return };
-        let world = self.hide.lock().unwrap().always;
+        let world = self.hide.locked().always;
         let hidden = self.hide_and_wait(listed);
         // Without the mask on the kit draws nothing, so it goes on either way: a capture with the avatar in it beats none.
         if turn_mask_on {
@@ -331,7 +332,7 @@ impl super::Controller {
         let began_ns = clock::now_ns();
         self.begin_beat();
         let address = parameter(HIDE_SELF_PARAMETER);
-        let echoed = |c: &Shared| c.osc_values.lock().unwrap().latest.get(&address).is_some_and(|(_, at)| *at >= began_ns);
+        let echoed = |c: &Shared| c.osc_values.locked().latest.get(&address).is_some_and(|(_, at)| *at >= began_ns);
         let mut proved = false;
         while began.elapsed() < PROOF_WAIT {
             proved = echoed(self);
@@ -360,11 +361,11 @@ impl super::Controller {
 
     /// The manifest of the avatar worn, when its upload wrote one here.
     fn worn_manifest(&self) -> Option<AvatarManifest> {
-        let heard = match self.osc_values.lock().unwrap().latest.first(AVATAR_CHANGE) {
+        let heard = match self.osc_values.locked().latest.first(AVATAR_CHANGE) {
             Some(OscValue::Text(id)) => Some(id),
             _ => None,
         };
-        let id = heard.or_else(|| self.snapshot.lock().unwrap().n4n0.avatar_id.clone())?;
+        let id = heard.or_else(|| self.snapshot.locked().n4n0.avatar_id.clone())?;
         let file = orbiters_core::paths::avatars_dir().join(orbiters_contracts::avatar::file_name(&id));
         AvatarManifest::parse(&std::fs::read_to_string(file).ok()?).ok().filter(|m| m.avatar_id == id)
     }
@@ -373,7 +374,7 @@ impl super::Controller {
     /// headset, the 3D picture page of every menu.
     fn tell_about_picture(self: &Shared, kind: NoticeKind, text: &str, line: &str) {
         self.update(|s| s.capture.left_out.why = Some(text.to_string()));
-        if self.burst.lock().unwrap().recording {
+        if self.burst.locked().recording {
             // Its own toast comes with it.
             self.n4n0.photo_note(text.to_string(), line);
         } else {
@@ -386,9 +387,9 @@ impl super::Controller {
         if self.others_here() == 0 {
             return;
         }
-        let heard = self.osc_values.lock().unwrap().latest.get(REMOTE_PLAYER).and_then(|(v, _)| v.first().map(OscValue::truthy));
+        let heard = self.osc_values.locked().latest.get(REMOTE_PLAYER).and_then(|(v, _)| v.first().map(OscValue::truthy));
         let mask = value_of(vrchat, REMOTE_PLAYER).map(OscValue::truthy).or(heard);
-        let cost = self.hide.lock().unwrap().others_cost_strip;
+        let cost = self.hide.locked().others_cost_strip;
         match mask {
             // Already off: the person's own choice, nothing to put back.
             Some(false) => self.update(|s| s.capture.left_out.others = Left::Out),
@@ -398,7 +399,7 @@ impl super::Controller {
             }
             Some(true) => {
                 let turn = {
-                    let mut hide = self.hide.lock().unwrap();
+                    let mut hide = self.hide.locked();
                     hide.others_off = true;
                     hide.mask_turn += 1;
                     hide.mask_turn
@@ -441,7 +442,7 @@ impl super::Controller {
     /// VRChat's answer to Remote User off, read back, taken only while the mask is still this turn's: a recording ended
     /// meanwhile put Remote User back on itself, and that is not VRChat keeping it (CTL2-3). `true`: it kept it on.
     fn others_kept_on(&self, turn: u64, kept_on: bool) -> bool {
-        let mut hide = self.hide.lock().unwrap();
+        let mut hide = self.hide.locked();
         if !kept_on || !hide.others_off || hide.mask_turn != turn {
             return false;
         }
@@ -453,7 +454,7 @@ impl super::Controller {
     /// A picture is worth more than leaving the others out, and the kit surviving this mask is the one thing no recording shows.
     pub(super) fn others_cost_the_strip(self: &Shared) -> bool {
         {
-            let mut hide = self.hide.lock().unwrap();
+            let mut hide = self.hide.locked();
             if !std::mem::take(&mut hide.others_off) {
                 return false;
             }
@@ -470,7 +471,7 @@ impl super::Controller {
     /// followed. Called after every change of `turned_on` / `others_off`, before the mask is sent.
     fn note_masks(&self) {
         let (journal, local_user, remote_user) = {
-            let hide = self.hide.lock().unwrap();
+            let hide = self.hide.locked();
             let Some(journal) = hide.journal.clone() else { return };
             (journal, hide.turned_on.then_some(false), hide.others_off.then_some(true))
         };
@@ -500,7 +501,7 @@ impl super::Controller {
     /// putting them back left changed go back to the person's choice, in the same VRChat only; another VRChat, or none,
     /// and the journal just goes (CTL2-2).
     pub(super) fn put_back_masks_left(self: &Shared, wait: Duration) {
-        let Some(journal) = self.hide.lock().unwrap().journal.clone() else { return };
+        let Some(journal) = self.hide.locked().journal.clone() else { return };
         let Ok(bytes) = std::fs::read(&journal) else { return };
         let Ok(left) = serde_json::from_slice::<MasksLeft>(&bytes) else {
             let _ = std::fs::remove_file(&journal);
@@ -530,7 +531,7 @@ impl super::Controller {
     /// Starts holding the avatar hidden, unless it already is.
     fn begin_beat(self: &Shared) {
         let generation = {
-            let mut hide = self.hide.lock().unwrap();
+            let mut hide = self.hide.locked();
             if hide.hiding {
                 return;
             }
@@ -541,7 +542,7 @@ impl super::Controller {
         let ctl = self.clone();
         if let Err(e) = std::thread::Builder::new().name("n4n0-hide-beat".into()).spawn(move || ctl.hide_beat(generation)) {
             eprintln!("hiding the avatar: {e}");
-            self.hide.lock().unwrap().hiding = false;
+            self.hide.locked().hiding = false;
         }
     }
 
@@ -549,7 +550,7 @@ impl super::Controller {
     fn hide_beat(self: &Shared, generation: u64) {
         let address = parameter(HIDE_SELF_PARAMETER);
         let mut value = false;
-        while self.hide.lock().unwrap().generation == generation {
+        while self.hide.locked().generation == generation {
             let _ = self.with_osc(|o| o.send(&address, vec![rosc::OscType::Bool(value)]));
             value = !value;
             std::thread::sleep(BEAT);
@@ -559,7 +560,7 @@ impl super::Controller {
     /// Local User on, `after` a while, unless the recording ended by then; then checks that VRChat took it.
     fn turn_local_user_on(self: &Shared, after: Duration) {
         let turn = {
-            let mut hide = self.hide.lock().unwrap();
+            let mut hide = self.hide.locked();
             hide.turned_on = true;
             hide.mask_turn += 1;
             hide.mask_turn
@@ -569,7 +570,7 @@ impl super::Controller {
         let spawned = std::thread::Builder::new().name("n4n0-local-user".into()).spawn(move || {
             std::thread::sleep(after);
             let still = |c: &Shared| {
-                let hide = c.hide.lock().unwrap();
+                let hide = c.hide.locked();
                 hide.turned_on && hide.mask_turn == turn
             };
             if !still(&ctl) {
@@ -593,13 +594,13 @@ impl super::Controller {
         let asked = query.map(|addr| orbiters_core::osc::vrchat_camera_values(addr, Duration::from_millis(500))).unwrap_or_default();
         value_of(&asked, path)
             .map(OscValue::truthy)
-            .or_else(|| self.osc_values.lock().unwrap().latest.get(path).and_then(|(v, _)| v.first().map(OscValue::truthy)))
+            .or_else(|| self.osc_values.locked().latest.get(path).and_then(|(v, _)| v.first().map(OscValue::truthy)))
     }
 
     /// VRChat kept the mask off: no strip comes, so there is nothing to hide the avatar for.
     fn mask_not_taken(self: &Shared, turn: u64) {
         {
-            let mut hide = self.hide.lock().unwrap();
+            let mut hide = self.hide.locked();
             // Put back (the recording ended) or turned on again since: not this answer's to judge.
             if !hide.turned_on || hide.mask_turn != turn {
                 return;
@@ -616,7 +617,7 @@ impl super::Controller {
     /// Stops holding the avatar hidden; the last value, off, keeps it from waiting for the clock.
     fn end_beat(&self) {
         let was = {
-            let mut hide = self.hide.lock().unwrap();
+            let mut hide = self.hide.locked();
             hide.generation += 1;
             std::mem::take(&mut hide.hiding)
         };
@@ -628,7 +629,7 @@ impl super::Controller {
     /// The recording is over: the masks as the person left them, then the avatar back.
     pub(super) fn restore_hide_self(&self) {
         let (turned_on, others_off) = {
-            let mut hide = self.hide.lock().unwrap();
+            let mut hide = self.hide.locked();
             hide.mask_turn += 1;
             (std::mem::take(&mut hide.turned_on), std::mem::take(&mut hide.others_off))
         };
@@ -652,7 +653,7 @@ impl super::Controller {
             return;
         }
         let (turned_on, may_drive, always, due) = {
-            let mut hide = self.hide.lock().unwrap();
+            let mut hide = self.hide.locked();
             let due = hide.last_reassert.is_none_or(|t| t.elapsed() >= REASSERT);
             if due {
                 hide.last_reassert = Some(Instant::now());
@@ -668,7 +669,7 @@ impl super::Controller {
         }
         let vrchat = self.vrchat_values();
         let (kit, listed) = avatar_support(&vrchat);
-        self.hide.lock().unwrap().kit = kit;
+        self.hide.locked().kit = kit;
         if self.hiding_self() {
             // Hidden already (a picture of the world): only the mask, without which the kit draws nothing.
             if kit != Some(false) {
@@ -684,7 +685,7 @@ impl super::Controller {
         let vrchat = self.vrchat_values();
         let (kit, listed) = avatar_support(&vrchat);
         let (hiding, wanted) = {
-            let mut hide = self.hide.lock().unwrap();
+            let mut hide = self.hide.locked();
             hide.kit = kit;
             hide.told = false;
             (hide.hiding, hide.turned_on || hide.always)
@@ -706,13 +707,13 @@ impl super::Controller {
             return;
         }
         if missing_s < NO_STRIP_AFTER_S {
-            let was = std::mem::take(&mut self.hide.lock().unwrap().told);
+            let was = std::mem::take(&mut self.hide.locked().told);
             if was {
                 self.update(|s| s.capture.no_strip = None);
             }
             return;
         }
-        if std::mem::replace(&mut self.hide.lock().unwrap().told, true) {
+        if std::mem::replace(&mut self.hide.locked().told, true) {
             return;
         }
         let why = self.why_no_strip_now();
@@ -722,7 +723,7 @@ impl super::Controller {
 
     pub(super) fn why_no_strip_now(&self) -> NoStrip {
         let mask = self.local_user();
-        let kit = self.hide.lock().unwrap().kit;
+        let kit = self.hide.locked().kit;
         why_no_strip(mask, kit)
     }
 }

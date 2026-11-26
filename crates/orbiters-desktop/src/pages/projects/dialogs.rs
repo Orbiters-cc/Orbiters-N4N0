@@ -3,6 +3,7 @@
 //! when there are several, then the setup's steps until Unity confirms). The steps of one flow stay in one dialog,
 //! which follows their height and slides each step in.
 
+use orbiters_core::locks::*;
 use orbiters_i18n::{mark, tr, tr_n};
 use super::art::{self, glyph};
 use super::state::{server, Modal, Outcome, State};
@@ -451,7 +452,7 @@ pub(super) fn creating(ui: &mut Ui, state: &State) {
     let ctx = ui.ctx().clone();
     let w = ui.available_width();
     {
-        let p = state.copy_progress.lock().unwrap().clone();
+        let p = state.copy_progress.locked().clone();
         let label = state.acting().unwrap_or_default().to_string();
         let (r, _) = ui.allocate_exact_size(vec2(w, if p.total > 0 { 92.0 } else { 52.0 }), Sense::hover());
         let pt = ui.painter();
@@ -534,7 +535,7 @@ fn new_footer(ui: &mut Ui, state: &mut State) {
         let location = PathBuf::from(state.new_location.trim());
         let duplicate = state.duplicate;
         state.copy_cancel = Arc::new(AtomicBool::new(false));
-        *state.copy_progress.lock().unwrap() = Default::default();
+        *state.copy_progress.locked() = Default::default();
         let cancel = state.copy_cancel.clone();
         let progress = state.copy_progress.clone();
         let id = state.dialog_id();
@@ -564,7 +565,7 @@ fn new_footer(ui: &mut Ui, state: &mut State) {
         let _ = id;
     }
     if state.running() {
-        let p = state.copy_progress.lock().unwrap().clone();
+        let p = state.copy_progress.locked().clone();
         if p.phase == mark("Copying project") && widgets::activated(&Button::new(tr("Stop copying")).variant(Variant::Ghost).id_salt("new-stop").show(ui)) {
             state.copy_cancel.store(true, Ordering::Relaxed);
         }

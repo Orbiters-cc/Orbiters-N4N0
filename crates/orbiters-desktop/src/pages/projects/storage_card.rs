@@ -5,6 +5,7 @@
 //! [`State::task`], which greys out every other button while it runs: it has its own worker, the gallery and other
 //! projects stay usable, and the card (or, from elsewhere in the page, the capsule over the cards) shows how far it got
 //! and offers Cancel.
+use orbiters_core::locks::*;
 use orbiters_i18n::{tr, tr_n};
 use super::state::{Poke, State};
 use crate::pages::{Cx, Job};
@@ -212,7 +213,7 @@ impl State {
         if self.selected.as_ref().is_some_and(|p| discovery::same(p, &run.project)) {
             return None;
         }
-        let p = run.progress.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let p = run.progress.locked().clone();
         let cancelling = run.cancel.load(Ordering::Relaxed);
         let label = format!("{}: {}", run.name, heading(&p, cancelling));
         Some((label, detail(&p), p.fraction(), p.cancellable() && !cancelling))
@@ -405,7 +406,7 @@ pub(super) fn card(ui: &mut Ui, state: &mut State, project: &Project) {
         Some(f) if f.plan.is_some() => f.plan.clone(),
         _ => state.storage.plan.as_ref().filter(|(p, _)| discovery::same(p, &project.path)).map(|(_, plan)| plan.clone()),
     };
-    let measuring = fixture.as_ref().and_then(|f| f.measuring.clone()).or_else(|| plan.is_none().then(|| state.storage.plan_progress.lock().unwrap_or_else(|e| e.into_inner()).clone()));
+    let measuring = fixture.as_ref().and_then(|f| f.measuring.clone()).or_else(|| plan.is_none().then(|| state.storage.plan_progress.locked().clone()));
     let other_running = state.storage.run.as_ref().map(|r| r.name.clone());
     let action_running = state.running();
     let mut anchor = None;
@@ -508,7 +509,7 @@ pub(super) fn card(ui: &mut Ui, state: &mut State, project: &Project) {
 fn progress_card(ui: &mut Ui, state: &mut State) {
     let ctx = ui.ctx().clone();
     let Some(run) = state.storage.run.as_mut() else { return };
-    let p = run.progress.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let p = run.progress.locked().clone();
     if p.phase == Phase::Copying && run.copying_since.is_none() {
         run.copying_since = Some(Instant::now());
     }
@@ -766,7 +767,7 @@ impl State {
             return None;
         };
         if name == "projects-repair-real-cancel" {
-            let p = run.progress.lock().unwrap().clone();
+            let p = run.progress.locked().clone();
             if p.phase == Phase::Copying && p.bytes_copied * 4 > p.bytes_total && !run.cancel.load(Ordering::Relaxed) {
                 return self.anchors.get("storage-cancel").map(|r| Poke::Press(r.center()));
             }

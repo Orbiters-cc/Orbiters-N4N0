@@ -4,6 +4,8 @@
 //! (`State::open`) opens its sub-tab, scrolls it into view and lights it briefly. Changes apply as they are made (shown
 //! at once, saved in the background); text fields apply with their Save button (see [`super::form`]).
 
+#[cfg(target_os = "macos")]
+use orbiters_core::locks::*;
 use super::form::{self, Texts};
 use super::mic::{mic_test, MicTest};
 use super::settings_registry::{self as registry, Entry, Found, Group, Open};
@@ -2096,7 +2098,7 @@ fn orbit_now(snap: &Snapshot) -> (Option<String>, Option<crate::state::OrbitNeed
             let now = snap.orbit.note.as_deref().or(snap.orbit.pointing.map(crate::state::OrbitPointing::words));
             return (now.map(|now| tr(now).to_string()), snap.orbit.needs);
         }
-        let mut asked = ASKED.lock().unwrap_or_else(|e| e.into_inner());
+        let mut asked = ASKED.locked();
         let allowed = match *asked {
             Some((at, allowed)) if at.elapsed().as_secs() < 2 => allowed,
             _ => {

@@ -12,6 +12,7 @@
 //! offer opens nothing before its Show. A state applies only to the share accepted, only from a newer revision and
 //! term ([`orbiters_core::shared_view`]). The capture is downloaded signed in, never from a public address.
 
+use orbiters_core::locks::*;
 use super::{Controller, NoticeKind, Shared};
 use crate::ipc::SharedViewCommand;
 use crate::state::{CallContact, ShareOffer, ShareOut, ShareOutPhase, ShareStart, ShareWatching, SharedViewStatus};
@@ -488,7 +489,7 @@ impl Controller {
                 std::thread::sleep(Duration::from_secs(2));
             }
             // Quitting: Orbiters hears it at once (it would let the presence lapse in 2 minutes anyway).
-            let owed = ctl.shared_view.lock().unwrap().withdraw();
+            let owed = ctl.shared_view.locked().withdraw();
             if let (Some(_), Some((api, token))) = (owed, ctl.account_api()) {
                 let agent = orbiters_core::http_agent(Some(Duration::from_secs(3)), Some(Duration::from_secs(5)));
                 let _ = agent.delete(&api.url("n4n0/shares/presence")).header("Authorization", &format!("Bearer {token}")).call();
@@ -498,7 +499,7 @@ impl Controller {
 
     /// Whether the calls' event stream is wanted for shares (open even with Calls off).
     pub(super) fn shared_view_wants_stream(&self) -> bool {
-        self.shared_view.lock().unwrap().present
+        self.shared_view.locked().present
     }
 
     fn shared_tick(self: &Shared) {
@@ -520,7 +521,7 @@ impl Controller {
                 here.truncate(HERE_MOST);
                 here
             });
-            let mut rt = self.shared_view.lock().unwrap();
+            let mut rt = self.shared_view.locked();
             let expired = rt.expire(now_ms());
             let request = rt.presence(account_id.as_ref().map(|(id, _)| id.as_str()), here.unwrap_or_default(), Instant::now());
             if request == Some(Request::Withdraw) {
@@ -530,7 +531,7 @@ impl Controller {
         };
         if let Some(r) = request.0 {
             let acts = Acts { requests: vec![r], publish: true, ..Default::default() };
-            self.shared_act(self.shared_view.lock().unwrap(), acts);
+            self.shared_act(self.shared_view.locked(), acts);
         } else if request.1 {
             self.shared_publish();
         }
@@ -555,7 +556,7 @@ impl Controller {
         if begins && acting.is_none() {
             return self.n4n0.refuse_other_identity();
         }
-        let mut rt = self.shared_view.lock().unwrap();
+        let mut rt = self.shared_view.locked();
         let acts = match command {
             SharedViewCommand::Share { contact, capture, revision, reach, moved } => {
                 rt.share(&contact, CaptureRef { kind: "capture".into(), id: capture, revision, title: String::new() }, reach, moved, now_ms())
@@ -570,7 +571,7 @@ impl Controller {
 
     /// An event of the calls' stream about shares.
     pub(super) fn shared_view_event(self: &Shared, event: &str, v: &Value) {
-        let mut rt = self.shared_view.lock().unwrap();
+        let mut rt = self.shared_view.locked();
         let acts = rt.event(event, v, now_ms());
         self.shared_act(rt, acts);
     }
@@ -609,7 +610,7 @@ impl Controller {
     /// sent, the identity it was for.
     pub(super) fn shared_identity_to(&self, now: Option<String>) -> Option<String> {
         let (departed, forgot) = {
-            let mut rt = self.shared_view.lock().unwrap();
+            let mut rt = self.shared_view.locked();
             if rt.identity == now {
                 return None;
             }
@@ -646,7 +647,7 @@ impl Controller {
     /// The account signed in changed: the shares follow it now (another account's shares are not shown a moment longer).
     pub(super) fn shared_follow_account(&self) {
         let now = self.shared_identity_now().map(|(now, ..)| now);
-        let held = self.shared_view.lock().unwrap().identity.clone();
+        let held = self.shared_view.locked().identity.clone();
         if held.is_some() && held != now {
             self.shared_identity_to(None);
         }
@@ -666,7 +667,7 @@ impl Controller {
         if self.shared_identity_now().is_none_or(|(now, ..)| now != stamp) {
             return None;
         }
-        let rt = self.shared_view.lock().unwrap();
+        let rt = self.shared_view.locked();
         (rt.identity.as_deref() == Some(stamp)).then_some(rt)
     }
 
@@ -791,7 +792,7 @@ impl Controller {
     }
 
     fn shared_publish(&self) {
-        let status = self.shared_view.lock().unwrap().status();
+        let status = self.shared_view.locked().status();
         self.update_if(|s| s.shared_view.set(status));
     }
 }

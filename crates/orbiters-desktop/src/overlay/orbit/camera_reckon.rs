@@ -20,6 +20,7 @@
 //! - **Close.** Its X closes it; VRChat's laser is the one measured on Touch controllers ([`space::vrchat_touch_laser`]). A trigger pressed while
 //!   that laser is on the X is seen here ([`Reckon::step`]), with no overlay over VRChat's button, so VRChat gets its click whole.
 
+use orbiters_core::locks::*;
 use orbiters_openvr::Matrix34;
 
 use super::super::floating::space;
@@ -57,14 +58,12 @@ static WRISTS: std::sync::Mutex<[Option<(std::time::Instant, [f32; 6])>; 2]> = s
 
 /// The controller heard VRChat say where a wrist is (0 left, 1 right): x, y, z (metres) and Euler x, y, z (degrees), in Unity's axes.
 pub fn wrist_said(hand: usize, values: [f32; 6]) {
-    if let Ok(mut wrists) = WRISTS.lock() {
-        wrists[hand.min(1)] = Some((std::time::Instant::now(), values));
-    }
+    WRISTS.locked()[hand.min(1)] = Some((std::time::Instant::now(), values));
 }
 
 /// VRChat's wrist (0 left, 1 right) in SteamVR's standing space, if it said so lately.
 pub fn wrist(hand: usize, within: std::time::Duration) -> Option<Matrix34> {
-    let (at, values) = WRISTS.lock().ok()?[hand.min(1)]?;
+    let (at, values) = WRISTS.locked()[hand.min(1)]?;
     (at.elapsed() <= within).then(|| unity_pose(values))
 }
 

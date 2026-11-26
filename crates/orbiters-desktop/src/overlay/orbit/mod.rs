@@ -36,6 +36,7 @@ pub mod sheet_view;
 pub mod vr;
 pub mod zones;
 
+use orbiters_core::locks::*;
 use super::menu_ui::{self, Skin, View};
 use super::menu_retro;
 use super::worlds::Worlds;
@@ -703,7 +704,7 @@ impl Recents {
                     let (asked, give) = (asked.clone(), give.clone());
                     let _ = std::thread::Builder::new().name("orbit-pictures".into()).spawn(move || loop {
                         let picture = {
-                            let mut queue = asked.0.lock().unwrap_or_else(|e| e.into_inner());
+                            let mut queue = asked.0.locked();
                             loop {
                                 if let Some(picture) = queue.pop() {
                                     break picture;
@@ -712,7 +713,7 @@ impl Recents {
                                 if std::sync::Arc::strong_count(&asked) <= PICTURE_READERS {
                                     return;
                                 }
-                                queue = asked.1.wait_timeout(queue, Duration::from_secs(1)).unwrap_or_else(|e| e.into_inner()).0;
+                                queue = asked.1.wait_timeout_locked(queue, Duration::from_secs(1)).0;
                             }
                         };
                         let image = crate::worlds::decode_local(&picture).map(|image| if matches!(picture, crate::worlds::Picture::Session(_)) { lifted(image) } else { image });
@@ -738,7 +739,7 @@ impl Recents {
             self.asked.push(i);
         }
         let asked = self.reader().clone();
-        asked.0.lock().unwrap_or_else(|e| e.into_inner()).extend(pictures);
+        asked.0.locked().extend(pictures);
         asked.1.notify_all();
     }
 
@@ -792,7 +793,7 @@ impl Recents {
             self.asked.push(i);
         }
         let asked = self.reader().clone();
-        asked.0.lock().unwrap_or_else(|e| e.into_inner()).extend(pictures);
+        asked.0.locked().extend(pictures);
         asked.1.notify_all();
     }
 
@@ -812,7 +813,7 @@ impl Recents {
         if self.asked.len() != before {
             let wanted: std::collections::HashSet<&crate::worlds::Picture> = self.asked.iter().filter_map(|i| self.loaded.get(*i)).map(|r| &r.source).chain(self.big.iter().map(|b| &b.0)).collect();
             if let Some((asked, _)) = &self.reader {
-                asked.0.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| wanted.contains(p));
+                asked.0.locked().retain(|p| wanted.contains(p));
             }
         }
     }
@@ -823,7 +824,7 @@ impl Recents {
         let picture = crate::worlds::Picture::Shot { path, size, width: LARGE_PICTURE };
         self.big = Some((picture.clone(), None));
         let asked = self.reader().clone();
-        asked.0.lock().unwrap_or_else(|e| e.into_inner()).push(picture);
+        asked.0.locked().push(picture);
         asked.1.notify_all();
     }
 }

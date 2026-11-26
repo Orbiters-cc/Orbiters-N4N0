@@ -18,6 +18,7 @@
 //! the heads recorded for the reading thread are in it, the translations are kept in it, and each turn shows them where
 //! the world is in tracking space now.
 
+use orbiters_core::locks::*;
 use super::Presenter;
 use crate::backend::Ctl;
 use crate::state::{Snapshot, TranslateState, TranslateStatus};
@@ -294,7 +295,7 @@ impl TranslateHost {
         }
         self.log_motion();
         let (scene, status) = {
-            let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = self.shared.locked();
             if poses[0].pose_is_valid {
                 s.heads.push_back((now, self.motion.anchor(&m34(&poses[0].device_to_absolute))));
                 while s.heads.front().is_some_and(|(t, _)| now.duration_since(*t) > Duration::from_secs(2)) {
@@ -343,10 +344,10 @@ impl TranslateHost {
         self.animate(cx.overlay, dt);
         let shown: Vec<Shown> =
             self.slots.iter().filter(|s| s.visible && s.track.is_some()).map(|s| Shown { pose: s.pose, width: s.width, height: s.picture.as_ref().map_or(0.0, |p| p.quad_height), track: s.track }).collect();
-        self.shared.lock().unwrap_or_else(|e| e.into_inner()).shown = shown;
+        self.shared.locked().shown = shown;
         let shown_now = self.slots.iter().filter(|s| s.visible && s.to > 0.5).count() as u32;
         // What the turn shows, for the reading thread's log line too.
-        self.shared.lock().unwrap_or_else(|e| e.into_inner()).status.shown = shown_now;
+        self.shared.locked().status.shown = shown_now;
         let status = TranslateStatus { shown: shown_now, ..status };
         self.report(cx.backend, status);
     }
@@ -358,7 +359,7 @@ impl TranslateHost {
         self.frames.extend_from_slice(fresh);
         if self.frames_since.is_none_or(|t| now - t >= Duration::from_secs(2)) {
             let load = FrameLoad::of(&self.frames);
-            self.shared.lock().unwrap_or_else(|e| e.into_inner()).load = load;
+            self.shared.locked().load = load;
             self.frames.clear();
             self.frames_since = Some(now);
         }
@@ -412,7 +413,7 @@ impl TranslateHost {
             self.retired.push(t);
         }
         self.retired.reap();
-        let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = self.shared.locked();
         s.scene = None;
         s.shown.clear();
     }
@@ -554,7 +555,7 @@ pub(crate) fn note(line: &str) {
 /// The shared state a new reading thread starts with: nothing of the last one's but VRChat's frame load (the turn
 /// measures it every two seconds and the thread paces itself by it).
 fn fresh_shared(last: &Mutex<Shared>) -> Shared {
-    let load = last.lock().unwrap_or_else(|e| e.into_inner()).load;
+    let load = last.locked().load;
     Shared { load, status: TranslateStatus { state: TranslateState::Starting, ..Default::default() }, ..Default::default() }
 }
 
@@ -585,7 +586,7 @@ impl Retired {
 }
 
 fn set_status(shared: &Mutex<Shared>, state: TranslateState) {
-    shared.lock().unwrap_or_else(|e| e.into_inner()).status.state = state;
+    shared.locked().status.state = state;
 }
 
 /// Lowers this thread's priority: reading text must never take time from VRChat.
@@ -606,7 +607,7 @@ pub(crate) fn translator(settings: &TranslateSettings, backend_lan: &mut LanFoun
             if !(if window { settings.orbiters_agreed_window } else { settings.orbiters_agreed }) {
                 return Err(TranslateState::NeedsAgreement);
             }
-            let remote = REMOTE.lock().unwrap_or_else(|e| e.into_inner()).clone().ok_or(TranslateState::Problem { key: orbiters_i18n::mark("Orbiters - N4N0's service is not reachable.").into(), detail: None })?;
+            let remote = REMOTE.locked().clone().ok_or(TranslateState::Problem { key: orbiters_i18n::mark("Orbiters - N4N0's service is not reachable.").into(), detail: None })?;
             Ok(Box::new(provider::Remote(move |batch: &provider::Batch| remote(batch))))
         }
         TranslateProvider::Address => {
@@ -708,7 +709,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
         if stop.load(Ordering::Relaxed) {
             return;
         }
-        if let Some(s) = shared.lock().unwrap_or_else(|e| e.into_inner()).settings.clone() {
+        if let Some(s) = shared.locked().settings.clone() {
             break s;
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -737,12 +738,12 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
             lower_priority();
             while !done.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(30));
-                let head = shared.lock().unwrap_or_else(|e| e.into_inner()).heads.back().map(|(_, h)| *h);
+                let head = shared.locked().heads.back().map(|(_, h)| *h);
                 let Some(head) = head else { continue };
                 let gaze = (orbiters_translate::geometry::origin(&head), orbiters_translate::geometry::scale(orbiters_translate::geometry::axis(&head, 2), -1.0));
-                let mut c = core.lock().unwrap_or_else(|e| e.into_inner());
+                let mut c = core.locked();
                 if let Some(scene) = c.poll(started.elapsed().as_secs_f64(), gaze) {
-                    shared.lock().unwrap_or_else(|e| e.into_inner()).scene = Some(scene);
+                    shared.locked().scene = Some(scene);
                 }
                 take_logs(&mut c);
             }
@@ -750,7 +751,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
         reading(shared, stop, &core, source, &reader, &settings, translator_state.take(), &mut lan, started);
         done.store(true, Ordering::Relaxed);
     });
-    core.lock().unwrap_or_else(|e| e.into_inner()).save_cache(true);
+    core.locked().save_cache(true);
 }
 
 /// Where translations are kept between sessions (a development build in the VR sandbox keeps them in its logs folder:
@@ -782,7 +783,7 @@ pub(crate) fn take_logs(core: &mut Core) {
             note(&format!("first shown at {unix:.3}: picture at {:.3}, read +{:.0} ms, translated +{:.0} ms, shown +{:.0} ms, {:.0} degrees off the gaze{}", unix - c.shown as f64, c.read * 1000.0, c.translated * 1000.0, c.shown * 1000.0, c.off_deg, if c.known { " (known)" } else { "" })); // i18n: not shown (a log's line)
         }
     }
-    CHAINS.lock().unwrap_or_else(|e| e.into_inner()).extend(chains);
+    CHAINS.locked().extend(chains);
 }
 
 /// The lines shown for the first time since translate.log last said how long they took.
@@ -843,7 +844,7 @@ fn reading(
     use orbiters_translate::geometry::{compose, EyeView, Mirror};
     use orbiters_translate::pipeline::Look;
     use orbiters_translate::place::Pair;
-    let lock = || core.lock().unwrap_or_else(|e| e.into_inner());
+    let lock = || core.locked();
     let reader_of = |s: &TranslateSettings, target: &str| Reader { target: target.to_string(), reads: if s.keep_english { vec!["en".to_string()] } else { vec![] } };
     let mut translator_state = translator_state;
     let mut in_use = settings.clone();
@@ -869,7 +870,7 @@ fn reading(
     let mut quiet: Option<M34> = None;
     while !stop.load(Ordering::Relaxed) {
         let (heads, eyes, paused, shown, now_settings, moved, moved_at) = {
-            let s = shared.lock().unwrap_or_else(|e| e.into_inner());
+            let s = shared.locked();
             (s.heads.clone(), s.eyes, s.paused, s.shown.clone(), s.settings.clone(), s.moved, s.moved_at)
         };
         {
@@ -885,24 +886,24 @@ fn reading(
             let translator_changed = s.provider != in_use.provider || s.server != in_use.server || s.model != in_use.model || s.orbiters_agreed != in_use.orbiters_agreed;
             // No AI app on this computer: the built-in translator is downloaded, once.
             if translator_state == Some(TranslateState::NoLocalTranslator) && s.provider == TranslateProvider::ThisComputer {
-                let mut f = fetching.lock().unwrap_or_else(|e| e.into_inner());
+                let mut f = fetching.locked();
                 if f.is_none() {
                     *f = Some((0, 0, None));
                     let (fetching, stop) = (fetching.clone(), stop_flag(stop));
                     let _ = std::thread::Builder::new().name("translate download".into()).spawn(move || { // i18n: not shown (a thread's name)
                         lower_priority();
                         let result = orbiters_translate::models::install_files(&orbiters_translate::builtin::FILES, &stop, &mut |done, total| {
-                            if let Some(f) = fetching.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                            if let Some(f) = fetching.locked().as_mut() {
                                 (f.0, f.1) = (done, total);
                             }
                         });
-                        if let Some(f) = fetching.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                        if let Some(f) = fetching.locked().as_mut() {
                             f.2 = Some(result.map_err(|e| e.to_string()));
                         }
                     });
                 }
             }
-            let downloaded = matches!(*fetching.lock().unwrap_or_else(|e| e.into_inner()), Some((_, _, Some(Ok(())))));
+            let downloaded = matches!(*fetching.locked(), Some((_, _, Some(Ok(())))));
             // A translator not found is looked for again now and then (LM Studio started later), and at once when the
             // built-in one arrived.
             let retry = translator_state.is_some() && (translator_checked.elapsed() > Duration::from_secs(15) || (downloaded && translator_state == Some(TranslateState::NoLocalTranslator)));
@@ -924,7 +925,7 @@ fn reading(
         }
         let turning = turn_speed(&heads) > FAST_TURN;
         if reported.elapsed() >= Duration::from_secs(10) {
-            let s = shared.lock().unwrap_or_else(|e| e.into_inner()).status.clone();
+            let s = shared.locked().status.clone();
             let mean = if costs.is_empty() { 0.0 } else { costs.iter().sum::<f32>() / costs.len() as f32 };
             let each = parts.map(|p| p / looks.max(1) as f32);
             note(&format!(
@@ -939,14 +940,14 @@ fn reading(
                 s.shown,
                 s.state
             ));
-            if let Some(line) = chains_line(&std::mem::take(&mut *CHAINS.lock().unwrap_or_else(|e| e.into_inner()))) {
+            if let Some(line) = chains_line(&std::mem::take(&mut *CHAINS.locked())) {
                 note(&line);
             }
             (looks, paused_turns, turning_turns, reported, parts) = (0, 0, 0, Instant::now(), [0.0; 4]);
         }
         paused_turns += paused as u32;
         turning_turns += (turning && !paused) as u32;
-        let load = shared.lock().unwrap_or_else(|e| e.into_inner()).load;
+        let load = shared.locked().load;
         if load.busy() != game_busy {
             game_busy = load.busy();
             note(&format!("VRChat {}: looks every {} ms", if game_busy { "short of processor time" } else { "at ease again" }, pace_for(cost, game_busy, false).as_millis())); // i18n: not shown (a log's line)
@@ -967,7 +968,7 @@ fn reading(
         let due = held_back || last_look.is_none_or(|t| t.elapsed() >= pace_now);
         if paused || turning || !due {
             if paused {
-                let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+                let mut s = shared.locked();
                 if !matches!(s.status.state, TranslateState::Problem { .. }) {
                     s.status.state = TranslateState::Paused;
                 }
@@ -1045,7 +1046,7 @@ fn reading(
         if costs.len() > 20 {
             costs.pop_front();
         }
-        let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = shared.locked();
         match step {
             Ok((scene, new_lines)) => {
                 quiet = (!new_lines).then_some(head);
@@ -1056,7 +1057,7 @@ fn reading(
                 if let Some(by) = scene.moved {
                     s.corrections.push((by, scene.turned));
                 }
-                let fetch = fetching.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let fetch = fetching.locked().clone();
                 s.status.state = match (&translator_state, &scene.activity) {
                     (Some(TranslateState::NoLocalTranslator), _) if matches!(fetch, Some((_, _, None))) => {
                         let (done, total, _) = fetch.unwrap_or_default();
@@ -1095,7 +1096,7 @@ fn run(shared: &Mutex<Shared>, _stop: &AtomicBool, _from: ()) {
 pub(crate) fn stop_flag(stop: &AtomicBool) -> Arc<AtomicBool> {
     // The reading thread's own flag is borrowed; the download keeps its own, set once the reading thread ends.
     let flag = Arc::new(AtomicBool::new(stop.load(Ordering::Relaxed)));
-    STOPS.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(&flag));
+    STOPS.locked().push(Arc::downgrade(&flag));
     flag
 }
 
@@ -1103,7 +1104,7 @@ pub(crate) fn stop_flag(stop: &AtomicBool) -> Arc<AtomicBool> {
 static STOPS: Mutex<Vec<std::sync::Weak<AtomicBool>>> = Mutex::new(Vec::new());
 
 pub(crate) fn stop_downloads() {
-    for flag in STOPS.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
+    for flag in STOPS.locked().drain(..) {
         if let Some(f) = flag.upgrade() {
             f.store(true, Ordering::Relaxed);
         }

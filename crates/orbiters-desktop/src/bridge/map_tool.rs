@@ -5,6 +5,7 @@
 //! The avatar's position is known exactly when a picture recorded it (`skeleton.bin`, the capture kit's band): from then on
 //! the bridge adds up its own `walk`s and `turn`s, stopped where the plan shows a wall, and says how many it added.
 
+use orbiters_core::locks::*;
 use super::game::Failure;
 use super::map::{self, Capture, Map, Marks};
 use super::tools::Answer;
@@ -88,23 +89,23 @@ pub struct Maps {
 impl Maps {
     /// Keeps each picture's share in `dir` from now on.
     pub fn keep_in(&self, dir: PathBuf) {
-        *self.dir.lock().unwrap() = Some(dir);
+        *self.dir.locked() = Some(dir);
     }
 
     fn file(&self, session: &str) -> Option<PathBuf> {
-        self.dir.lock().unwrap().as_ref().map(|d| d.join(format!("{session}.json")))
+        self.dir.locked().as_ref().map(|d| d.join(format!("{session}.json")))
     }
 
     /// A picture's share: kept, or read from its folder (and kept).
     fn capture(&self, sessions_dir: &std::path::Path, session: &str) -> Result<Arc<Capture>, String> {
-        if let Some(c) = self.captures.lock().unwrap().get(session) {
+        if let Some(c) = self.captures.locked().get(session) {
             return Ok(c);
         }
         // A file that cannot be read as it was mapped (an older version's, clamped beyond ±8 km) is read again from the
         // picture when its folder is still there.
         if let Some(c) = self.file(session).and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice::<Capture>(&b).ok()) {
             let c = Arc::new(c);
-            self.captures.lock().unwrap().insert(session, c.clone());
+            self.captures.locked().insert(session, c.clone());
             return Ok(c);
         }
         let dir = sessions_dir.join(session);
@@ -126,7 +127,7 @@ impl Maps {
                 Err(e) => eprintln!("bridge map: {session}'s map is not saved: {e}"),
             }
         }
-        self.captures.lock().unwrap().insert(session, c.clone());
+        self.captures.locked().insert(session, c.clone());
         Ok(c)
     }
 
@@ -137,7 +138,7 @@ impl Maps {
 
     fn record(&self, session: &str, world: Option<&str>, m: Move) {
         let Some(world) = world else { return };
-        let mut moves = self.moves.lock().unwrap();
+        let mut moves = self.moves.locked();
         let entry = moves.entry(session.to_string()).or_insert_with(|| (world.to_ascii_lowercase(), Vec::new()));
         if !entry.0.eq_ignore_ascii_case(world) {
             *entry = (world.to_ascii_lowercase(), Vec::new());
@@ -250,9 +251,9 @@ impl Bridge {
     /// The map of a world from its finished pictures (or `only` of them), built once for the same pictures. Also what was
     /// left out and why.
     fn world_map(&self, world: &str, only: Option<&[String]>) -> Result<(Arc<Map>, Vec<Value>), Failure> {
-        let sessions_dir = self.publish.lock().unwrap().as_ref().map(|p| p.sessions_dir()).unwrap_or_default();
+        let sessions_dir = self.publish.locked().as_ref().map(|p| p.sessions_dir()).unwrap_or_default();
         let mut pictures: Vec<super::journal::Picture> =
-            self.journal.lock().unwrap().pictures.iter().filter(|p| p.world_id.as_deref().is_some_and(|w| w.eq_ignore_ascii_case(world))).cloned().collect();
+            self.journal.locked().pictures.iter().filter(|p| p.world_id.as_deref().is_some_and(|w| w.eq_ignore_ascii_case(world))).cloned().collect();
         if let Some(only) = only {
             pictures.retain(|p| only.contains(&p.session));
         }
@@ -280,13 +281,13 @@ impl Bridge {
             left_out.push(json!({ "picture": c.session, "why": format!("taken {:.0} m away, in another part of the world", r1(map::dist3_of(c.centre, used.last().map_or(c.centre, |u| u.centre)))) }));
         }
         let key: Vec<String> = used.iter().map(|c| c.session.clone()).collect();
-        if let Some((w, k, m)) = &*self.maps.built.lock().unwrap() {
+        if let Some((w, k, m)) = &*self.maps.built.locked() {
             if w == world && *k == key {
                 return Ok((m.clone(), left_out));
             }
         }
         let map = Arc::new(Map::build(used));
-        *self.maps.built.lock().unwrap() = Some((world.to_string(), key, map.clone()));
+        *self.maps.built.locked() = Some((world.to_string(), key, map.clone()));
         Ok((map, left_out))
     }
 
@@ -298,13 +299,13 @@ impl Bridge {
 
     /// Where the avatar is: the newest picture that recorded it, plus this session's walks and turns since.
     fn whereabouts(&self, s: &Session, map: &Map) -> Option<Whereabouts> {
-        let taken: HashMap<String, u64> = self.journal.lock().unwrap().pictures.iter().map(|p| (p.session.clone(), p.at)).collect();
+        let taken: HashMap<String, u64> = self.journal.locked().pictures.iter().map(|p| (p.session.clone(), p.at)).collect();
         let anchor = map.captures.iter().filter(|c| c.avatar.is_some()).max_by_key(|c| taken.get(&c.session).copied().unwrap_or(c.taken))?;
         let since = taken.get(&anchor.session).copied().unwrap_or(anchor.taken);
         let avatar = anchor.avatar?;
         let mut w = Whereabouts { at: [avatar.hips[0], avatar.hips[2]], heading: avatar.heading, picture: anchor.session.clone(), walks: 0, turns: 0 };
         let world = s.game.seen().world_id;
-        let moves = self.maps.moves.lock().unwrap();
+        let moves = self.maps.moves.locked();
         if let Some((mw, list)) = moves.get(&s.id) {
             if world.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(mw)) {
                 for (_, m) in list.iter().filter(|(at, _)| *at >= since) {
@@ -340,7 +341,7 @@ impl Bridge {
     }
 
     fn speed_of(&self, s: &Session) -> f32 {
-        self.maps.speeds.lock().unwrap().get(&s.id).copied().unwrap_or(WALK_SPEED)
+        self.maps.speeds.locked().get(&s.id).copied().unwrap_or(WALK_SPEED)
     }
 
     fn map_plan(&self, s: &Session, args: &Value) -> Result<Answer, Failure> {
@@ -544,7 +545,7 @@ impl Bridge {
     pub(super) fn map_walked(&self, s: &Session, direction: &str, held_s: f64, speed_seen: Option<f32>, run: bool) {
         let seen = s.game.seen();
         if let Some(v) = speed_seen.filter(|v| *v > 0.5 && !run) {
-            self.maps.speeds.lock().unwrap().insert(s.id.clone(), v);
+            self.maps.speeds.locked().insert(s.id.clone(), v);
         }
         let metres = match speed_seen {
             Some(v) if v < 0.1 => 0.0,

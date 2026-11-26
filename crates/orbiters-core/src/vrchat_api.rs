@@ -637,11 +637,11 @@ impl Asks for Client {
 /// (a world's details wait for one request, not for a friends list). Bound to the account signed in when it was made: another
 /// one since, and nothing more is asked.
 pub struct Turns<'a> {
-    client: &'a Mutex<Client>,
+    client: &'a ClientLock,
     user: Option<String>,
 }
 impl<'a> Turns<'a> {
-    pub fn new(client: &'a Mutex<Client>) -> Self {
+    pub fn new(client: &'a ClientLock) -> Self {
         let user = client.locked().signed_in_user_id().map(str::to_owned);
         Self { client, user }
     }
@@ -903,6 +903,60 @@ fn read_at_most(path: &std::path::Path, max: usize) -> std::io::Result<Vec<u8>> 
     let mut bytes = Vec::new();
     std::fs::File::open(path)?.take(max as u64 + 1).read_to_end(&mut bytes)?;
     Ok(bytes)
+}
+
+/// A client can hold a new cookie and an old user during sign-in. A panic in its transaction revokes
+/// the grant and clears the in-memory session before any later caller can use it.
+pub struct ClientLock {
+    inner: Mutex<Client>,
+    recovered: AtomicBool,
+}
+
+impl ClientLock {
+    pub fn new(client: Client) -> Self {
+        Self { inner: Mutex::new(client), recovered: AtomicBool::new(false) }
+    }
+
+    #[track_caller]
+    pub fn locked(&self) -> std::sync::MutexGuard<'_, Client> {
+        match self.inner.lock() {
+            Ok(client) => client,
+            Err(poisoned) => self.recover(poisoned),
+        }
+    }
+
+    #[track_caller]
+    pub fn try_locked(&self) -> Option<std::sync::MutexGuard<'_, Client>> {
+        match self.inner.try_lock() {
+            Ok(client) => Some(client),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(self.recover(poisoned)),
+        }
+    }
+
+    #[track_caller]
+    fn recover<'a>(&self, poisoned: std::sync::PoisonError<std::sync::MutexGuard<'a, Client>>) -> std::sync::MutexGuard<'a, Client> {
+        let mut client = poisoned.into_inner();
+        client.allowed.revoke();
+        client.clear();
+        client.ended = None;
+        client.operation = None;
+        self.recovered.store(true, Ordering::Release);
+        self.inner.clear_poison();
+        let location = std::panic::Location::caller();
+        crate::log_error!("recovered the VRChat API client at {}; revoked its in-memory session", location);
+        client
+    }
+
+    /// Whether this client discarded its in-memory session after a panic.
+    pub fn was_recovered(&self) -> bool {
+        self.recovered.load(Ordering::Acquire)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, Client>> {
+        self.inner.lock()
+    }
 }
 
 /// Reusable session, deliberately unrelated to the Orbiters client. The gate is checked on every request and cache read.
@@ -1885,7 +1939,7 @@ fn file_id(url: &str) -> Option<&str> {
 /// is locked for each VRChat request only, so the uploads and the waits leave it to other requests. Nothing is
 /// retried: a failure leaves at most an unfinished version of the account's own file, which the next attempt does
 /// not reuse.
-pub fn replace_image(client: &Mutex<Client>, id: &str, png: &[u8], mut progress: impl FnMut(Step)) -> Result<Replaced> {
+pub fn replace_image(client: &ClientLock, id: &str, png: &[u8], mut progress: impl FnMut(Step)) -> Result<Replaced> {
     let kind = Kind::of(id).ok_or(Error::NotFound)?;
     progress(Step::Checking);
     let (me, item) = {
@@ -1949,7 +2003,7 @@ pub fn replace_image(client: &Mutex<Client>, id: &str, png: &[u8], mut progress:
 }
 /// Puts a part to the storage address VRChat just gave for it, without the client locked: no session cookie or
 /// credential goes with it and none is taken from the answer, and VRChat's back-off is not touched by the storage's.
-fn put_part(client: &Mutex<Client>, url: &str, part: &Part) -> Result<()> {
+fn put_part(client: &ClientLock, url: &str, part: &Part) -> Result<()> {
     if !upload_url_allowed(url) {
         return Err(Error::UnsafeUrl);
     }
@@ -2290,7 +2344,7 @@ pub(crate) mod tests {
         let current=Arc::new(AtomicBool::new(true));
         let calls=Arc::new(std::sync::atomic::AtomicUsize::new(0));
         c.transport=Arc::new(ChangeScope {current:current.clone(),calls:calls.clone()});
-        let source=crate::vrchat_source::Source::new(Some(Arc::new(Mutex::new(c))),None,None);
+        let source=crate::vrchat_source::Source::new(Some(Arc::new(ClientLock::new(c))),None,None);
         assert_eq!(source.personal("usr_test",|| current.load(Ordering::Acquire),|c| c.world_instances("wrld_test")),Err(Error::Disabled));
         assert_eq!(calls.load(Ordering::Relaxed),1);
         assert_eq!(source.personal("usr_test",|| false,|c| c.world_instances("wrld_test")),Err(Error::Disabled));
@@ -2410,7 +2464,7 @@ pub(crate) mod tests {
     fn selecting_avatar_refuses_missing_or_mismatched_playing_account() {
         for playing in [None, Some("usr_other")] {
             let (c, seen) = mock(vec![response(200, r#"{"id":"usr_test","displayName":"Tester"}"#, &[])]);
-            let source = crate::vrchat_source::Source::new(Some(Arc::new(Mutex::new(c))),None,playing.map(str::to_owned));
+            let source = crate::vrchat_source::Source::new(Some(Arc::new(ClientLock::new(c))),None,playing.map(str::to_owned));
             assert!(source.select_avatar("avtr_4432ea9b-729c-46e3-8eaf-846aa0a37fdd").is_err());
             assert!(seen.lock().unwrap().iter().all(|r| r.method == "GET" && r.url.ends_with("/auth/user")), "identity lookup is allowed; selection is not");
         }
@@ -2421,7 +2475,7 @@ pub(crate) mod tests {
     fn an_avatar_is_selected_only_while_it_is_still_allowed() {
         for allowed in [true, false] {
             let (c, seen) = mock(vec![response(200, r#"{"id":"usr_test","displayName":"Tester"}"#, &[]), response(200, "{}", &[])]);
-            let source = crate::vrchat_source::Source::new(Some(Arc::new(Mutex::new(c))), None, Some("usr_test".into()));
+            let source = crate::vrchat_source::Source::new(Some(Arc::new(ClientLock::new(c))), None, Some("usr_test".into()));
             let asked = seen.clone();
             let selected = source.select_avatar_while("avtr_4432ea9b-729c-46e3-8eaf-846aa0a37fdd", || {
                 assert_eq!(asked.lock().unwrap().len(), 1, "asked last");
@@ -2437,7 +2491,7 @@ pub(crate) mod tests {
             response(200, "pixels", &[]),
             response(200, r#"{"active":true}"#, &[]),
         ]);
-        let source = crate::vrchat_source::Source::new(Some(Arc::new(Mutex::new(c))), None, None);
+        let source = crate::vrchat_source::Source::new(Some(Arc::new(ClientLock::new(c))), None, None);
         assert!(source.direct_available());
         let avatar = source.avatar("avtr_a").unwrap().unwrap();
         assert_eq!(source.image(&avatar.thumbnail_image_url).unwrap(), b"pixels");
@@ -2492,6 +2546,27 @@ pub(crate) mod tests {
         assert!(c.restore() == Err(Error::Disabled));
         assert!(seen.lock().unwrap().is_empty());
     }
+    #[test]
+    fn a_poisoned_vrchat_client_revokes_the_half_changed_session() {
+        let (client, sent) = mock(vec![]);
+        let gate = client.allowed.clone();
+        let client = ClientLock::new(client);
+        std::thread::scope(|s| {
+            let panic = s.spawn(|| {
+                let mut held = client.locked();
+                held.cookies.auth = "fixture-mismatched-cookie".into();
+                panic!("the sign-in transaction was interrupted");
+            });
+            assert!(panic.join().is_err());
+        });
+        let recovered = client.locked();
+        assert!(client.was_recovered());
+        assert!(!recovered.holds_session());
+        assert!(!gate.allowed());
+        assert_eq!(recovered.authenticated(), Err(Error::Disabled));
+        assert!(sent.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn full_two_factor_flow_reuses_cookies_without_repeating_password() {
         for method in [TwoFactor::Totp, TwoFactor::Email, TwoFactor::Recovery] {
@@ -2680,7 +2755,7 @@ pub(crate) mod tests {
             let (mut c, _) = mock(vec![]);
             let sent = Arc::new(Pages { order: Mutex::default(), first });
             c.transport = sent.clone();
-            (Mutex::new(c), sent)
+            (ClientLock::new(c), sent)
         };
         let (first, asked) = std::sync::mpsc::channel();
         let (client, sent) = shared(first);
@@ -3216,7 +3291,7 @@ pub(crate) mod tests {
     fn replacing_a_picture_adds_a_version_uploads_both_parts_and_points_the_avatar_at_it() {
         let png = b"not a real PNG, any bytes do: ".repeat(150);
         let (c, seen) = unpaced(avatar_upload_answers());
-        let client = Mutex::new(c);
+        let client = ClientLock::new(c);
         let mut steps = vec![];
         let replaced = replace_image(&client, "avtr_a", &png, |s| steps.push(s)).unwrap();
         assert_eq!(replaced.image_url, format!("{FILE}/4/file"));
@@ -3263,7 +3338,7 @@ pub(crate) mod tests {
     #[test]
     fn someone_elses_avatar_is_refused_before_anything_is_sent() {
         let (c, seen) = unpaced(vec![json(serde_json::json!({"id":"avtr_a","name":"Theirs","authorId":"usr_other","imageUrl":format!("{FILE}/1/file")}))]);
-        let client = Mutex::new(c);
+        let client = ClientLock::new(c);
         assert_eq!(replace_image(&client, "avtr_a", b"picture", |_| {}), Err(Error::NotYours));
         assert_eq!(seen.lock().unwrap().len(), 1);
         assert_eq!(replace_image(&client, "usr_test", b"picture", |_| {}), Err(Error::NotFound));
@@ -3280,7 +3355,7 @@ pub(crate) mod tests {
             ),
             json(serde_json::json!({"url": "https://uploads.example.com/file_new.png"})),
         ]);
-        let client = Mutex::new(c);
+        let client = ClientLock::new(c);
         assert_eq!(replace_image(&client, "wrld_a", b"picture", |_| {}), Err(Error::UnsafeUrl));
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 5);
@@ -3297,7 +3372,7 @@ pub(crate) mod tests {
     fn a_revoked_grant_stops_an_upload_at_its_next_step() {
         let (c, seen) = unpaced(avatar_upload_answers());
         let gate = c.allowed.clone();
-        let client = Mutex::new(c);
+        let client = ClientLock::new(c);
         let result = replace_image(&client, "avtr_a", b"picture", |s| {
             if s == Step::Signing {
                 gate.revoke();

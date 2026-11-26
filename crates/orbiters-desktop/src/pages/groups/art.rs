@@ -5,6 +5,7 @@
 //! developer update (Anchored 2048x385, Centered 2048x472): each zone's left and right edge on every row, simplified to
 //! within 1.2 px, as fractions of the canvas. VRChat's pictures are not shipped; these contours are our own data. Where
 //! zones overlap, the later one in each list is on top. They are guides: the real name-length breakpoints are not known.
+use orbiters_core::locks::*;
 use crate::controller::groups::Key;
 use crate::controller::vrchat_data::Scope;
 use orbiters_core::groups::PostDraft;
@@ -331,7 +332,7 @@ pub fn next_choice() -> u64 {
 
 /// [`load_source`] for the choice `n`, one at a time; nothing when another was made while it waited.
 pub fn open_choice(n: u64, path: &Path) -> Option<anyhow::Result<image::RgbaImage>> {
-    let _one = OPENING.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = OPENING.locked();
     (CHOICE.load(std::sync::atomic::Ordering::Acquire) == n).then(|| load_source(path))
 }
 
@@ -345,7 +346,7 @@ pub fn decode_source(bytes: &[u8]) -> anyhow::Result<image::RgbaImage> {
 pub fn decode_bounded(bytes: &[u8], max_pixels: u64) -> anyhow::Result<image::RgbaImage> {
     use image::ImageDecoder;
     anyhow::ensure!(bytes.len() as u64 <= SOURCE_BYTES, "picture too large"); // i18n: not shown (worded by the studio)
-    let _one = DECODING.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = DECODING.locked();
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(20_000);

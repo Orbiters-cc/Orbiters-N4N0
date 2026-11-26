@@ -14,6 +14,7 @@
 //! Unity may have the project open: the file is only read, from the newer of its two meta pages, and anything that
 //! does not add up is a model not found, never a failed preview.
 
+use orbiters_core::locks::*;
 use super::model::ModelMesh;
 use super::prefab::{self, Graph, MatSource, MeshSource, Obj};
 use super::serialized::{ObjectInfo, SerializedFile};
@@ -264,7 +265,7 @@ impl Artifact {
     fn read(&self, o: &ObjectInfo) -> anyhow::Result<Value> {
         let mut data = vec![0u8; o.size as usize];
         {
-            let mut f = self.file.lock().unwrap();
+            let mut f = self.file.locked();
             f.seek(SeekFrom::Start(self.info.data_offset + o.start))?;
             f.read_exact(&mut data)?;
         }

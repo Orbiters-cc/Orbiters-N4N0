@@ -22,6 +22,7 @@
 mod sys_unix;
 #[cfg(windows)]
 mod sys_windows;
+use orbiters_core::locks::*;
 #[cfg(unix)]
 use sys_unix as sys;
 #[cfg(windows)]
@@ -159,7 +160,7 @@ impl ReadRoot {
 
     /// The folder `rel` below, none of whose names is a link.
     fn dir(&self, rel: &Path) -> io::Result<File> {
-        if let Some((at, dir)) = &*self.last.lock().unwrap() {
+        if let Some((at, dir)) = &*self.last.locked() {
             if at == rel {
                 return dir.try_clone();
             }
@@ -171,7 +172,7 @@ impl ReadRoot {
                 return Err(io::Error::other(format!("{}: a link", rel.display()))); // i18n: not shown (an error chained under a message)
             }
         }
-        *self.last.lock().unwrap() = Some((rel.to_path_buf(), at.try_clone()?));
+        *self.last.locked() = Some((rel.to_path_buf(), at.try_clone()?));
         Ok(at)
     }
 
@@ -544,7 +545,7 @@ impl WriteRoot {
     }
 
     fn dir(&self, rel: &Path) -> io::Result<File> {
-        if let Some((at, dir)) = &*self.last.lock().unwrap() {
+        if let Some((at, dir)) = &*self.last.locked() {
             if at == rel {
                 let dir = dir.try_clone()?;
                 // Not held elsewhere than on Windows: still below the root before anything is made in it.
@@ -557,7 +558,7 @@ impl WriteRoot {
             so_far.push(name);
             at = self.inside(sys::open_at(&at, name, Want::Dir { hold: true }, false)?, &so_far)?;
         }
-        *self.last.lock().unwrap() = Some((rel.to_path_buf(), at.try_clone()?));
+        *self.last.locked() = Some((rel.to_path_buf(), at.try_clone()?));
         Ok(at)
     }
 
@@ -595,9 +596,9 @@ impl WriteRoot {
     /// Removes the file or (empty) folder at `rel` when it is the very one `id` names.
     pub fn remove(&self, rel: &Path, id: FileId, is_dir: bool) -> io::Result<bool> {
         let (parent, name) = split(rel)?;
-        *self.last.lock().unwrap() = None;
+        *self.last.locked() = None;
         let dir = self.dir(parent)?;
-        *self.last.lock().unwrap() = None;
+        *self.last.locked() = None;
         sys::remove_at(&dir, name, id, is_dir)
     }
 

@@ -3,6 +3,7 @@
 //! signature: Orbiters' own team), kept in the settings' folder, and run: to sign in to Steam with a QR code, to
 //! download VRChat, to start it with N4N0's arguments. A file fetched by N4N0 carries no quarantine mark, so the check
 //! Gatekeeper would make at its first run is made here, before it is ever run.
+use orbiters_core::locks::*;
 use anyhow::Context as _;
 use orbiters_core::launcher::EngineSetup;
 use orbiters_core::obelisk::{self, Event, Phase};
@@ -770,16 +771,16 @@ impl Play {
 
     /// The launch the slot is held for: one under way, or whose end is not known yet.
     fn owner(&self) -> Option<u64> {
-        self.slot.lock().unwrap().attached
+        self.slot.locked().attached
     }
 
     /// Holds the slot until `until`, for a wait that could not be written: whoever cannot read it starts nothing meanwhile.
     /// Only this wait ends then, whatever holds the slot by then.
     fn hold_slot(&self, until: std::time::Instant) {
-        let deciding = self.slot.lock().unwrap().deciding;
+        let deciding = self.slot.locked().deciding;
         let _ = self.take_slot_within(Duration::ZERO);
         let wait = {
-            let mut slot = self.slot.lock().unwrap();
+            let mut slot = self.slot.locked();
             slot.deciding = deciding;
             slot.waits += 1;
             slot.unwritten = Some((slot.waits, until));
@@ -789,7 +790,7 @@ impl Play {
         let _ = std::thread::Builder::new().name("obelisk-unwritten".into()).spawn(move || {
             std::thread::sleep(until.saturating_duration_since(std::time::Instant::now()));
             let Some(slot) = slot.upgrade() else { return };
-            let mut slot = slot.lock().unwrap();
+            let mut slot = slot.locked();
             if slot.unwritten.is_some_and(|(this, _)| this == wait) {
                 slot.unwritten = None;
                 slot.let_go();
@@ -800,14 +801,14 @@ impl Play {
     /// What was decided holds the slot no more: let go of where nothing else does (no reservation, no launch, and no wait that
     /// could not be written).
     fn let_slot_go(&self) {
-        let mut slot = self.slot.lock().unwrap();
+        let mut slot = self.slot.locked();
         slot.deciding = false;
         slot.let_go();
     }
 
     fn take_slot_within(&self, wait: Duration) -> Result<(), Refused> {
         let Some(gate) = &self.gate_file else { return Ok(()) };
-        let mut slot = self.slot.lock().unwrap();
+        let mut slot = self.slot.locked();
         if slot.file.is_some() {
             slot.deciding = true;
             return Ok(());
@@ -840,14 +841,14 @@ impl Play {
     /// became) the one VRChat session of the engine's that lives.
     fn settle_left(&self, now: &mut Now, library: &Path, clock: &obelisk::BootInstant) {
         let left = {
-            let slot = self.slot.lock().unwrap();
+            let slot = self.slot.locked();
             let Some(left) = slot.left.clone().filter(|_| slot.mine.is_none()) else { return };
             left
         };
         let other_boot = left.boot.as_ref().is_some_and(|boot| !boot.eq_ignore_ascii_case(&clock.boot));
         if !other_boot && left.session.is_none() {
             if let Some(session) = live_session(library) {
-                let mut slot = self.slot.lock().unwrap();
+                let mut slot = self.slot.locked();
                 let known = InFlight { session: Some(session), ..left };
                 let _ = slot.write(Some(&known));
                 slot.left = Some(known);
@@ -871,7 +872,7 @@ impl Play {
         let kept = now.kept.as_mut().expect("read before");
         kept.until = [kept.until, until].into_iter().flatten().reduce(f64::max);
         let settled = until.is_none() || self.write_kept(kept);
-        let mut slot = self.slot.lock().unwrap();
+        let mut slot = self.slot.locked();
         slot.left = None;
         let still = (!settled).then_some(InFlight { until, ..left });
         let _ = slot.write(still.as_ref());
@@ -881,7 +882,7 @@ impl Play {
     fn reserve_slot(&self, token: u64) -> Result<(), Refused> {
         self.take_slot()?;
         {
-            let mut slot = self.slot.lock().unwrap();
+            let mut slot = self.slot.locked();
             slot.reserved = Some(token);
             slot.deciding = false;
         }
@@ -896,7 +897,7 @@ impl Play {
     }
 
     fn unreserve_slot(slot: &Mutex<Slot>, token: u64) {
-        let mut slot = slot.lock().unwrap();
+        let mut slot = slot.locked();
         if slot.reserved == Some(token) {
             slot.reserved = None;
             slot.let_go();
@@ -905,7 +906,7 @@ impl Play {
 
     /// Launch `id` is over: the slot is free, unless it is reserved.
     fn free_slot(&self, id: u64) {
-        let mut slot = self.slot.lock().unwrap();
+        let mut slot = self.slot.locked();
         if slot.attached == Some(id) {
             slot.attached = None;
             slot.let_go();
@@ -962,7 +963,7 @@ impl Play {
         }
         let kept = now.kept.as_mut().expect("read above");
         let (verdict, trouble, changed) = judge(&obelisk::scan_records(library), kept, &clock, wall, memory);
-        let unwritten = self.slot.lock().unwrap().unwritten.is_some();
+        let unwritten = self.slot.locked().unwritten.is_some();
         if held && (rewrite || changed || unwritten) {
             self.write_kept(kept);
         }
@@ -984,7 +985,7 @@ impl Play {
             let _ = std::fs::remove_file(&part);
             return false;
         }
-        self.slot.lock().unwrap().unwritten = None;
+        self.slot.locked().unwritten = None;
         true
     }
 
@@ -1000,7 +1001,7 @@ impl Play {
         }
         let verdict = match self.judged(now, library, wall).0 {
             // A game a holder that is gone left there still runs.
-            Ok(None) if self.slot.lock().unwrap().left.is_some() => Refused::Busy,
+            Ok(None) if self.slot.locked().left.is_some() => Refused::Busy,
             // Nor over any that lives by the engine's own records, whatever was left of it here.
             Ok(None) if live_session(library).is_some() => Refused::Busy,
             Ok(None) => return Ok(()),
@@ -1022,7 +1023,7 @@ impl Play {
     /// refused like a start would be now, except for a game of the reserver's own still attached when `own_attached` is
     /// that launch and the slot is still held for it (it is to be closed first, its end and any wait after it are waited for).
     pub fn reserve(&self, library: &Path, own_attached: Option<u64>) -> Result<u64, Refused> {
-        let mut now = self.now.lock().unwrap();
+        let mut now = self.now.locked();
         if now.reserved.is_some_and(|(_, until)| until > std::time::Instant::now()) {
             return Err(Refused::Busy);
         }
@@ -1044,7 +1045,7 @@ impl Play {
 
     /// Gives a reservation back unused.
     pub fn unreserve(&self, token: u64) {
-        let mut now = self.now.lock().unwrap();
+        let mut now = self.now.locked();
         if now.reserved.is_some_and(|(t, _)| t == token) {
             now.reserved = None;
         }
@@ -1071,7 +1072,7 @@ impl Play {
 
     #[allow(clippy::too_many_arguments)]
     fn start_full(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], now_is: std::time::SystemTime, token: Option<u64>, render_percent: Option<u32>, steam: Option<u64>, host: &[&'static str]) -> Result<u64, Refused> {
-        let mut now = self.now.lock().unwrap();
+        let mut now = self.now.locked();
         if now.attached {
             return Err(Refused::Busy);
         }
@@ -1107,14 +1108,14 @@ impl Play {
         }
         // Kept from here: a start that is not made lets go of it.
         let free = || {
-            let mut slot = self.slot.lock().unwrap();
+            let mut slot = self.slot.locked();
             slot.reserved = None;
             slot.deciding = false;
             slot.let_go();
         };
         // Said before it is made: this N4N0 may be gone before it can say how it ended.
         let clock = boot_clock();
-        let said = self.slot.lock().unwrap().say(InFlight { boot: Some(clock.boot), started: clock.seconds, ..Default::default() });
+        let said = self.slot.locked().say(InFlight { boot: Some(clock.boot), started: clock.seconds, ..Default::default() });
         said.map_err(|e| {
             free();
             slot_refused(&self.gate_file.as_deref().unwrap_or(Path::new("")).with_extension("lock"), &e)
@@ -1133,7 +1134,7 @@ impl Play {
         let id = now.made;
         {
             // The reservation is used up by its start.
-            let mut slot = self.slot.lock().unwrap();
+            let mut slot = self.slot.locked();
             slot.reserved = None;
             slot.attached = Some(id);
             slot.deciding = false;
@@ -1210,13 +1211,13 @@ impl Play {
 
     /// How long a start must still wait now, or why none can be made.
     pub fn gate(&self, library: &Path) -> Result<Option<Duration>, Refused> {
-        let mut now = self.now.lock().unwrap();
+        let mut now = self.now.locked();
         self.wait(&mut now, library, std::time::SystemTime::now())
     }
 
     /// A record of the engine's that cannot be read, for Home to show (whether or not it holds starts now).
     pub fn trouble(&self, library: &Path) -> Option<Trouble> {
-        let mut now = self.now.lock().unwrap();
+        let mut now = self.now.locked();
         let trouble = self.judged(&mut now, library, std::time::SystemTime::now()).1;
         self.let_slot_go();
         trouble
@@ -1227,7 +1228,7 @@ impl Play {
     /// game of this N4N0 attached, no supervisor of the engine holding its records (its lock is held for the move) and no
     /// process of the engine running. Where it went, or why it was left.
     pub fn set_aside(&self, library: &Path, file: &Path) -> Result<PathBuf, String> {
-        let mut now = self.now.lock().unwrap();
+        let mut now = self.now.locked();
         if now.attached {
             return Err(tr("VRChat is starting or running: set the record aside once it has closed.").into());
         }
@@ -1286,14 +1287,14 @@ impl Play {
 
     /// The launch the program is attached to now, if one is (a start under way, a game running, or its end finalizing).
     pub fn attached(&self) -> Option<u64> {
-        let now = self.now.lock().unwrap();
+        let now = self.now.locked();
         now.attached.then(|| now.launches.last().map(|l| l.id)).flatten()
     }
 
     /// A start that could not be followed: as if it was never made.
     fn abandon(&self, id: u64) {
         self.free_slot(id);
-        let mut now = self.now.lock().unwrap();
+        let mut now = self.now.locked();
         now.attached = false;
         now.program = None;
         now.running = None;
@@ -1312,7 +1313,7 @@ impl Play {
         if !self.write_kept(kept) {
             self.hold_slot(cooldown);
             // Nor lost with this N4N0: whoever takes the slot next reads it there.
-            let mut slot = self.slot.lock().unwrap();
+            let mut slot = self.slot.locked();
             if let Some(mine) = slot.mine.clone() {
                 let _ = slot.say(InFlight { until, ..mine });
             }
@@ -1323,7 +1324,7 @@ impl Play {
     /// what runs now.
     fn follow_line(&self, id: u64, library: &Path, line: &str) {
         let Some(event) = obelisk::event(line) else { return };
-        let mut now = self.now.lock().unwrap();
+        let mut now = self.now.locked();
         if now.launch(id).is_none_or(|l| l.over) {
             return;
         }
@@ -1334,7 +1335,7 @@ impl Play {
                 if let Some(launch) = now.launch(id) {
                     launch.session = Some(session.clone());
                 }
-                let mut slot = self.slot.lock().unwrap();
+                let mut slot = self.slot.locked();
                 if let Some(mine) = slot.mine.clone().filter(|_| slot.attached == Some(id)) {
                     // (not written, it is found by its record)
                     let _ = slot.say(InFlight { session: Some(session), ..mine });
@@ -1350,7 +1351,7 @@ impl Play {
                     pid.and_then(|pid| obelisk::session_records(library).into_iter().find(|(r, _)| r.game == Some(pid) && !r.over()).map(|(r, _)| r.id))
                 });
                 {
-                    let mut slot = self.slot.lock().unwrap();
+                    let mut slot = self.slot.locked();
                     if let Some(mine) = slot.mine.clone().filter(|_| slot.attached == Some(id)) {
                         let _ = slot.say(InFlight { session: session.clone(), ..mine });
                     }
@@ -1421,7 +1422,7 @@ impl Play {
     /// start failed (with the program's exit status).
     /// The slot is kept until how it ended is known and kept.
     fn finish(&self, id: u64, library: &Path, status: Option<std::process::ExitStatus>) {
-        let mut now = self.now.lock().unwrap();
+        let mut now = self.now.locked();
         let Some(launch) = now.launch(id).cloned() else { return self.free_slot(id) };
         if launch.over {
             return;
@@ -1516,26 +1517,26 @@ impl Play {
 
     /// A start is under way and the game is not up yet (the engine or an update of VRChat may download first).
     pub fn starting(&self) -> bool {
-        let now = self.now.lock().unwrap();
+        let now = self.now.locked();
         now.attached && now.running.is_none() && now.program.is_some_and(alive)
     }
 
     /// The process the program said the game runs under, while it does and the program is there to say so.
     pub fn running(&self) -> Option<Option<u32>> {
-        let now = self.now.lock().unwrap();
+        let now = self.now.locked();
         now.running.filter(|_| now.program.is_some_and(alive))
     }
 
     /// The program's own process while it is attached to a game: a real process that lives exactly as long as the game is
     /// this N4N0's to follow (what `MacMachine` names the game by when the program did not say the game's process).
     pub fn program(&self) -> Option<u32> {
-        let now = self.now.lock().unwrap();
+        let now = self.now.locked();
         now.program.filter(|p| alive(*p))
     }
 
     /// Why launch `id` failed, told once to whoever started it (Home's toast); `None` before it failed or once told.
     pub fn take_failure(&self, id: u64) -> Option<Failure> {
-        let mut now = self.now.lock().unwrap();
+        let mut now = self.now.locked();
         let kept = now.unread.iter().position(|(i, _)| *i == id).map(|at| now.unread.remove(at).1);
         let launch = now.launch(id);
         if launch.as_ref().is_some_and(|l| l.told) {
@@ -1550,7 +1551,7 @@ impl Play {
 
     /// The engine's files no game starts on, as a start here last said.
     pub fn engine_problem(&self) -> Option<obelisk::EngineProblem> {
-        self.now.lock().unwrap().engine.clone()
+        self.now.locked().engine.clone()
     }
 
     /// Installs what the engine is made of again (`engine repair`), which the program does under the lock every launch
@@ -1564,14 +1565,14 @@ impl Play {
         });
         match done {
             Ok(()) if repaired => {
-                self.now.lock().unwrap().engine = None;
+                self.now.locked().engine = None;
                 Ok(())
             }
             Ok(()) => Err(Failure::new("internal", tr("What runs VRChat on this Mac stopped without saying why."))),
             Err(failure) => {
                 // What is there now is what it says.
                 if failure.engine.is_some() {
-                    self.now.lock().unwrap().engine = failure.engine.clone();
+                    self.now.locked().engine = failure.engine.clone();
                 }
                 Err(failure)
             }
@@ -1580,12 +1581,12 @@ impl Play {
 
     /// The newest launch made, whoever made it and whatever became of it.
     pub fn newest(&self) -> Option<Launch> {
-        self.now.lock().unwrap().launches.last().cloned()
+        self.now.locked().launches.last().cloned()
     }
 
     /// What became of launch `id`, as often as asked.
     pub fn launch(&self, id: u64) -> Option<Launch> {
-        self.now.lock().unwrap().launches.iter().find(|l| l.id == id).cloned()
+        self.now.locked().launches.iter().find(|l| l.id == id).cloned()
     }
 }
 

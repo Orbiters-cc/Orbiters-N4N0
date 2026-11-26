@@ -2,6 +2,7 @@
 //! AppKit's view of the applications running. Nothing here needs a permission the system asks the person about:
 //! `NSRunningApplication` and the window server's list of windows (without their titles, which do need one) are open to
 //! any application, where AppleScript's System Events and the accessibility API would each put up a question.
+use orbiters_core::locks::*;
 use std::ffi::{CStr, CString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -209,14 +210,14 @@ static BEFORE_QUIT: Mutex<Option<std::collections::HashMap<u32, usize>>> = Mutex
 
 /// Notes what `pid` has on screen before it is asked to quit.
 pub fn note_windows_before_quit(pid: u32) {
-    BEFORE_QUIT.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(pid, windows_on_screen(pid));
+    BEFORE_QUIT.locked().get_or_insert_with(Default::default).insert(pid, windows_on_screen(pid));
 }
 
 /// Whether `pid`, asked to quit, shows a window more than it had then: its question about unsaved work. The system draws
 /// a modal alert at the level of any other window and titles are out of reach, so this is what tells it, and Unity's other
 /// windows do not count as a question.
 pub fn asking_before_quit(pid: u32) -> bool {
-    let before = BEFORE_QUIT.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&pid).copied());
+    let before = BEFORE_QUIT.locked().as_ref().and_then(|m| m.get(&pid).copied());
     before.is_some_and(|n| windows_on_screen(pid) > n)
 }
 

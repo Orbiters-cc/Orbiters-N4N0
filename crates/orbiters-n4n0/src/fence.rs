@@ -234,7 +234,7 @@ impl N4n0 {
         }
         let mut stamp = stamp;
         if fresh {
-            let mut rt = fence.n4n0.lock().unwrap();
+            let mut rt = fence.n4n0.locked();
             if !rt.inputs.take(&stamp) {
                 return Err(Refusal::Again);
             }
@@ -256,7 +256,7 @@ impl N4n0 {
             return None;
         };
         let fence = self.fence(&Ticket::input(self.host.identity_epoch()))?;
-        let taken = fence.n4n0.lock().unwrap().inputs.take(&stamp);
+        let taken = fence.n4n0.locked().inputs.take(&stamp);
         taken.then_some(fence)
     }
 
@@ -267,14 +267,14 @@ impl N4n0 {
             Refusal::Unidentified => tr("Orbiters is still signing you in: nothing was done. Try again in a moment."),
             Refusal::Again => return,
         };
-        self.n4n0.lock().unwrap().line(N4n0Who::Note, text.to_string());
+        self.n4n0.locked().line(N4n0Who::Note, text.to_string());
         self.publish();
     }
 
     /// The stamp of an input N4N0 itself captures now (the avatar's menu, hands-free, the wake word): the identity signed
     /// in, and the question that waits if it was presented on `surface`, where the person is.
     pub(crate) fn own_stamp(&self, surface: Surface) -> Stamp {
-        let rt = self.n4n0.lock().unwrap();
+        let rt = self.n4n0.locked();
         let question = rt.question().filter(|_| rt.presented.contains(&surface));
         Stamp { epoch: rt.account_epoch, question, surface, seq: next_input() }
     }
@@ -307,7 +307,7 @@ impl N4n0 {
             return None;
         }
         if let Some((id, generation)) = ticket.turn {
-            if !self.n4n0.lock().unwrap().turn_is(id, generation) {
+            if !self.n4n0.locked().turn_is(id, generation) {
                 return None;
             }
         }

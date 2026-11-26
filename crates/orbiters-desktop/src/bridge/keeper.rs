@@ -3,6 +3,7 @@
 //! The answer lives in this process's memory only, and nothing in a settings file can stand in for it: a person editing a
 //! file can turn it off, and can never turn it on for an account the server does not say has it.
 
+use orbiters_core::locks::*;
 use super::clients::{Change, Client, Registrations, Wanted};
 use super::mcp::Server;
 use super::person::Listener;
@@ -177,12 +178,12 @@ impl Keeper {
     /// What an agent's entry should say now: the open listener's own port and token, else the saved keys; none while they
     /// cannot be read (an entry is never given a token nothing listens with).
     fn wanted(&self) -> Option<Wanted> {
-        let open = self.inner.lock().unwrap().open.as_ref().map(|o| (o.server.port(), o.token.clone()));
+        let open = self.inner.locked().open.as_ref().map(|o| (o.server.port(), o.token.clone()));
         let (port, token, listening) = match open {
             Some((port, token)) => (port, token, true),
             None => {
                 let keys = {
-                    let _one = self.keys_lock.lock().unwrap();
+                    let _one = self.keys_lock.locked();
                     Keys::load_or_create(&self.keys_file).ok()?
                 };
                 (keys.port, keys.token, false)
@@ -212,7 +213,7 @@ impl Keeper {
     pub fn tick(self: &Arc<Self>) {
         let now = Instant::now();
         let ask = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.locked();
             self.follow_identity(&mut inner);
             let ask = inner.identity.clone().filter(|_| inner.grant.due(now) && !self.asking.swap(true, Ordering::Relaxed));
             ask.map(|identity| (identity, inner.generation))
@@ -229,7 +230,7 @@ impl Keeper {
                 self.asking.store(false, Ordering::Relaxed);
             }
         }
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.locked();
         self.follow_identity(&mut inner);
         let allowed = inner.identity.is_some() && inner.grant.allowed(now);
         let wanted = allowed && self.flag.enabled();
@@ -262,7 +263,7 @@ impl Keeper {
 
     /// What the server answered for the identity of `generation`: taken for that one alone.
     fn answered(&self, generation: u64, answer: &anyhow::Result<bool>) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.locked();
         self.follow_identity(&mut inner);
         if inner.generation == generation {
             inner.grant.answered(answer, Instant::now());
@@ -271,7 +272,7 @@ impl Keeper {
 
     fn open(&self, inner: &mut Inner) {
         let loaded = {
-            let _one = self.keys_lock.lock().unwrap();
+            let _one = self.keys_lock.locked();
             Keys::load_or_create(&self.keys_file)
         };
         let mut keys = match loaded {
@@ -345,11 +346,11 @@ impl Keeper {
         match command {
             Command::Stop => {
                 self.flag.turn_off();
-                let mut inner = self.inner.lock().unwrap();
+                let mut inner = self.inner.locked();
                 self.close(&mut inner, tr("Stopped from Settings: control is back with the person."), true);
                 drop(inner);
                 // Whatever paused it is over with it: the next time it is on, it starts clean.
-                self.bridge.presence.lock().unwrap().resume();
+                self.bridge.presence.locked().resume();
             }
             Command::Pause => self.bridge.hold(true),
             Command::Resume => self.bridge.hold(false),
@@ -363,7 +364,7 @@ impl Keeper {
                     self.bridge.log(false, tr!("The bridge's keys could not be read ({error}), so it stays closed until they can be.", error = e));
                     return;
                 }
-                let mut inner = self.inner.lock().unwrap();
+                let mut inner = self.inner.locked();
                 if inner.open.is_some() {
                     self.close(&mut inner, tr("A new token: the agents it was added to are updated, others have to be given it again."), false);
                 }
@@ -372,18 +373,18 @@ impl Keeper {
             }
             Command::ResetToken => {
                 // Only while closed: an open listener's keys were read, and New token is the way there.
-                if self.inner.lock().unwrap().open.is_some() {
+                if self.inner.locked().open.is_some() {
                     return self.tick();
                 }
                 let reset = {
-                    let _one = self.keys_lock.lock().unwrap();
+                    let _one = self.keys_lock.locked();
                     Keys::reset(&self.keys_file)
                 };
                 match reset {
                     Ok((_, aside)) => {
                         let kept = aside.map(|a| a.display().to_string()).unwrap_or_default();
                         self.bridge.log(true, tr!("A new token: the bridge's unreadable keys were kept aside ({path}); the agents it was added to are updated.", path = kept));
-                        self.inner.lock().unwrap().keys_unreadable = false;
+                        self.inner.locked().keys_unreadable = false;
                         self.repair_due.store(true, Ordering::Relaxed);
                     }
                     Err(e) => self.bridge.log(false, tr!("The bridge's keys could not be reset: {error}", error = e)),
@@ -403,19 +404,19 @@ impl Keeper {
 
     /// Ends it all when the app quits.
     pub fn shutdown(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.locked();
         self.close(&mut inner, tr("The app is closing."), true);
     }
 
     /// The address clients use, when open.
     pub fn port(&self) -> Option<u16> {
-        self.inner.lock().unwrap().open.as_ref().map(|o| o.server.port())
+        self.inner.locked().open.as_ref().map(|o| o.server.port())
     }
 
     fn publish(&self) {
         let mut status = Status::default();
         {
-            let inner = self.inner.lock().unwrap();
+            let inner = self.inner.locked();
             status.allowed = inner.identity.is_some() && inner.grant.allowed(Instant::now());
             status.problem = inner.problem.clone();
             status.keys_unreadable = inner.keys_unreadable && inner.open.is_none();

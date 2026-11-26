@@ -13,6 +13,7 @@
 //! - Everything else (instances, worlds, labels, publishing, reconstructions) is the controller's, as on Windows
 //!   ([`RealGame`]); input, OSC and 3D pictures are refused before they get here by the bridge's capabilities.
 
+use orbiters_core::locks::*;
 use super::bridge_game::RealGame;
 use super::{Controller, Shared};
 use crate::bridge::game::{CaptureSeen, Failure, Find, Game, GameWindow, Identity, LaunchPlan, OscArg, PictureFiles, Seen, Shot, WorldPage};
@@ -400,7 +401,7 @@ impl MacGame {
 
     /// The bridge's own launch as the shared start says it now.
     fn launch(&self) -> Option<super::obelisk_cli::Launch> {
-        let id = self.mine.lock().unwrap().launch?;
+        let id = self.mine.locked().launch?;
         let machine = self.machine()?;
         machine.as_mac()?.play().launch(id)
     }
@@ -409,7 +410,7 @@ impl MacGame {
     /// and birth as the engine recorded them); a launch whose session is not named is not proven.
     fn own_launcher(&self) -> Option<u32> {
         let launch = self.launch().filter(|l| l.running && !l.over);
-        let mut mine = self.mine.lock().unwrap();
+        let mut mine = self.mine.locked();
         let Some((session, pid)) = launch.and_then(|l| Some((l.session?, l.launcher?))) else {
             mine.forget_game();
             return None;
@@ -449,7 +450,7 @@ impl MacGame {
     /// [`Self::others_game`] for the bridge's own look, ten times a second while nobody plays through it: every session
     /// record the engine ever wrote is read for it, so at most every [`OTHERS_EVERY`]. Whoever decides on a start asks anew.
     fn others_game_lately(&self) -> Option<u32> {
-        let mut lately = self.others.lock().unwrap();
+        let mut lately = self.others.locked();
         match *lately {
             Some((at, found)) if at.elapsed() < OTHERS_EVERY => found,
             _ => {
@@ -468,7 +469,7 @@ impl MacGame {
 
     /// Follows the bridge's own start: its log, its window, its frames, the engine's word on its graphics.
     fn look(&self, launcher: u32, library: &Path) {
-        let mut mine = self.mine.lock().unwrap();
+        let mut mine = self.mine.locked();
         // Its own VRChat log: found once, then held to be the same file, read in whole.
         if let Some(path) = mine.log.clone() {
             let now = std::fs::metadata(&path).ok().map(|m| (file_key(&m), m.len()));
@@ -557,7 +558,7 @@ impl MacGame {
         if self.own_launcher() != Some(pid) {
             return None;
         }
-        let mine = self.mine.lock().unwrap();
+        let mine = self.mine.locked();
         let (wsd, _) = mine.ident.as_ref()?.wsd?;
         let window = mine.window?;
         (window.owner == wsd).then_some(window)
@@ -567,7 +568,7 @@ impl MacGame {
     /// capture: a window id names whatever window has it).
     fn window_is_ours(&self, id: u32) -> bool {
         let Some(pid) = self.own_launcher() else { return false };
-        let Some((wsd, born)) = self.mine.lock().unwrap().ident.as_ref().and_then(|i| i.wsd) else { return false };
+        let Some((wsd, born)) = self.mine.locked().ident.as_ref().and_then(|i| i.wsd) else { return false };
         // The very window chosen as the game's (not any window of the window server: its splash, a crash box).
         process(wsd).is_some_and(|p| p.parent == pid && p.birth == born) && native::game_window(&native::windows(), wsd).is_some_and(|w| w.id == id)
     }
@@ -577,7 +578,7 @@ impl MacGame {
     fn title_of(&self, window: &MacWindow, swapchain: Option<(u32, u32)>) -> f64 {
         let (scale, display) = (native::scale_of(window), native::display_frame(window));
         let covers = native::title_points(window, display) == 0.0;
-        let said = self.mine.lock().unwrap().engine.as_ref().and_then(|e| e.windows.title((window.width, window.height), scale, covers));
+        let said = self.mine.locked().engine.as_ref().and_then(|e| e.windows.title((window.width, window.height), scale, covers));
         native::title_cut(said, swapchain.and_then(|(_, h)| native::title_from_guest(window.height, scale, h)))
     }
 
@@ -694,7 +695,7 @@ impl Game for MacGame {
         match own {
             Some(launcher) => {
                 self.look(launcher, &library);
-                let mine = self.mine.lock().unwrap();
+                let mine = self.mine.locked();
                 seen.running = true;
                 seen.pid = Some(launcher);
                 let drawn = drawing(mine.continuous, mine.grew, mine.presents_grew, Instant::now());
@@ -773,10 +774,10 @@ impl Game for MacGame {
         let link = crate::bridge::game::launch_link(&plan.world_id, &plan.instance);
         let engine_before = std::fs::metadata(obelisk::engine_log(&obelisk::home())).ok().map(|m| file_key(&m));
         let at = SystemTime::now();
-        let token = self.reserved.lock().unwrap().take();
+        let token = self.reserved.locked().take();
         match mac.start_launch_reserved(&plan.args(), token) {
             Ok(id) => {
-                *self.mine.lock().unwrap() = Mine { launch: Some(id), at: Some(at), link: Some(link), engine_before, ..Default::default() };
+                *self.mine.locked() = Mine { launch: Some(id), at: Some(at), link: Some(link), engine_before, ..Default::default() };
                 Ok(())
             }
             Err(super::obelisk_cli::Refused::Wait(wait)) => Err(start_wait_failure(wait)),
@@ -795,11 +796,11 @@ impl Game for MacGame {
         // Nor a private instance for a game it would not go to with its start.
         one_profile(&ctl, &machine)?;
         self.release_start();
-        let own = self.mine.lock().unwrap().launch.filter(|_| own_running);
+        let own = self.mine.locked().launch.filter(|_| own_running);
         // Reserved, not only looked at: from here no other start (Home's) is made until this one is or is given back.
         match mac.play().reserve(mac.library(), own) {
             Ok(token) => {
-                *self.reserved.lock().unwrap() = Some(token);
+                *self.reserved.locked() = Some(token);
                 Ok(())
             }
             Err(super::obelisk_cli::Refused::Busy) => Err(Failure::new("vrchat_starting", "A VRChat is starting already on this Mac (from Orbiters' Home, or another start), so no instance was made.", "Wait a minute, then call get_state.")), // i18n: not shown (an AI client reads it)
@@ -810,7 +811,7 @@ impl Game for MacGame {
     }
 
     fn release_start(&self) {
-        let Some(token) = self.reserved.lock().unwrap().take() else { return };
+        let Some(token) = self.reserved.locked().take() else { return };
         if let Some(mac) = self.machine() {
             if let Some(mac) = mac.as_mac() {
                 mac.play().unreserve(token);
@@ -833,7 +834,7 @@ impl Game for MacGame {
 
     fn launch_args(&self, pid: u32) -> Option<Vec<String>> {
         // Only this start's own log, read for its own launcher: never an intention, always what VRChat itself received.
-        (self.own_launcher() == Some(pid)).then(|| self.mine.lock().unwrap().args.clone()).flatten()
+        (self.own_launcher() == Some(pid)).then(|| self.mine.locked().args.clone()).flatten()
     }
 
     fn identity(&self, pid: u32) -> Identity {
@@ -848,7 +849,7 @@ impl Game for MacGame {
         // The bridge's own starts are at 100 % (said to the engine explicitly): the game's pixels are the content's (R2).
         // What the game renders is read from this start's own log (its last swapchain) when it is there; the window's
         // title bar from that size and the frame, else from whether the frame covers its display.
-        let swapchain = self.mine.lock().unwrap().engine.as_ref().and_then(|e| e.swapchain);
+        let swapchain = self.mine.locked().engine.as_ref().and_then(|e| e.swapchain);
         let scale = native::scale_of(&window);
         let title = self.title_of(&window, swapchain);
         let (width, height) = swapchain.unwrap_or_else(|| native::guest_pixels(&window, scale, title, 100));
@@ -889,17 +890,17 @@ impl Game for MacGame {
         let id = u32::try_from(window.handle).ok().filter(|id| self.window_is_ours(*id)).ok_or_else(|| {
             Failure::new("not_started_by_bridge", "That window is no longer this bridge's VRChat's, so it was not looked at.", "Call get_state.") // i18n: not shown (an AI client reads it)
         })?;
-        let frame = self.mine.lock().unwrap().window;
-        let owner = self.mine.lock().unwrap().ident.as_ref().and_then(|i| i.wsd);
+        let frame = self.mine.locked().window;
+        let owner = self.mine.locked().ident.as_ref().and_then(|i| i.wsd);
         let png = native::capture_png(id).map_err(|e| Failure::new("screenshot_failed", format!("macOS did not give the window's picture: {e}"), "Call get_state; try again in a moment."))?; // i18n: not shown
         // The window may have changed hands while it was captured: the picture is kept only if it is still this game's.
-        let still = self.window_is_ours(id) && self.mine.lock().unwrap().ident.as_ref().and_then(|i| i.wsd) == owner;
+        let still = self.window_is_ours(id) && self.mine.locked().ident.as_ref().and_then(|i| i.wsd) == owner;
         if !still {
             return Err(Failure::new("not_started_by_bridge", "That window stopped being this bridge's VRChat's while it was looked at, so the picture was not kept.", "Call get_state.")); // i18n: not shown (an AI client reads it)
         }
         let image = image::load_from_memory(&png).map_err(|e| Failure::new("screenshot_failed", e.to_string(), "Try again in a moment."))?.to_rgba8(); // i18n: not shown
         // The title bar is the system's, not the game's: the picture is the content, as clicks and VRChat count it.
-        let swapchain = self.mine.lock().unwrap().engine.as_ref().and_then(|e| e.swapchain);
+        let swapchain = self.mine.locked().engine.as_ref().and_then(|e| e.swapchain);
         let top = frame.map_or(0, |f| native::title_rows(image.height(), f.height, self.title_of(&f, swapchain))).min(image.height().saturating_sub(1));
         let (width, height) = (image.width(), image.height() - top);
         let mut pixels = Vec::with_capacity((width * height * 4) as usize);

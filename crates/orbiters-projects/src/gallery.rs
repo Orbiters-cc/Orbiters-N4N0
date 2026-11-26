@@ -1,6 +1,7 @@
 //! The projects of the Unity projects page: Orbiters' own list (`unity-gallery.json` in its data folder), with those Creator
 //! Companion and ALCOM list, which are only read. Adding, duplicating, creating and removing change Orbiters' list alone: nothing
 //! of theirs is written, and what is there stays there.
+use orbiters_core::locks::*;
 use crate::discovery::{key, same};
 use crate::theirs::{self, Part};
 use crate::own;
@@ -88,7 +89,7 @@ static UNSAVED: Mutex<Vec<(PathBuf, PathBuf, bool)>> = Mutex::new(Vec::new());
 
 fn set(root: &Path, path: &Path, add: bool) -> anyhow::Result<()> {
     let file = list_file(root);
-    let mut waiting = UNSAVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut waiting = UNSAVED.locked();
     let first = kept(root, &file);
     let saved = own::change(&file, || first, |list: &mut List| {
         for (_, p, add) in waiting.iter().filter(|(f, ..)| *f == file) {
@@ -127,7 +128,7 @@ pub fn remove(root: &Path, path: &Path) -> anyhow::Result<()> {
 pub fn listed(root: &Path) -> Listed {
     let file = list_file(root);
     let mut list = kept(root, &file);
-    for (_, p, add) in UNSAVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().filter(|(f, ..)| *f == file) {
+    for (_, p, add) in UNSAVED.locked().iter().filter(|(f, ..)| *f == file) {
         list.set(p, *add);
     }
     let theirs = theirs::projects(root);

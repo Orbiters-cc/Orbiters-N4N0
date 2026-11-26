@@ -2,6 +2,7 @@
 //! for instances (with its rate limits and backoff, `orbiters_core::vrchat_api`), the OSC service, the 3D picture of
 //! `burst.rs`, and Windows.
 
+use orbiters_core::locks::*;
 use super::{Controller, Shared};
 use crate::bridge::game::{CaptureSeen, Failure, Find, Game, GameWindow, LaunchPlan, OscArg, PictureFiles, ReconstructionSeen, Seen, Shot, WorldCard, WorldPage};
 use crate::bridge::input::Input;
@@ -41,7 +42,7 @@ impl RealGame {
     /// Whether the game runs without VR, from the arguments VRChat's log starts with (`Arg: --no-vr`, `VR Disabled`).
     fn desktop_mode(&self, log: Option<&PathBuf>) -> Option<bool> {
         let log = log?;
-        let mut known = self.desktop_mode.lock().unwrap();
+        let mut known = self.desktop_mode.locked();
         if known.0.as_ref() == Some(log) && known.1.is_some() {
             return known.1;
         }
@@ -241,7 +242,7 @@ impl Game for RealGame {
         // Claimed like Home's starts, under the same lock: never a second VRChat on a profile one is starting on.
         let profile = plan.profile.unwrap_or(0);
         let mode = if plan.vr { orbiters_core::launcher::LaunchMode::Vr } else { orbiters_core::launcher::LaunchMode::Desktop };
-        let _started = ctl.launcher_started.lock().unwrap();
+        let _started = ctl.launcher_started.locked();
         let claim = ctl.launcher_claim_unattended(profile, mode).map_err(|_| {
             Failure::new("vrchat_starting", "A VRChat is starting on this profile already (from Orbiters' Home).", "Wait a minute, then call get_state.") // i18n: not shown (an AI client reads it in the tool's answer)
         })?;
@@ -308,7 +309,7 @@ impl Game for RealGame {
     fn take_picture(&self, length: Photo3dLength, mode: PictureMode) -> Result<(), Failure> {
         let started = self.ctl()?.take_3d_picture_of(length, mode);
         if let Ok(number) = &started {
-            *self.picture.lock().unwrap() = Some(*number);
+            *self.picture.locked() = Some(*number);
         }
         started.map(|_| ()).map_err(|e| {
             let said = e.to_string();
@@ -322,7 +323,7 @@ impl Game for RealGame {
 
     fn stop_picture(&self) {
         // Its own picture's recording only: nothing when it started none, or that one ended and another began.
-        let Some(number) = *self.picture.lock().unwrap() else { return };
+        let Some(number) = *self.picture.locked() else { return };
         if let Ok(ctl) = self.ctl() {
             if let Err(e) = ctl.stop_capture(super::StopOf::Recording(number)) {
                 eprintln!("the bridge stopped a recording: {e:#}");
@@ -336,7 +337,7 @@ impl Game for RealGame {
             frames: stats.as_ref().map_or(0, |s| s.frames),
             keyframes: stats.as_ref().map_or(0, |s| s.keyframes),
             reconstructed: orbiters_core::reconstruction::read_report(session).is_some(),
-            failed: self.ctl().ok().and_then(|ctl| ctl.reconstruction_failures.lock().unwrap().get(session).cloned()),
+            failed: self.ctl().ok().and_then(|ctl| ctl.reconstruction_failures.locked().get(session).cloned()),
         }
     }
 
@@ -506,12 +507,12 @@ impl Controller {
             }),
         );
         keeper.start();
-        *self.bridge.lock().unwrap() = Some(keeper);
+        *self.bridge.locked() = Some(keeper);
     }
 
     /// What Settings asks of the bridge.
     pub fn bridge_command(&self, command: Command) {
-        let keeper = self.bridge.lock().unwrap().clone();
+        let keeper = self.bridge.locked().clone();
         if let Some(keeper) = keeper {
             keeper.command(command);
         }
@@ -519,7 +520,7 @@ impl Controller {
 
     /// The app quits: input released and the port closed while OSC still works.
     pub fn stop_bridge(&self) {
-        let keeper = self.bridge.lock().unwrap().take();
+        let keeper = self.bridge.locked().take();
         if let Some(keeper) = keeper {
             keeper.shutdown();
         }
@@ -530,11 +531,11 @@ impl Controller {
     /// it back (it says where its camera is when it moves; what it does for a pose sent to it is not measured).
     pub(super) fn camera_placed(&self, pose: [f32; 6]) {
         let values = pose.iter().map(|v| orbiters_core::osc::OscValue::Float(*v)).collect();
-        self.osc_values.lock().unwrap().latest.record(super::burst::POSE.to_string(), values, orbiters_core::clock::now_ns());
+        self.osc_values.locked().latest.record(super::burst::POSE.to_string(), values, orbiters_core::clock::now_ns());
     }
 
     pub(super) fn camera_pose_known(&self) -> bool {
-        let osc = self.osc_values.lock().unwrap();
+        let osc = self.osc_values.locked();
         osc.latest.get(super::burst::POSE).is_some_and(|(values, _)| {
             let floats = super::burst::floats(values);
             floats.len() == 6 && floats.iter().any(|f| *f != 0.0)

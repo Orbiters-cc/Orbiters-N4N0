@@ -6,6 +6,7 @@
 //! Only what is verified is kept: a list whose `verified_for` is a member's account, while VRChat says that account is
 //! signed in. Signing out removes it all ([`Controller::kept_forget`]); a write begun before that writes nothing after.
 
+use orbiters_core::locks::*;
 use super::vrchat_data::Scope;
 use super::vrchat_login::Bell;
 use super::vrchat_scope::{By, Stamp};
@@ -115,7 +116,7 @@ fn source(request: &groups::Request) -> &'static str {
 
 impl Controller {
     fn kept(&self) -> std::sync::MutexGuard<'_, Runtime> {
-        self.vrchat_kept.rt.lock().unwrap_or_else(|e| e.into_inner())
+        self.vrchat_kept.rt.locked()
     }
 
     /// The writing, on a thread of its own.

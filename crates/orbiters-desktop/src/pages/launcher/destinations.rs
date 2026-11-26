@@ -27,6 +27,7 @@
 //! [`Request::CreateInstance`]: crate::controller::vrchat_data::Request::CreateInstance
 //! [`finder::new_instance`]: crate::overlay::worlds::finder::new_instance
 
+use orbiters_core::locks::*;
 use super::selection::{Asker, Desk, Destination, Offer, Origin, Selection, Verified};
 use super::states::PlayState;
 use super::{access_icon, access_name, cover_uv, region_tag, Cx, State};
@@ -527,7 +528,7 @@ fn refresh<T: Send + 'static>(slot: &Shared<T>, every: Duration, ctx: &egui::Con
     // Reads only, into memory (a file of this computer, Orbiters' events, whether VRChat says an instance is open):
     // nothing of the window's work to finish before it may rest (window_rest's classified threads).
     {
-        let mut s = slot.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = slot.locked();
         if s.busy || s.at.is_some_and(|at| at.elapsed() < every) {
             return;
         }
@@ -536,7 +537,7 @@ fn refresh<T: Send + 'static>(slot: &Shared<T>, every: Duration, ctx: &egui::Con
     let (shared, ctx) = (slot.clone(), ctx.clone());
     let started = std::thread::Builder::new().name(format!("where-{name}")).spawn(move || {
         let value = work();
-        let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = shared.locked();
         if value.is_some() {
             s.value = value;
         }
@@ -546,13 +547,13 @@ fn refresh<T: Send + 'static>(slot: &Shared<T>, every: Duration, ctx: &egui::Con
         ctx.request_repaint();
     });
     if started.is_err() {
-        slot.lock().unwrap_or_else(|e| e.into_inner()).busy = false;
+        slot.locked().busy = false;
     }
 }
 
 /// What was read for `member`: nothing that was for another (verify5-r21 m4), which is read again at once.
 fn theirs<T: Clone>(slot: &Shared<(String, T)>, member: &str) -> Option<T> {
-    let mut s = slot.lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = slot.locked();
     if s.value.as_ref().is_some_and(|(whose, _)| whose != member) {
         s.value = None;
         s.at = None;
@@ -652,10 +653,10 @@ impl Places {
     pub fn stand_in(&mut self, history: Option<HistoryView>, events: Vec<EventSoon>, last_open: Option<bool>, signed_in: bool) {
         let loading = history.is_none();
         let at = Some(Instant::now());
-        *self.history.lock().unwrap() = Read { value: history, at, busy: false };
-        *self.events.lock().unwrap() = Read { value: Some((String::new(), events)), at, busy: false };
-        let location = self.history.lock().unwrap().value.as_ref().and_then(|h| h.last.as_ref()).map(|l| format!("{}:{}", l.world_id, l.instance)).unwrap_or_default();
-        *self.open.lock().unwrap() = Read { value: Some((location, Asker::default(), last_open, Instant::now())), at, busy: false };
+        *self.history.locked() = Read { value: history, at, busy: false };
+        *self.events.locked() = Read { value: Some((String::new(), events)), at, busy: false };
+        let location = self.history.locked().value.as_ref().and_then(|h| h.last.as_ref()).map(|l| format!("{}:{}", l.world_id, l.instance)).unwrap_or_default();
+        *self.open.locked() = Read { value: Some((location, Asker::default(), last_open, Instant::now())), at, busy: false };
         self.staged = Some(Staged { signed_in, loading });
     }
 
@@ -832,7 +833,7 @@ fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>, feed: bool) -> (
     if reads {
         let file = orbiters_core::paths::cache_dir().join("where.json");
         {
-            let mut s = state.places.history.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = state.places.history.locked();
             if s.value.is_none() && s.at.is_none() && !s.busy {
                 s.value = HistoryView::before(&file);
             }
@@ -850,7 +851,7 @@ fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>, feed: bool) -> (
             refresh(&state.places.events, EVENTS_EVERY, &ctx, "events", move || Some((member.key(), read_events(member, events_now()))));
         }
     }
-    let history = state.places.history.lock().unwrap_or_else(|e| e.into_inner()).value.clone();
+    let history = state.places.history.locked().value.clone();
     let loading = match &state.places.staged {
         Some(s) => s.loading,
         None => history.is_none(),
@@ -864,11 +865,11 @@ fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>, feed: bool) -> (
     let mut last_open = None;
     if let (Some(last), Some(me)) = (&last, me) {
         if rejoinable(&last.instance, me) {
-            let known = state.places.open.lock().unwrap_or_else(|e| e.into_inner()).value.clone();
+            let known = state.places.open.locked().value.clone();
             if reads {
                 if known.as_ref().is_some_and(|k| k.0 != location || k.1 != *state.places.desk.asker()) {
                     // Another instance, account or profile since: asked about now.
-                    let mut s = state.places.open.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut s = state.places.open.locked();
                     s.at = None;
                     s.value = None;
                 }
@@ -883,7 +884,7 @@ fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>, feed: bool) -> (
             }
             // What was said to this account (handed in, for pictures of the page: to nobody in particular). On which profile,
             // and how long ago, counts when it is chosen.
-            last_open = state.places.open.lock().unwrap_or_else(|e| e.into_inner()).value.clone().filter(|k| k.0 == location && (k.1.account.as_deref() == Some(me) || !reads)).and_then(|k| k.2);
+            last_open = state.places.open.locked().value.clone().filter(|k| k.0 == location && (k.1.account.as_deref() == Some(me) || !reads)).and_then(|k| k.2);
         }
     }
     let dismissed = |id: &str| state.dismissed.contains(id);
@@ -1539,7 +1540,7 @@ fn choose_last(state: &mut State, card: &Suggestion, place: &Place) {
     let asker = state.places.desk.asker().clone();
     let staged = state.places.staged.is_some();
     let said = {
-        let read = state.places.open.lock().unwrap_or_else(|e| e.into_inner());
+        let read = state.places.open.locked();
         // For the very account and profile chosen now, from when VRChat said it.
         read.value.as_ref().filter(|k| k.0 == visit.location() && k.2 == Some(true) && (staged || k.1 == asker)).map(|k| k.3)
     };

@@ -1,6 +1,7 @@
 //! What Home's Play on a Mac asks of the Mac itself: the main display's drawing resolution and its panel's real pixels
 //! (for the render scale VRChat is started with), and whether Low Power Mode is on while the Mac is on power (said to
 //! the player, never changed: it is their battery policy).
+use orbiters_core::locks::*;
 use std::ffi::{c_char, c_void};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -86,7 +87,7 @@ fn on_power() -> bool {
 /// seconds (Home draws it every frame).
 pub fn low_power_on_power() -> bool {
     static SEEN: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
-    let mut seen = SEEN.lock().unwrap();
+    let mut seen = SEEN.locked();
     if let Some((at, value)) = *seen {
         if at.elapsed() < Duration::from_secs(5) {
             return value;

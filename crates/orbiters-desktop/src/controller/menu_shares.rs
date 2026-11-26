@@ -4,6 +4,7 @@
 //! Photos & captures job ([`super::shares`]: the same upload records, preparation and server calls); one asked before
 //! the capture's 3D view is made waits here, and its reconstruction is queued when nothing makes it.
 
+use orbiters_core::locks::*;
 use super::shares::{self, Entry, Local, Operation, Outcome, Request};
 use super::Shared;
 use crate::state::{CaptureState, Snapshot};
@@ -202,7 +203,7 @@ impl super::Controller {
     /// where they stand changed.
     pub(super) fn menu_captures_tick(self: &Shared) {
         let snap = self.view();
-        let mut m = self.menu_shares.lock().unwrap();
+        let mut m = self.menu_shares.locked();
         let m = &mut *m;
         let latest = snap.capture.session_dir.clone();
         let known = m.latest.as_ref().map(|(dir, row)| (dir.clone(), row.world.is_empty()));
@@ -260,7 +261,7 @@ impl super::Controller {
     pub(super) fn menu_captures_list(self: &Shared) {
         let settings = self.settings();
         let entries = shares::local_entries(&settings.sessions_dir, server(settings.development));
-        self.menu_shares.lock().unwrap().list(entries);
+        self.menu_shares.locked().list(entries);
         self.menu_captures_tick();
     }
 
@@ -283,7 +284,7 @@ impl super::Controller {
             return Err(tr_latin("It is still being recorded: share it once it is saved").into());
         }
         {
-            let m = self.menu_shares.lock().unwrap();
+            let m = self.menu_shares.locked();
             let on_its_way = match m.asked.get(&name) {
                 Some(Asked::Waiting { .. }) => true,
                 Some(Asked::Job { id, .. }) => snap.capture_shares.iter().any(|j| &j.id == id && j.outcome.is_none()),
@@ -297,7 +298,7 @@ impl super::Controller {
         let entries = shares::local_entries(&settings.sessions_dir, server(settings.development));
         let entry = entries.iter().find(|e| matches!(e.local, Some(Local::Session(_))) && folder_of(&e.key) == name).cloned();
         let Some(mut entry) = entry else { return Err(tr_latin("This capture is no longer on the computer").into()) };
-        let made = self.menu_shares.lock().unwrap().made.contains(&name);
+        let made = self.menu_shares.locked().made.contains(&name);
         entry.ready |= made;
         let asked = if entry.ready {
             self.menu_share_job(entry, ask, settings.development, epoch)
@@ -310,7 +311,7 @@ impl super::Controller {
             Asked::Waiting { entry: Box::new(entry), ask, since: Instant::now(), epoch }
         };
         {
-            let mut m = self.menu_shares.lock().unwrap();
+            let mut m = self.menu_shares.locked();
             m.asked.insert(name, asked);
             // The listing it just read is History's too.
             m.list(entries);
@@ -322,7 +323,7 @@ impl super::Controller {
     /// Where the share a menu (or the camera's buttons, [`super::explorer`]) asked for capture `key` stands: its 3D view
     /// awaited, its Photos & captures job, or why it could not go. None when nothing was asked.
     pub(super) fn menu_share_state(&self, key: &str) -> Option<AskState> {
-        let m = self.menu_shares.lock().unwrap();
+        let m = self.menu_shares.locked();
         Some(match m.asked.get(&folder_of(key))? {
             Asked::Waiting { .. } => AskState::Waiting,
             Asked::Job { id, .. } => AskState::Job(id.clone()),

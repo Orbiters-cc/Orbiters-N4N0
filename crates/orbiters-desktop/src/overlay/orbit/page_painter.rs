@@ -1,4 +1,5 @@
 //! Bounded CPU rendering for pages and shell parts. No platform handles or effects run here.
+use orbiters_core::locks::*;
 use super::{panels, Canvas, Facts, Item, Sheet, Zone};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, Condvar};
@@ -20,7 +21,7 @@ impl Drop for PixelBuffer {
     fn drop(&mut self) {
         if self.owner == std::thread::current().id() || self.bytes.is_empty() { return; }
         if let Some(shared) = self.shared.upgrade() {
-            let mut state = shared.0.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = shared.0.locked();
             if !state.stop {
                 state.garbage.push(std::mem::take(&mut self.bytes));
                 // At most 64 cached + 64 retiring frames, finite shell zones and
@@ -260,8 +261,8 @@ impl Painter {
             let mut garbage = Vec::with_capacity(1024);
             loop {
                 let (page, part, audit) = {
-                    let mut state = thread.0.lock().unwrap_or_else(|e| e.into_inner());
-                    while state.request.is_none() && state.parts.is_empty() && state.audit.is_none() && state.garbage.is_empty() && !state.stop { state = thread.1.wait(state).unwrap_or_else(|e| e.into_inner()); }
+                    let mut state = thread.0.locked();
+                    while state.request.is_none() && state.parts.is_empty() && state.audit.is_none() && state.garbage.is_empty() && !state.stop { state = thread.1.wait_locked(state); }
                     if state.stop { return; }
                     state.working = true;
                     std::mem::swap(&mut garbage, &mut state.garbage);
@@ -279,7 +280,7 @@ impl Painter {
                     if let Some((ready, go)) = gate { ready.send(()).unwrap(); go.recv().unwrap(); }
                 }
                 if let Some(request) = page {
-                    let current = thread.0.lock().unwrap_or_else(|e| e.into_inner()).epoch == Some(request.epoch);
+                    let current = thread.0.locked().epoch == Some(request.epoch);
                     if current {
                         let epoch = request.epoch;
                         let style = request.facts.orbit;
@@ -297,7 +298,7 @@ impl Painter {
                         });
                         let Some(mut frame) = painted else {
                             engine = fresh(&thread);
-                            let mut state = thread.0.lock().unwrap_or_else(|e| e.into_inner());
+                            let mut state = thread.0.locked();
                             state.failed_page = true;
                             state.fatal |= fatal;
                             state.working = false;
@@ -309,7 +310,7 @@ impl Painter {
                             if let Some((ready, go)) = gate { ready.send(()).unwrap(); go.recv().unwrap(); }
                         }
                         let retired = {
-                            let mut state = thread.0.lock().unwrap_or_else(|e| e.into_inner());
+                            let mut state = thread.0.locked();
                             if state.epoch == Some(epoch) && !state.stop { state.frame.replace(frame) } else { Some(frame) }
                         };
                         drop(retired);
@@ -320,12 +321,12 @@ impl Painter {
                     let zone = request.spec.zone;
                     match contained("a part", &mut panics, &mut fatal, || orbiters_i18n::in_language(request.language, || panels::with_render_style(request.facts.orbit, || engine.part(&request.spec, &request.facts, request.time)))) {
                         Some(picture) => {
-                            let retired = thread.0.lock().unwrap_or_else(|e| e.into_inner()).part_frames.insert(picture.zone, picture);
+                            let retired = thread.0.locked().part_frames.insert(picture.zone, picture);
                             drop(retired);
                         }
                         None => {
                             engine = fresh(&thread);
-                            let mut state = thread.0.lock().unwrap_or_else(|e| e.into_inner());
+                            let mut state = thread.0.locked();
                             state.failed_parts.push(zone);
                             state.fatal |= fatal;
                         }
@@ -347,18 +348,18 @@ impl Painter {
                         }
                         None => {
                             engine = fresh(&thread);
-                            thread.0.lock().unwrap_or_else(|e| e.into_inner()).fatal |= fatal;
+                            thread.0.locked().fatal |= fatal;
                         }
                     }
                 }
-                thread.0.lock().unwrap_or_else(|e| e.into_inner()).working = false;
+                thread.0.locked().working = false;
             }
         }).expect("CPU page painter thread");
         Self { shared, ctx }
     }
     pub fn submit(&self, request: Request) {
         let retired = {
-            let mut s = self.shared.0.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = self.shared.0.locked();
             if s.epoch.is_none() { s.epoch = Some(request.epoch); }
             if s.epoch != Some(request.epoch) { return; }
             s.request.replace(request)
@@ -367,7 +368,7 @@ impl Painter {
     }
     pub fn submit_part(&self, request: PartRequest) {
         let retired = {
-            let mut s = self.shared.0.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = self.shared.0.locked();
             if !s.parts.contains_key(&request.spec.zone) { s.order.push_back(request.spec.zone); }
             s.parts.insert(request.spec.zone, request)
         };
@@ -375,14 +376,14 @@ impl Painter {
     }
     pub fn cancel_page(&self, epoch: u64) {
         let retired = {
-            let mut s = self.shared.0.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = self.shared.0.locked();
             s.epoch = Some(epoch); (s.request.take(), s.frame.take())
         };
         drop(retired);
     }
     pub fn retain_parts(&self, live: &[(Zone, u64)]) {
         let retired = {
-            let mut s = self.shared.0.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = self.shared.0.locked();
             let gone: Vec<_> = s.parts.keys().filter(|z| !live.iter().any(|(zone, _)| zone == *z)).copied().collect();
             let requests: Vec<_> = gone.into_iter().filter_map(|z| s.parts.remove(&z)).collect();
             let stale: Vec<_> = s.part_frames.iter().filter(|(zone, frame)| !live.contains(&(**zone, frame.token))).map(|(z, _)| *z).collect();
@@ -395,22 +396,22 @@ impl Painter {
     /// Outside measured turns only: replay frozen inputs with the same font and texture history.
     pub fn audit(&self, frame: Frame) -> std::sync::mpsc::Receiver<Audit> {
         let (reply, rx) = std::sync::mpsc::channel();
-        let retired = self.shared.0.lock().unwrap_or_else(|e| e.into_inner()).audit.replace((frame, reply));
+        let retired = self.shared.0.locked().audit.replace((frame, reply));
         self.shared.1.notify_one(); drop(retired); rx
     }
     /// The parts whose painting failed since the last call, and whether a page's did: to be asked for again.
     pub fn take_failed(&self) -> (Vec<Zone>, bool) {
-        let mut s = self.shared.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = self.shared.0.locked();
         (std::mem::take(&mut s.failed_parts), std::mem::take(&mut s.failed_page))
     }
     /// Painting panicked too often: the overlay is to end, through its teardown.
-    pub fn fatal(&self) -> bool { self.shared.0.lock().unwrap_or_else(|e| e.into_inner()).fatal }
-    pub fn take(&self) -> Option<Frame> { self.shared.0.lock().unwrap_or_else(|e| e.into_inner()).frame.take() }
-    pub fn take_parts(&self) -> Vec<PartPicture> { self.shared.0.lock().unwrap_or_else(|e| e.into_inner()).part_frames.drain().map(|(_, f)| f).collect() }
-    pub fn busy(&self) -> bool { let s = self.shared.0.lock().unwrap_or_else(|e| e.into_inner()); s.working || s.audit.is_some() || s.request.is_some() || s.frame.is_some() || !s.parts.is_empty() || !s.part_frames.is_empty() || !s.garbage.is_empty() }
+    pub fn fatal(&self) -> bool { self.shared.0.locked().fatal }
+    pub fn take(&self) -> Option<Frame> { self.shared.0.locked().frame.take() }
+    pub fn take_parts(&self) -> Vec<PartPicture> { self.shared.0.locked().part_frames.drain().map(|(_, f)| f).collect() }
+    pub fn busy(&self) -> bool { let s = self.shared.0.locked(); s.working || s.audit.is_some() || s.request.is_some() || s.frame.is_some() || !s.parts.is_empty() || !s.part_frames.is_empty() || !s.garbage.is_empty() }
 }
 impl Drop for Painter {
-    fn drop(&mut self) { self.shared.0.lock().unwrap_or_else(|e| e.into_inner()).stop = true; self.shared.1.notify_one(); }
+    fn drop(&mut self) { self.shared.0.locked().stop = true; self.shared.1.notify_one(); }
 }
 
 #[cfg(test)]

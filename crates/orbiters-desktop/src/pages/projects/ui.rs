@@ -3,6 +3,7 @@
 //! windows (the cards make room for it with a spring), sliding over them on narrow ones. Dialogs grow out of what
 //! opened them ([`super::dialogs`]).
 
+use orbiters_core::locks::*;
 use orbiters_i18n::{mark, tr, tr_n};
 use super::art;
 use super::menus;
@@ -646,7 +647,7 @@ fn found_row(ui: &mut Ui, state: &State, p: &Project, rect: Rect) -> (Option<boo
 fn activity(ui: &mut Ui, state: &mut State, area: Rect) {
     let shown_in_dialog = matches!(state.modal, Some(Modal::New | Modal::Setup | Modal::Repos | Modal::Duplicate(_) | Modal::Conflict));
     let label = state.acting().map(str::to_string).filter(|_| !shown_in_dialog);
-    let p = state.copy_progress.lock().unwrap().clone();
+    let p = state.copy_progress.locked().clone();
     let copying = p.total > 0 && label.is_some();
     let detail = copying.then(|| tr!("{copied} of {total} files · {file}", copied = format::integer(p.copied as f64), total = format::integer(p.total as f64), file = p.file));
     let a = label.as_deref().map(|l| feedback::Activity {

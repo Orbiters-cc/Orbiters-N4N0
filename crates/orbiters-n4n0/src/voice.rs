@@ -6,6 +6,7 @@
 //!
 //! [`Ears`]: crate::Ears
 
+use orbiters_core::locks::*;
 use crate::command::{Stamp, Surface};
 use crate::platform::VoiceWorker;
 use crate::runtime::{N4n0, Shared, Source};
@@ -47,18 +48,18 @@ pub(crate) struct Bell {
 
 impl Bell {
     pub(crate) fn ring(&self) {
-        *self.rung.lock().unwrap() = true;
+        *self.rung.locked() = true;
         self.bell.notify_all();
     }
 
     /// Until it rings, or `due`.
     pub(crate) fn wait(&self, due: Option<Instant>) {
-        let mut rung = self.rung.lock().unwrap();
+        let mut rung = self.rung.locked();
         while !std::mem::take(&mut *rung) {
             rung = match due.map(|due| due.saturating_duration_since(Instant::now())) {
                 Some(Duration::ZERO) => return,
-                Some(left) => self.bell.wait_timeout(rung, left).unwrap().0,
-                None => self.bell.wait(rung).unwrap(),
+                Some(left) => self.bell.wait_timeout_locked(rung, left).0,
+                None => self.bell.wait_locked(rung),
             };
         }
     }
@@ -189,7 +190,7 @@ impl N4n0 {
             crate::status::SignedAs::Unknown => return SigningIn,
             crate::status::SignedAs::Member => {}
         }
-        let rt = self.n4n0.lock().unwrap();
+        let rt = self.n4n0.locked();
         if rt.voice.downloading.is_some() { ModelsDownloading }
         else if !rt.voice.installed { ModelsMissing }
         else if rt.voice.error.is_some() { MicrophoneProblem }
@@ -200,13 +201,13 @@ impl N4n0 {
         let _lifecycle = self.voice_lifecycle.lock();
         // Closing the page ends what the page is listening to, never a sentence another holds now (the window's Talk, the
         // avatar menu's): the microphone is whoever holds Talk now, not who opened the page first (verify2).
-        let someone_else = !open && self.n4n0.lock().unwrap().listening.is_some_and(|(s, _)| matches!(s, Source::Window | Source::Menu | Source::Touch | Source::WakeWord));
+        let someone_else = !open && self.n4n0.locked().listening.is_some_and(|(s, _)| matches!(s, Source::Window | Source::Menu | Source::Touch | Source::WakeWord));
         if !someone_else {
             self.voice_cancel();
         }
         {
             let wake = self.with_settings(|s| s.n4n0.wake_word);
-            let mut voice = self.voice.lock().unwrap();
+            let mut voice = self.voice.locked();
             // The page has the microphone; closed, it is still released: the wake word waits for an explicit listen or a
             // change of its setting (the documented behaviour; reopening it needs the owner's word, verify-n4n0 9).
             voice.ask_owned = true;
@@ -216,7 +217,7 @@ impl N4n0 {
             }
         }
         {
-            let mut rt = self.n4n0.lock().unwrap();
+            let mut rt = self.n4n0.locked();
             if !someone_else {
                 rt.listening = None;
             }
@@ -229,7 +230,7 @@ impl N4n0 {
         }
         // Even wake-word capture must release the microphone when this page leaves. What the worker was told is kept,
         // so that the wake word's next look gives it back.
-        if let Some(h) = self.voice.lock().unwrap().handle.as_mut() {
+        if let Some(h) = self.voice.locked().handle.as_mut() {
             h.wake_word = false;
             let _ = h.inner.send(&VoiceCommand::WakeWord { on: false, words: vec![] });
         }
@@ -239,13 +240,13 @@ impl N4n0 {
 
     pub(crate) fn ask_retry(self: &Shared) {
         let _lifecycle = self.voice_lifecycle.lock();
-        { let mut rt = self.n4n0.lock().unwrap();
+        { let mut rt = self.n4n0.locked();
           if !rt.voice.ask_open { return; }
           rt.voice.error = None;
           rt.voice.automatic = true;
           rt.voice.finalizing = false;
         }
-        self.voice.lock().unwrap().ended_at = None;
+        self.voice.locked().ended_at = None;
         self.ask_follow();
         self.publish();
     }
@@ -254,15 +255,15 @@ impl N4n0 {
         let _lifecycle = self.voice_lifecycle.lock();
         // A press that is not let in changes nothing of what the page listens to (verify3-r21 M6), nor does a release of
         // another press than the one held (verify4-r21 P9).
-        if !self.n4n0.lock().unwrap().voice.ask_open { return; }
-        if !down && !self.n4n0.lock().unwrap().held(Source::Overlay, press) { return; }
+        if !self.n4n0.locked().voice.ask_open { return; }
+        if !down && !self.n4n0.locked().held(Source::Overlay, press) { return; }
         let mut admitted = None;
         if down {
             admitted = self.let_in(stamp);
             if admitted.is_none() { return; }
         }
         let takeover = {
-            let mut rt = self.n4n0.lock().unwrap();
+            let mut rt = self.n4n0.locked();
             if !rt.voice.ask_open { return; }
             let takeover = rt.voice.automatic;
             rt.voice.automatic = false;
@@ -278,7 +279,7 @@ impl N4n0 {
         let _lifecycle = self.voice_lifecycle.lock();
         let ready = self.voice_readiness() == crate::status::VoiceReadiness::Ready;
         let (cancel, arm) = {
-            let mut rt = self.n4n0.lock().unwrap();
+            let mut rt = self.n4n0.locked();
             let cancel = (!ready && (rt.listening.is_some() || rt.voice.finalizing))
                 || (rt.voice.ask_open && rt.listening.is_some_and(|(source, _)| rt.busy_for(source)));
             if cancel { rt.listening = None; }
@@ -288,10 +289,10 @@ impl N4n0 {
         };
         if cancel {
             self.voice_cancel();
-            if let Some(h) = self.voice.lock().unwrap().handle.as_mut() {
+            if let Some(h) = self.voice.locked().handle.as_mut() {
                 let _ = h.inner.send(&VoiceCommand::WakeWord { on: false, words: vec![] });
             }
-            let mut rt = self.n4n0.lock().unwrap();
+            let mut rt = self.n4n0.locked();
             rt.voice.provisional = None; rt.voice.level = 0.0; rt.voice.speech = false;
             rt.voice.finalizing = false;
             if !ready { rt.voice.automatic = false; }
@@ -339,16 +340,16 @@ impl N4n0 {
         // Turned off anywhere (Settings' switch included): an answer under way or a sentence it listens to stops too.
         if !(settings.enabled && settings.assistant) {
             // A mute N4N0 made for Talk counts too: switched off in Settings, it is put back (verify-n4n0 8).
-            let busy = { let rt = self.n4n0.lock().unwrap(); rt.answering() || rt.listening.is_some() || !rt.pending.is_empty() || rt.muted_by_n4n0 || rt.unmute_when_muted.is_some() };
+            let busy = { let rt = self.n4n0.locked(); rt.answering() || rt.listening.is_some() || !rt.pending.is_empty() || rt.muted_by_n4n0 || rt.unmute_when_muted.is_some() };
             if busy { self.assistant_quiet(); }
         }
         self.ask_follow();
         let vrchat = self.host.scene().vrchat;
         let (installed, ask_open) = {
-            let n = self.n4n0.lock().unwrap(); (n.voice.installed, n.voice.ask_open)
+            let n = self.n4n0.locked(); (n.voice.installed, n.voice.ask_open)
         };
         let ready = self.voice_readiness() == crate::status::VoiceReadiness::Ready;
-        let mut rt = self.voice.lock().unwrap();
+        let mut rt = self.voice.locked();
         if !ask_open && rt.wake_requested != settings.wake_word { rt.ask_owned = false; }
         rt.wake_requested = settings.wake_word;
         let leased = rt.lease_until.is_some_and(|t| Instant::now() < t);
@@ -424,7 +425,7 @@ impl N4n0 {
         if self.voice_readiness() != crate::status::VoiceReadiness::Ready { return; }
         let settings = self.with_settings(|s| s.n4n0.clone());
         let ask = {
-            let n = self.n4n0.lock().unwrap();
+            let n = self.n4n0.locked();
             if n.busy_for(source) || (source == Source::AskAuto && (!n.voice.ask_open || !n.voice.automatic)) { return; }
             n.voice.ask_open
         };
@@ -433,7 +434,7 @@ impl N4n0 {
         let Some(_held) = later.fence() else { return };
         let here = if source == Source::AskAuto { Surface::Overlay } else { Surface::Avatar };
         let stamp = stamp.unwrap_or_else(|| self.own_stamp(here));
-        let mut rt = self.voice.lock().unwrap();
+        let mut rt = self.voice.locked();
         if !ask { rt.ask_owned = false; }
         rt.lease_until = Some(Instant::now() + LISTEN_LIMIT + LISTEN_LEASE);
         if rt.handle.is_none() {
@@ -445,7 +446,7 @@ impl N4n0 {
         let id = rt.next_listen;
         rt.current = Some((id, stamp));
         {
-            let mut n = self.n4n0.lock().unwrap();
+            let mut n = self.n4n0.locked();
             n.listening = Some((source, Instant::now()));
             n.voice.press = matches!(source, Source::Window | Source::Overlay).then_some(stamp.seq);
         }
@@ -459,7 +460,7 @@ impl N4n0 {
 
     /// The held sentence ended (the Talk button was let go): the worker transcribes it.
     pub(crate) fn voice_finish(self: &Shared) {
-        if let Some(handle) = self.voice.lock().unwrap().handle.as_mut() {
+        if let Some(handle) = self.voice.locked().handle.as_mut() {
             let _ = handle.inner.send(&VoiceCommand::Finish);
         }
     }
@@ -467,10 +468,10 @@ impl N4n0 {
     /// The sentence being listened to is dropped: nothing the worker heard for it goes anywhere.
     pub(crate) fn voice_cancel(self: &Shared) {
         let _lifecycle = self.voice_lifecycle.lock();
-        let mut rt = self.voice.lock().unwrap();
+        let mut rt = self.voice.locked();
         if !rt.drop_current() { return; }
         drop(rt);
-        let mut n = self.n4n0.lock().unwrap();
+        let mut n = self.n4n0.locked();
         n.voice.provisional = None;
         n.voice.level = 0.0;
         n.voice.speech = false;
@@ -480,13 +481,13 @@ impl N4n0 {
     /// The sentence being listened to was the last member's (an identity handover: nothing acts, so the lifecycle's lock is
     /// not needed, and not taken).
     pub(crate) fn voice_forget(&self) {
-        self.voice.lock().unwrap().drop_current();
+        self.voice.locked().drop_current();
     }
 
     /// Downloads the speech models in a worker of their own, its progress on the N4N0 page: what is missing or cut
     /// short, or all of it when they stopped loading (a repair).
     pub(crate) fn voice_install(self: &Shared) {
-        let mut rt = self.voice.lock().unwrap();
+        let mut rt = self.voice.locked();
         let repair = rt.repair;
         if rt.installer.is_some() || (self.models_installed() && !repair) {
             return;
@@ -511,7 +512,7 @@ impl N4n0 {
     /// Stops the speech models' download (the N4N0 page's Cancel): the installing worker removes what it unpacked and
     /// leaves; its end puts the Install button back.
     pub(crate) fn voice_cancel_install(&self) {
-        if let Some(installer) = self.voice.lock().unwrap().installer.as_mut() {
+        if let Some(installer) = self.voice.locked().installer.as_mut() {
             if let Err(e) = installer.inner.send(&VoiceCommand::Cancel) {
                 eprintln!("voice install: {e:#}");
             }
@@ -521,7 +522,7 @@ impl N4n0 {
     /// Stops the voice workers (the app quits).
     pub(crate) fn voice_stop(&self) {
         let (handle, installer) = {
-            let mut rt = self.voice.lock().unwrap();
+            let mut rt = self.voice.locked();
             (rt.handle.take(), rt.installer.take())
         };
         // Each waits a moment for its worker: not under the lock.
@@ -530,7 +531,7 @@ impl N4n0 {
     }
 
     fn voice_status(&self, f: impl FnOnce(&mut VoiceStatus)) {
-        f(&mut self.n4n0.lock().unwrap().voice);
+        f(&mut self.n4n0.locked().voice);
         self.publish();
     }
 
@@ -539,16 +540,16 @@ impl N4n0 {
         let _lifecycle = self.voice_lifecycle.lock();
         match event {
             VoiceEvent::Finalizing { listen } => {
-                let rt = self.voice.lock().unwrap();
+                let rt = self.voice.locked();
                 if rt.current_id() != Some(listen) { return; }
-                { let mut n = self.n4n0.lock().unwrap(); n.listening = None; n.voice.finalizing = true; }
+                { let mut n = self.n4n0.locked(); n.listening = None; n.voice.finalizing = true; }
                 drop(rt);
                 self.publish();
             }
             VoiceEvent::Provisional { listen, text } => {
                 if self.voice_readiness() != crate::status::VoiceReadiness::Ready { return; }
-                let rt = self.voice.lock().unwrap();
-                if rt.current_id() != Some(listen) || self.n4n0.lock().unwrap().voice.finalizing { return; }
+                let rt = self.voice.locked();
+                if rt.current_id() != Some(listen) || self.n4n0.locked().voice.finalizing { return; }
                 // Never another member's words, even for a moment.
                 if rt.current.is_none_or(|(_, stamp)| stamp.epoch != self.host.identity_epoch()) { return; }
                 self.voice_status(|v| v.provisional = (!text.is_empty()).then_some(crate::status::ProvisionalSpeech { listen, text }));
@@ -562,14 +563,14 @@ impl N4n0 {
             }
             VoiceEvent::Mic { .. } => {}
             VoiceEvent::Speech { active } => {
-                if self.voice.lock().unwrap().current.is_some() { self.voice_status(|v| v.speech = active); }
+                if self.voice.locked().current.is_some() { self.voice_status(|v| v.speech = active); }
             },
             VoiceEvent::Level { level } => {
-                if self.voice.lock().unwrap().current.is_none() { return; }
+                if self.voice.locked().current.is_none() { return; }
                 // Coarse steps: the meter moves, and an unchanged level is not published again.
                 let level = (level.clamp(0.0, 1.0) * 20.0).round() / 20.0;
                 let changed = {
-                    let mut n4n0 = self.n4n0.lock().unwrap();
+                    let mut n4n0 = self.n4n0.locked();
                     let changed = n4n0.voice.level != level;
                     n4n0.voice.level = level;
                     changed
@@ -582,7 +583,7 @@ impl N4n0 {
                 // Wake sentences decoded before Ask took ownership must not interrupt this visit or its answer, nor one
                 // whose sound began before the page closed come after it.
                 if !for_n4n0 {
-                    let rt = self.voice.lock().unwrap();
+                    let rt = self.voice.locked();
                     let began = Instant::now().checked_sub(Duration::from_secs_f32(if seconds.is_finite() { seconds.clamp(0.0, 600.0) } else { 0.0 }) + Duration::from_millis(decode_ms as u64));
                     if rt.ask_owned || rt.wake_from.is_some_and(|closed| began.is_none_or(|b| b < closed)) { return; }
                 }
@@ -590,7 +591,7 @@ impl N4n0 {
                     self.ask_follow(); self.publish(); return;
                 }
                 if !for_n4n0 {
-                    if self.n4n0.lock().unwrap().ask_busy() { return; }
+                    if self.n4n0.locked().ask_busy() { return; }
                     // A wake result can start a follow-up capture. It does not own a finalizing listen. When its sound began
                     // tells whether it was heard during a call (its recognition may end after hang-up).
                     let began = Instant::now().checked_sub(Duration::from_secs_f32(if seconds.is_finite() { seconds.clamp(0.0, 600.0) } else { 0.0 }) + Duration::from_millis(decode_ms as u64));
@@ -601,7 +602,7 @@ impl N4n0 {
                 // A sentence for a cancelled listen goes nowhere; one for the latest listen ends N4N0's listening, and is
                 // taken as of that listen's start (its stamp), however late it was recognised.
                 let stamp = {
-                    let mut rt = self.voice.lock().unwrap();
+                    let mut rt = self.voice.locked();
                     let dropped = rt.cancelled_take(listen) || rt.current_id() != Some(listen);
                     // It heard: it works.
                     rt.crashes = 0;
@@ -615,7 +616,7 @@ impl N4n0 {
             VoiceEvent::Installing { fraction } => self.voice_status(|v| v.downloading = Some(fraction)),
             VoiceEvent::Installed => {
                 {
-                    let mut rt = self.voice.lock().unwrap();
+                    let mut rt = self.voice.locked();
                     rt.repair = false;
                     rt.crashes = 0;
                     rt.load_crashes = 0;
@@ -631,8 +632,8 @@ impl N4n0 {
             }
             VoiceEvent::Error { message } => {
                 self.voice_cancel();
-                { let mut rt = self.n4n0.lock().unwrap(); rt.listening = None; rt.voice.automatic = false; rt.voice.finalizing = false; rt.voice.provisional = None; rt.voice.level = 0.0; rt.voice.speech = false; }
-                self.n4n0.lock().unwrap().line(N4n0Who::Error, message.clone());
+                { let mut rt = self.n4n0.locked(); rt.listening = None; rt.voice.automatic = false; rt.voice.finalizing = false; rt.voice.provisional = None; rt.voice.level = 0.0; rt.voice.speech = false; }
+                self.n4n0.locked().line(N4n0Who::Error, message.clone());
                 self.voice_status(|v| v.error = Some(message));
             }
         }
@@ -642,7 +643,7 @@ impl N4n0 {
     /// (crashed). One that was replaced or stopped on purpose ends without a word.
     fn on_voice_exit(self: &Shared, serial: u64) {
         let (handle, installer) = {
-            let mut rt = self.voice.lock().unwrap();
+            let mut rt = self.voice.locked();
             if rt.installer.as_ref().is_some_and(|h| h.serial == serial) {
                 (None, rt.installer.take())
             } else if rt.handle.as_ref().is_some_and(|h| h.serial == serial) {
@@ -664,7 +665,7 @@ impl N4n0 {
         let code = handle.inner.exit_code();
         let last = handle.inner.last_line();
         let (message, damaged) = {
-            let mut rt = self.voice.lock().unwrap();
+            let mut rt = self.voice.locked();
             // Its listen will never be answered.
             rt.current = None;
             rt.ended(handle.started.elapsed(), code, last.as_deref())
@@ -672,7 +673,7 @@ impl N4n0 {
         drop(handle);
         eprintln!("voice: {message}");
         {
-            let mut n4n0 = self.n4n0.lock().unwrap();
+            let mut n4n0 = self.n4n0.locked();
             n4n0.listening = None;
             n4n0.line(N4n0Who::Error, message.clone());
         }

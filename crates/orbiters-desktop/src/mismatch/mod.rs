@@ -19,6 +19,7 @@
 
 pub mod send;
 
+use orbiters_core::locks::*;
 use orbiters_i18n::mark;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -158,7 +159,7 @@ static ON: AtomicBool = AtomicBool::new(false);
 static RING: Mutex<Ring> = Mutex::new(Ring { lines: VecDeque::new() });
 
 fn ring<R>(f: impl FnOnce(&mut Ring) -> R) -> R {
-    f(&mut RING.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    f(&mut RING.locked())
 }
 
 /// Milliseconds since 1970, UTC.
@@ -171,7 +172,7 @@ pub fn now_ms() -> u64 {
 pub fn switches(settings: &orbiters_core::settings::Settings) -> orbiters_core::settings::MismatchSettings {
     if cfg!(debug_assertions) && std::env::var_os("ORBITERS_VR_SANDBOX_ROOT").is_some() {
         static LOOKED: Mutex<Option<(std::time::Instant, bool)>> = Mutex::new(None);
-        let mut looked = LOOKED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut looked = LOOKED.locked();
         if looked.is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(1)) {
             let on = std::env::var_os("ORBITERS_SANDBOX_LOGS").is_some_and(|d| PathBuf::from(d).join("mismatch-on.txt").is_file());
             *looked = Some((std::time::Instant::now(), on));

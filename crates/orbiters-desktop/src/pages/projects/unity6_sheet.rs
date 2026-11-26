@@ -3,6 +3,7 @@
 //! just before copying), the copy, and what comes next in Creator Companion. The original stays on 2022 and stays the
 //! one the gallery opens; nothing here migrates, uploads or deletes.
 
+use orbiters_core::locks::*;
 use orbiters_i18n::{mark, tr};
 use super::art;
 use super::dialogs::{inline_warning, note};
@@ -206,7 +207,7 @@ pub(super) fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, path: &Path) {
             note(ui, tr("Library, Temp, Logs and Git history stay behind, as in Duplicate: Unity 6 imports the trial afresh. Installed packages are copied at their exact versions."));
         }
         Step::Copying => {
-            let p = state.u6.run.as_ref().map(|r| r.progress.lock().unwrap().clone()).unwrap_or_default();
+            let p = state.u6.run.as_ref().map(|r| r.progress.locked().clone()).unwrap_or_default();
             let w = ui.available_width();
             let (r, _) = ui.allocate_exact_size(vec2(w, 92.0), Sense::hover());
             let pt = ui.painter();

@@ -12,7 +12,7 @@ impl crate::N4n0 {
     /// it, the other menus through the status.
     pub fn set_feedback(self: &Shared, view: FeedbackView) {
         {
-            let mut rt = self.n4n0.lock().unwrap();
+            let mut rt = self.n4n0.locked();
             if rt.feedback == view {
                 return;
             }

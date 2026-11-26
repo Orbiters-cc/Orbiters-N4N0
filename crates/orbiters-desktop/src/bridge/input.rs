@@ -3,6 +3,7 @@
 //! client goes away, when the person takes over, and (the sweep) when anything else went wrong. A process that dies with
 //! something down has the guard (`guard.rs`).
 
+use orbiters_core::locks::*;
 use super::game::{Failure, OscArg};
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -153,14 +154,14 @@ struct HeldInner {
 impl Held {
     /// `hold` went down, to be up by `until` at the latest. Whether it was up before.
     pub fn press(&self, hold: Hold, until: Instant) -> bool {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.locked();
         inner.until = Some(inner.until.map_or(until, |t| t.max(until)));
         inner.down.insert(hold)
     }
 
     /// `hold` came up. Whether it was down.
     pub fn lift(&self, hold: &Hold) -> bool {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.locked();
         let was = inner.down.remove(hold);
         if inner.down.is_empty() {
             inner.until = None;
@@ -170,14 +171,14 @@ impl Held {
 
     /// Everything down, emptied: the caller brings them up.
     pub fn take_all(&self) -> Vec<Hold> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.locked();
         inner.until = None;
         inner.down.drain().collect()
     }
 
     /// What should be up by now and is not.
     pub fn overdue(&self, now: Instant) -> bool {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.locked();
         !inner.down.is_empty() && inner.until.is_none_or(|t| now > t + OVERDUE_MARGIN)
     }
 

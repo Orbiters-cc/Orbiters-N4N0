@@ -14,6 +14,7 @@
 //!   wheel lights the ring's cells one by one and a click opens the one lit ([`scroll`]). The hook that sees it lets VRChat have every movement and click
 //!   but those: its click is ours only after a scroll, and a movement of the mouse gives it back.
 
+use orbiters_core::locks::*;
 use super::desk_shared::{self, hit, Clicks, Hints, Presence, SCROLL_TO_PICK};
 use super::detect::{self, Part, Seen, MenuKey, Watcher};
 use super::zones::{self, Around, Placed, Zone};
@@ -930,7 +931,7 @@ impl Looker {
                 let mut capture: Option<(isize, Capture)> = None;
                 let (mut last_menu, mut last_camera) = (None::<Instant>, None::<Instant>);
                 while !stopping.load(std::sync::atomic::Ordering::Relaxed) {
-                    let Some(ask) = *wanted.lock().unwrap() else {
+                    let Some(ask) = *wanted.locked() else {
                         // Nothing to look for: no capture at all.
                         capture = None;
                         std::thread::sleep(Duration::from_millis(15));
@@ -984,7 +985,7 @@ impl Looker {
 
     /// What to look for from now on; `None`: nothing, and the capture goes.
     fn ask(&self, ask: Option<Ask>) {
-        let mut asked = self.asked.lock().unwrap();
+        let mut asked = self.asked.locked();
         if *asked != ask {
             *asked = ask;
         }
@@ -2173,7 +2174,7 @@ pub mod pointer {
                 }
                 WM_LBUTTONDOWN | WM_LBUTTONUP => {
                     let down = message == WM_LBUTTONDOWN;
-                    let swallowed = EDGES.lock().map(|mut e| e.get_or_insert_with(Edges::default).edge(down)).unwrap_or(false);
+                    let swallowed = EDGES.locked().get_or_insert_with(Edges::default).edge(down);
                     if swallowed {
                         return LRESULT(1);
                     }
@@ -2281,9 +2282,7 @@ pub mod pointer {
                     // The left button as it is now that the hook is in (no event reaches it before this thread pumps): held, it is
                     // the game's until it is let go (verify2: read before the hook, a press in between was swallowed).
                     let held = windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x01) as u16 & 0x8000 != 0;
-                    if let Ok(mut edges) = EDGES.lock() {
-                        *edges = Some(Edges::started(held));
-                    }
+                    *EDGES.locked() = Some(Edges::started(held));
                     if late.load(Ordering::Acquire) || tx.send(windows::Win32::System::Threading::GetCurrentThreadId()).is_err() {
                         let _ = UnhookWindowsHookEx(set);
                         return;
@@ -2337,7 +2336,7 @@ pub mod pointer {
 
         /// The left button's changes since the last read (true: down), in order.
         pub fn take_buttons(&mut self) -> Vec<bool> {
-            EDGES.lock().ok().and_then(|mut e| e.as_mut().map(Edges::take)).unwrap_or_default()
+            EDGES.locked().as_mut().map(Edges::take).unwrap_or_default()
         }
     }
 

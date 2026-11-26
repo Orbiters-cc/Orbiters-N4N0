@@ -8,6 +8,7 @@
 //! migration. It writes no file over another in it: the trial's project settings (its own product GUID) and the entries of
 //! its local packages are written once, when the copy makes them.
 
+use orbiters_core::locks::*;
 use super::authority::{self, TrialState};
 use super::gate::{self, Destination, Parents, Role, WriteRoot};
 use super::journal::{self, Lease};
@@ -482,9 +483,9 @@ pub fn prepare(p: Prepare, cancel: &AtomicBool, progress: &SharedProgress) -> an
 
 /// The progress of a comparison of `total` entries, one step at a time.
 fn comparing(progress: &SharedProgress, total: usize) -> impl Fn(&Path) + '_ {
-    *progress.lock().unwrap() = Progress { copied: 0, total, file: String::new(), phase: mark("Comparing every file with the original").into(), ..Default::default() };
+    *progress.locked() = Progress { copied: 0, total, file: String::new(), phase: mark("Comparing every file with the original").into(), ..Default::default() };
     move |at| {
-        let mut p = progress.lock().unwrap();
+        let mut p = progress.locked();
         p.copied = (p.copied + 1).min(p.total);
         p.file = at.display().to_string();
     }

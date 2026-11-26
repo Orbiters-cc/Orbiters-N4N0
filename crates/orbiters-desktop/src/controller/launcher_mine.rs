@@ -141,7 +141,7 @@ impl Controller {
         }
         // One change at a time, a few seconds apart.
         {
-            let mut rt = self.launcher.lock().unwrap();
+            let mut rt = self.launcher.locked();
             if let Some(at) = rt.mine_next.filter(|at| Instant::now() < *at) {
                 let left = at.saturating_duration_since(Instant::now()).as_secs().max(1);
                 drop(rt);

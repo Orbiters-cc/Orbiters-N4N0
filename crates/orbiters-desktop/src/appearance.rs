@@ -4,6 +4,7 @@
 //! In the headset and beside VRChat's menus: the colours and the font, never the background. Those panels keep their own
 //! ink (they lie on VRChat's menus), and the accent they follow is the app's unless one was picked for them.
 
+use orbiters_core::locks::*;
 use egui::{Color32, Id, Painter, Rect};
 use orbiters_core::appearance::{AppearanceSettings, Background, BackgroundColors, Tint, ACCENT};
 use orbiters_core::settings::{OrbitSettings, Settings};
@@ -163,7 +164,7 @@ pub fn system_reduces_motion() -> bool {
     if cfg!(test) {
         return false;
     }
-    let mut read = READ.lock().unwrap_or_else(|e| e.into_inner());
+    let mut read = READ.locked();
     match *read {
         Some((at, reduced)) if at.elapsed() < Duration::from_secs(5) => reduced,
         _ => {

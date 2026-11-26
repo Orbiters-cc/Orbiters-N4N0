@@ -6,6 +6,7 @@
 //! folder, or why not and the way on: Discard them for edits that cannot be applied (as the 3D view offers), Choose
 //! another place for a full disk or a place N4N0 may not write in, Try again for anything else.
 
+use orbiters_core::locks::*;
 use super::Job;
 use crate::splat_export::{self as export, Edits, Exported, Failure, Format, Progress, Step};
 use egui::{Align2, CursorIcon, Id, Order, Rect, Sense, Ui, pos2, vec2};
@@ -57,7 +58,7 @@ static STAGED: Mutex<Option<Hooks>> = Mutex::new(None);
 
 /// Every dialog opened from now on uses `hooks` (screenshots).
 pub fn stage(hooks: Hooks) {
-    *STAGED.lock().unwrap_or_else(|e| e.into_inner()) = Some(hooks);
+    *STAGED.locked() = Some(hooks);
 }
 
 /// Where and as what the last export of this run of the app went: the next one opens there, on that format.
@@ -67,7 +68,7 @@ static LAST: Mutex<Option<(PathBuf, Format)>> = Mutex::new(None);
 static OPENED: AtomicU64 = AtomicU64::new(0);
 
 fn last() -> Option<(PathBuf, Format)> {
-    LAST.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    LAST.locked().clone()
 }
 
 /// An export running: as what, how far, and its outcome to come.
@@ -107,7 +108,7 @@ fn problem(edits: Option<&Edits>, outcome: Option<&(Format, Result<Exported, Fai
 impl Export {
     /// The dialog for the capture in `session` (`title` its world), growing out of `origin`; its edits are read as it opens.
     pub fn open(ctx: &egui::Context, session: &Path, title: &str, origin: Rect) -> Self {
-        let hooks = STAGED.lock().unwrap_or_else(|e| e.into_inner()).unwrap_or_default();
+        let hooks = STAGED.locked().unwrap_or_default();
         Self::with_hooks(ctx, session, title, origin, hooks)
     }
 
@@ -145,7 +146,7 @@ impl Export {
         if let Some(r) = self.running.as_mut().and_then(|r| r.job.take()) {
             let format = self.running.take().map(|r| r.format).unwrap_or(self.format);
             if let Ok(done) = &r {
-                *LAST.lock().unwrap_or_else(|e| e.into_inner()) = done.path.parent().map(|p| (p.to_path_buf(), format));
+                *LAST.locked() = done.path.parent().map(|p| (p.to_path_buf(), format));
             }
             self.outcome = Some((format, r));
         }

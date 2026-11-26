@@ -1,14 +1,13 @@
 //! The single routing boundary for VRChat data. Call on background threads.
 //! A direct session's cookies are private to `vrchat_api`; the fallback sees only the Orbiters bearer credential.
-use crate::locks::*;
 use crate::account::Api;
 use orbiters_i18n::tr;
-use crate::vrchat_api::{Avatar, Client, Error, Replaced, Step, Turns, User};
-use std::sync::{Arc, Mutex};
+use crate::vrchat_api::{Avatar, Client, ClientLock, Error, Replaced, Step, Turns, User};
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Source {
-    direct: Option<Arc<Mutex<Client>>>,
+    direct: Option<Arc<ClientLock>>,
     orbiters: Option<(Api, String)>,
     log_account: Option<String>,
     operation: Option<crate::vrchat_api::Operation>,
@@ -46,11 +45,11 @@ impl Source {
             c.select_avatar_while(id, current)
         }).ok_or(Error::Unauthorized)?
     }
-    pub fn new(direct: Option<Arc<Mutex<Client>>>, orbiters: Option<(Api, String)>, log_account: Option<String>) -> Self {
+    pub fn new(direct: Option<Arc<ClientLock>>, orbiters: Option<(Api, String)>, log_account: Option<String>) -> Self {
         let operation = direct.as_ref().map(|c| c.locked().operation(std::time::Instant::now() + std::time::Duration::from_secs(60)));
         Self { direct, orbiters, log_account, operation }
     }
-    pub fn scoped(direct: Option<Arc<Mutex<Client>>>, orbiters: Option<(Api, String)>, log_account: Option<String>, operation: crate::vrchat_api::Operation) -> Self {
+    pub fn scoped(direct: Option<Arc<ClientLock>>, orbiters: Option<(Api, String)>, log_account: Option<String>, operation: crate::vrchat_api::Operation) -> Self {
         Self { direct, orbiters, log_account, operation: Some(operation) }
     }
     /// [`Self::direct`] for a read of several requests: the client is held for one at a time ([`Turns`]).
@@ -273,7 +272,7 @@ mod tests {
         });
         // An expired personal session falls back too.
         let direct = crate::vrchat_api::tests::expired_session();
-        let source = Source::new(Some(Arc::new(Mutex::new(direct))), Some((api, "orbit-test".into())), None);
+        let source = Source::new(Some(Arc::new(ClientLock::new(direct))), Some((api, "orbit-test".into())), None);
         let found = source.worlds(&crate::maps::WorldList::Search("black cat".into()), 1).unwrap();
         server.join().unwrap();
         assert_eq!(found.source, crate::maps::FoundBy::Orbiters);
@@ -306,7 +305,7 @@ mod tests {
         // The direct request really starts with a cookie, expires, and then falls back to Orbiters.
         let direct = crate::vrchat_api::tests::expired_session();
         assert!(direct.signed_in());
-        assert!(Source::new(Some(Arc::new(Mutex::new(direct))), Some((api, "orbit-test".into())), None).avatar("avtr_test").unwrap().is_none());
+        assert!(Source::new(Some(Arc::new(ClientLock::new(direct))), Some((api, "orbit-test".into())), None).avatar("avtr_test").unwrap().is_none());
         server.join().unwrap();
     }
 }

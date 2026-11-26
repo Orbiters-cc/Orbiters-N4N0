@@ -27,6 +27,7 @@
 //!   (verify3 Blocker 4). A member's role change is bound to their membership (verify3 Blocker 1).
 //! - One write at a time per target, a few requests at a time in all; the client's lock is let go between calls (M9,
 //!   M11). No bulk, no background sweeps.
+use orbiters_core::locks::*;
 use super::vrchat_data::Scope;
 use super::vrchat_login::Presence;
 use super::Controller;
@@ -671,7 +672,7 @@ impl Drop for Admitted {
 struct Slot<'a>(&'a Controller);
 impl Drop for Slot<'_> {
     fn drop(&mut self) {
-        let mut rt = self.0.groups.lock().unwrap();
+        let mut rt = self.0.groups.locked();
         rt.running = rt.running.saturating_sub(1);
     }
 }
@@ -760,7 +761,7 @@ impl Controller {
             return refused(Failure::AccountChanged);
         }
         {
-            let mut rt = self.groups.lock().unwrap();
+            let mut rt = self.groups.locked();
             // What is sealed under another scope, or too old, ends unsent (B3).
             rt.end_unsent(|i| i.scope != scope || i.at.elapsed() >= INTENT_FOR);
             let key = Key::of(&scope);
@@ -804,7 +805,7 @@ impl Controller {
                 return Reply::Outcome { op, outcome, said };
             }
             Request::Cancel { op } => {
-                self.groups.lock().unwrap().end_unsent(|i| i.sealed.op == op && i.link == link);
+                self.groups.locked().end_unsent(|i| i.sealed.op == op && i.link == link);
                 Ok(Reply::Cancelled)
             }
         };
@@ -828,7 +829,7 @@ impl Controller {
 
     /// A window's link closed: what it had sealed and not sent is over.
     pub fn groups_link_closed(&self, link: u64) {
-        let mut rt = self.groups.lock().unwrap();
+        let mut rt = self.groups.locked();
         rt.prepares.remove(&link);
         rt.end_unsent(|i| i.link == link);
     }
@@ -838,7 +839,7 @@ impl Controller {
         Key::of(scope).ok_or(Failure::SignedOut)
     }
     fn groups_book(&self) -> Arc<Ledger> {
-        self.groups.lock().unwrap().ledger.clone()
+        self.groups.locked().ledger.clone()
     }
 
     /// What the window shows of the ledger: ids and states, no text. (Asked at each page: what an ended program left staged
@@ -862,7 +863,7 @@ impl Controller {
                 }
             })
             .collect();
-        let was: Vec<Was> = self.groups.lock().unwrap().was.iter().filter(|w| w.key == key).cloned().collect();
+        let was: Vec<Was> = self.groups.locked().was.iter().filter(|w| w.key == key).cloned().collect();
         let back = entries.iter().filter(|e| !e.open() && e.beside.any()).flat_map(|e| was.iter().filter(|w| w.op == e.op).flat_map(|w| w.back(e)).map(|w| (e.op.clone(), w))).collect();
         Ok(Reply::Ledger { entries, unreadable, back })
     }
@@ -1010,7 +1011,7 @@ impl Controller {
     fn groups_prepare(&self, link: u64, scope: &Scope, write: Write) -> Result<Reply, Failure> {
         // A window has one sealed write at a time: whatever it had is over (B-E, B-F).
         let turn = {
-            let mut rt = self.groups.lock().unwrap();
+            let mut rt = self.groups.locked();
             rt.end_unsent(|i| i.link == link);
             rt.turns += 1;
             let turn = rt.turns;
@@ -1077,7 +1078,7 @@ impl Controller {
         }
         .seal();
         book.prepare(entry).map_err(not)?;
-        let mut rt = self.groups.lock().unwrap();
+        let mut rt = self.groups.locked();
         if rt.prepares.get(&link) != Some(&turn) {
             // Its window closed, or asked for another since: over before it was shown.
             rt.ledger.never_sent(&op);
@@ -1093,7 +1094,7 @@ impl Controller {
 
     /// Staged pictures nothing is for any more (a window that ended before its prepare, an earlier program) go (J3).
     fn groups_sweep_staged(&self) {
-        let used: Vec<String> = self.groups.lock().unwrap().intents.iter().filter_map(|i| if let Write::Upload { staged, .. } = &i.sealed.write { Some(staged.name.clone()) } else { None }).collect();
+        let used: Vec<String> = self.groups.locked().intents.iter().filter_map(|i| if let Write::Upload { staged, .. } = &i.sealed.write { Some(staged.name.clone()) } else { None }).collect();
         let Ok(files) = std::fs::read_dir(staging_dir()) else { return };
         for f in files.flatten() {
             let name = f.file_name().to_string_lossy().to_string();
@@ -1107,7 +1108,7 @@ impl Controller {
     /// The sealed picture's bytes, as sealed.
     fn groups_sealed_art(&self, link: u64, scope: &Scope, op: &str) -> Result<Vec<u8>, Failure> {
         let (write, picture) = {
-            let rt = self.groups.lock().unwrap();
+            let rt = self.groups.locked();
             let i = rt.intents.iter().find(|i| i.sealed.op == op && i.link == link && i.scope == *scope).ok_or(Failure::Expired)?;
             (i.sealed.write.clone(), i.picture.clone())
         };
@@ -1276,7 +1277,7 @@ impl Controller {
                 if let Some(op) = back {
                     // What was there just before the write `op`, as the service itself read it then, and no other file.
                     let key = self.groups_key(scope)?;
-                    let was = self.groups.lock().unwrap().was.iter().find(|w| w.op == op && w.key == key).cloned().ok_or(Failure::Expired)?;
+                    let was = self.groups.locked().was.iter().find(|w| w.op == op && w.key == key).cloned().ok_or(Failure::Expired)?;
                     let Before::Group(then) = was.what else { return Err(Failure::Expired) };
                     let url = match slot {
                         ArtSlot::Banner => then.banner_url.clone(),
@@ -1316,7 +1317,7 @@ impl Controller {
     fn groups_commit(&self, link: u64, scope: &Scope, op: &str, digest: &str) -> (Outcome, Option<GroupRefusal>) {
         let book = self.groups_book();
         let intent = {
-            let mut rt = self.groups.lock().unwrap();
+            let mut rt = self.groups.locked();
             let Some(at) = rt.intents.iter().position(|i| i.sealed.op == op) else {
                 return (Outcome::Refused(if rt.used.iter().any(|u| u == op) { Failure::Duplicate } else { Failure::Expired }), None);
             };
@@ -1345,7 +1346,7 @@ impl Controller {
         struct Going<'a>(&'a Controller, &'a Ledger, String, String, bool);
         impl Drop for Going<'_> {
             fn drop(&mut self) {
-                self.0.groups.lock().unwrap_or_else(std::sync::PoisonError::into_inner).writing.remove(&self.3);
+                self.0.groups.locked().writing.remove(&self.3);
                 if !self.4 {
                     self.1.end(&self.2, State::Unknown, None, None, Beside::default());
                 }
@@ -1367,7 +1368,7 @@ impl Controller {
         };
         // Kept to put back what moved beside it, as long as something did or may have.
         if !beside.any() && state != State::Unknown {
-            self.groups.lock().unwrap().was.retain(|w| w.op != op);
+            self.groups.locked().was.retain(|w| w.op != op);
         }
         if let (State::Done, Some(put_right), Ok(key)) = (state, intent.sealed.write.back(), self.groups_key(scope)) {
             book.put_back(&key, put_right, &intent.sealed.write.parts());
@@ -1477,7 +1478,7 @@ impl Controller {
             _ => return,
         };
         self.groups_book().was(op, &said);
-        let mut rt = self.groups.lock().unwrap();
+        let mut rt = self.groups.locked();
         rt.was.push_back(Was { op: op.clone(), key, what });
         while rt.was.len() > WAS_MAX {
             rt.was.pop_front();
@@ -1649,7 +1650,7 @@ impl Controller {
 
     /// What of the role is otherwise than it was, beside `change`; the role as it is now, kept to put that back.
     fn groups_beside_role(&self, op: &str, then: &g::Said, change: &RoleChange, now: &Role) -> Beside {
-        if let Some(Was { what: Before::Role { after, .. }, .. }) = self.groups.lock().unwrap().was.iter_mut().find(|w| w.op == op) {
+        if let Some(Was { what: Before::Role { after, .. }, .. }) = self.groups.locked().was.iter_mut().find(|w| w.op == op) {
             *after = Some(now.clone());
         }
         let asked: Vec<Part> = change.fields().into_iter().map(RoleField::part).collect();
@@ -1664,7 +1665,7 @@ impl Controller {
             return Err(Failure::OtherOwner);
         }
         // Sealed and never committed: it ends here, unsent.
-        self.groups.lock().unwrap().end_unsent(|i| i.sealed.op == op && i.link == link && i.scope == *scope);
+        self.groups.locked().end_unsent(|i| i.sealed.op == op && i.link == link && i.scope == *scope);
         // Not there, or not readable: that says nothing of what was sent (verify3 Major 1).
         let Some(entry) = book.get(&key, op) else { return Ok(Observation::CannotTell(Unclear::NoRecord)) };
         match entry.state {
@@ -1684,7 +1685,7 @@ impl Controller {
             // What cannot be read is no dead end: the person may still decide (verify3 Major 3).
             Err(f) => Seen::CannotTell(Unclear::Failed(f)),
         };
-        self.groups.lock().unwrap().candidates.remove(op);
+        self.groups.locked().candidates.remove(op);
         Ok(match seen {
             Seen::Shows => {
                 if !book.close(op, Closing::Shows, false, None) {
@@ -1693,7 +1694,7 @@ impl Controller {
                 if let Some(beside) = beside.filter(Beside::any) {
                     book.beside(op, beside);
                 } else {
-                    self.groups.lock().unwrap().was.retain(|w| w.op != op);
+                    self.groups.locked().was.retain(|w| w.op != op);
                 }
                 Observation::Shows
             }
@@ -1708,7 +1709,7 @@ impl Controller {
             }
             Seen::Candidates(list) => {
                 book.answer(op, Answer::CannotTell, false);
-                self.groups.lock().unwrap().candidates.insert(op.to_string(), list.iter().map(|c| c.id.clone()).collect());
+                self.groups.locked().candidates.insert(op.to_string(), list.iter().map(|c| c.id.clone()).collect());
                 Observation::Candidates(list)
             }
             Seen::CannotTell(why) => {
@@ -1726,7 +1727,7 @@ impl Controller {
         book.get(&key, op).ok_or(if book.owned() { Failure::Expired } else { Failure::OtherOwner })?;
         let kept = match choice {
             Choice::Shows { made } => {
-                let offered = self.groups.lock().unwrap().candidates.get(op).cloned().unwrap_or_default();
+                let offered = self.groups.locked().candidates.get(op).cloned().unwrap_or_default();
                 if made.as_ref().is_some_and(|m| !offered.contains(m)) {
                     return Err(Failure::Api(GroupFailure::Invalid));
                 }
@@ -1737,7 +1738,7 @@ impl Controller {
             Choice::Drop => book.close(op, Closing::Dropped, true, None),
         };
         if kept && book.get(&key, op).is_some_and(|e| !e.open()) {
-            self.groups.lock().unwrap().candidates.remove(op);
+            self.groups.locked().candidates.remove(op);
         }
         if kept { Ok(()) } else { Err(Failure::LookNotKept) }
     }
@@ -1778,7 +1779,7 @@ impl Controller {
                     Some(r) => {
                         let asked: Vec<Part> = e.evidence.role_fields.iter().map(|f| f.part()).collect();
                         *beside = Some(Beside::between(&e.evidence.was, &r.said(), &asked));
-                        if let Some(Was { what: Before::Role { after, .. }, .. }) = self.groups.lock().unwrap().was.iter_mut().find(|w| w.op == e.op) {
+                        if let Some(Was { what: Before::Role { after, .. }, .. }) = self.groups.locked().was.iter_mut().find(|w| w.op == e.op) {
                             *after = Some(r.clone());
                         }
                         shows(Some(r.digest_of(&e.evidence.role_fields)) == e.evidence.wanted)

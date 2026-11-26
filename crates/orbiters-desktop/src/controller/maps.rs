@@ -4,6 +4,7 @@
 //! the PC one also the website's `.splat` (Orbiters makes it from its leaves), starting from the view the desktop's 3D
 //! view opens on.
 
+use orbiters_core::locks::*;
 use super::{Controller, NoticeKind, Shared};
 use crate::ipc::ToClient;
 use crate::state::{MapsMine, UploadKind, UploadState, UploadStatus};
@@ -28,12 +29,12 @@ impl Controller {
     /// What this member added to the Map explorer, as last fetched.
     pub fn maps(&self) -> Option<MapsMine> {
         let identity = self.maps_identity();
-        self.maps_mine.lock().unwrap().as_ref().filter(|(of, _)| *of == identity).map(|(_, mine)| mine.clone())
+        self.maps_mine.locked().as_ref().filter(|(of, _)| *of == identity).map(|(_, mine)| mine.clone())
     }
 
     /// Replaces what this member added (screenshots).
     pub fn set_maps(&self, mine: MapsMine) {
-        *self.maps_mine.lock().unwrap() = Some((self.maps_identity(), mine));
+        *self.maps_mine.locked() = Some((self.maps_identity(), mine));
     }
 
     /// Whose "My maps" a list is: the server and credential signed in now (`None` signed out).
@@ -44,7 +45,7 @@ impl Controller {
     /// Keeps a fetched list when it is the answer of the newest fetch (`turn`) and of the account still signed in: an
     /// older, slower answer, or one asked as another account, is dropped (CTL2-8).
     fn store_maps(&self, turn: u64, identity: Option<String>, mine: &MapsMine) -> bool {
-        let mut stored = self.maps_mine.lock().unwrap();
+        let mut stored = self.maps_mine.locked();
         if self.maps_turn.load(Ordering::Acquire) != turn || self.maps_identity() != identity {
             return false;
         }
@@ -55,7 +56,7 @@ impl Controller {
     /// Signed out: the last account's list is no longer anyone's to show.
     pub(super) fn forget_maps(&self) {
         self.maps_turn.fetch_add(1, Ordering::AcqRel);
-        *self.maps_mine.lock().unwrap() = None;
+        *self.maps_mine.locked() = None;
         self.broadcast(|| ToClient::Maps { mine: MapsMine::default() });
     }
 
@@ -77,7 +78,7 @@ impl Controller {
                 return;
             }
             c.broadcast(|| ToClient::Maps { mine: mine.clone() });
-            if let Some(ctx) = c.repaint.lock().unwrap().as_ref() {
+            if let Some(ctx) = c.repaint.locked().as_ref() {
                 ctx.request_repaint();
             }
         });
@@ -334,7 +335,7 @@ pub fn prepare(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions)
 fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions) -> anyhow::Result<Prepared> {
     use orbiters_reconstruct::timing::PrepStage;
     let _total = PrepStage::new("total");
-    let _preparing = crate::upload_prep::PREPARING.lock().unwrap_or_else(|e| e.into_inner());
+    let _preparing = crate::upload_prep::PREPARING.locked();
     let identity = crate::upload_prep::ResultIdentity::read(session);
     let result = reconstruction::result_dir(session);
     let key = crate::upload_prep::tree_key();

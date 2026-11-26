@@ -8,6 +8,7 @@
 //! - The sharer with several friends here picks one on the band too ([`Pick`]). With one friend here, the share chip on
 //!   the small view shows it to that friend at once.
 
+use orbiters_core::locks::*;
 use crate::backend::Ctl;
 use crate::ipc::SharedViewCommand;
 use crate::state::ShareOffer;
@@ -233,18 +234,18 @@ impl Pick {
 static PICKING: Mutex<Option<Pick>> = Mutex::new(None);
 
 pub fn ask_pick(capture: u64, revision: u64, reach: f32, moved: [f32; 2], now_ms: u64) {
-    let mut p = PICKING.lock().unwrap_or_else(|e| e.into_inner());
+    let mut p = PICKING.locked();
     let id = p.map_or(1, |p| p.id + 1);
     *p = Some(Pick { id, capture, revision, reach, moved, until_ms: now_ms + PICK_FOR_MS });
 }
 
 /// The picker while its time lasts.
 pub fn picking(now_ms: u64) -> Option<Pick> {
-    PICKING.lock().unwrap_or_else(|e| e.into_inner()).filter(|p| p.until_ms > now_ms)
+    PICKING.locked().filter(|p| p.until_ms > now_ms)
 }
 
 pub fn clear_pick() {
-    if let Some(p) = PICKING.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+    if let Some(p) = PICKING.locked().as_mut() {
         p.until_ms = 0;
     }
 }

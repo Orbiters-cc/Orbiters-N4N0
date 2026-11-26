@@ -6,6 +6,7 @@
 //! back then. A service that itself is killed leaves programs in efficiency mode until its next start or until they exit, and that gap
 //! is real and is said in `docs/fps-booster.md`.
 
+use orbiters_core::locks::*;
 use super::Shared;
 use crate::booster::{Command, OverlayReport};
 use orbiters_booster::engine::{Request, Wants};
@@ -54,7 +55,7 @@ struct Inner {
 impl Hub {
     pub(crate) fn cancel_work(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
-        if let Some(worker) = self.worker.lock().unwrap().as_ref() { worker.unpark(); }
+        if let Some(worker) = self.worker.locked().as_ref() { worker.unpark(); }
     }
 
     pub(crate) fn holds_reconstructions(&self) -> bool {
@@ -98,7 +99,7 @@ impl super::Controller {
 
     /// What the overlay said.
     pub fn booster_report(self: &Shared, report: OverlayReport) {
-        let mut inner = self.booster.inner.lock().unwrap();
+        let mut inner = self.booster.inner.locked();
         // Answered: the request leaves the snapshot, so a new overlay does not do it again.
         if inner.pending.is_some_and(|(n, _)| report.answered >= n) {
             inner.pending = None;
@@ -111,7 +112,7 @@ impl super::Controller {
 
     /// The overlay's link closed: nothing it wanted holds any more. The thread below acts on this within a second.
     pub fn booster_overlay_gone(self: &Shared) {
-        let mut inner = self.booster.inner.lock().unwrap();
+        let mut inner = self.booster.inner.locked();
         inner.report = OverlayReport::default();
         inner.report_at = None;
         // What it was asked and did not answer goes with it: a simulated crash asked of the next one too would never end.
@@ -126,7 +127,7 @@ impl super::Controller {
         let cancelling = matches!(command, Command::Overlay(Request::StopTest) | Command::PutBack);
         match command {
             Command::Overlay(request) => {
-                let mut inner = self.booster.inner.lock().unwrap();
+                let mut inner = self.booster.inner.locked();
                 inner.next_request += 1;
                 inner.pending = Some((inner.next_request, request));
             }
@@ -137,7 +138,7 @@ impl super::Controller {
             Command::OpenLogs => open_folder(&orbiters_core::paths::logs_dir()),
             Command::GuidedDone(item) => {
                 let was = current_of(item, &self.view());
-                let mut inner = self.booster.inner.lock().unwrap();
+                let mut inner = self.booster.inner.locked();
                 if !inner.to_put_back.iter().any(|t| t.item == item) {
                     inner.to_put_back.push(ToPutBack { item, was });
                     keep_to_put_back(&inner.to_put_back);
@@ -146,12 +147,12 @@ impl super::Controller {
                 inner.pending = Some((inner.next_request, Request::GuidedDone));
             }
             Command::PutBackDone => {
-                let mut inner = self.booster.inner.lock().unwrap();
+                let mut inner = self.booster.inner.locked();
                 inner.to_put_back.clear();
                 keep_to_put_back(&inner.to_put_back);
             }
             Command::TestLoad(on) => {
-                let mut inner = self.booster.inner.lock().unwrap();
+                let mut inner = self.booster.inner.locked();
                 inner.test_load = None;
                 if on && dev_build() {
                     inner.test_load = TestLoad::start();
@@ -159,7 +160,7 @@ impl super::Controller {
             }
             Command::WriteTestReport => {
                 let path = write_test_report(&self.view());
-                self.booster.inner.lock().unwrap().test_report = path;
+                self.booster.inner.locked().test_report = path;
             }
         }
         self.booster_publish();
@@ -167,7 +168,7 @@ impl super::Controller {
     }
 
     fn booster_publish(self: &Shared) {
-        let inner = self.booster.inner.lock().unwrap();
+        let inner = self.booster.inner.locked();
         let watching = inner.report_at.is_some_and(|at| at.elapsed() < REPORT_GONE_AFTER);
         let (overlay, request, to_put_back, test_load, test_report) = (
             if watching { inner.report.clone() } else { OverlayReport::default() },
@@ -209,12 +210,12 @@ impl super::Controller {
             });
         }
         let Some(store) = store else { return };
-        self.booster.inner.lock().unwrap().to_put_back = read_to_put_back();
+        self.booster.inner.locked().to_put_back = read_to_put_back();
         let _ = std::thread::Builder::new().name("fps-booster".into()).spawn(move || ctl.booster_thread(store));
     }
 
     fn booster_thread(self: Shared, store: Store) {
-        *self.booster.worker.lock().unwrap() = Some(std::thread::current());
+        *self.booster.worker.locked() = Some(std::thread::current());
         let mut os = RealOs;
         let mut last_seen: Option<(Instant, Vec<Seen>)> = None;
         let mut last_lower: Option<Instant> = None;
@@ -337,7 +338,7 @@ impl super::Controller {
                 let limits = vrchat_read::read(account.as_deref());
                 // VRChat may only write these as it exits: with it closed, what reads as it was is back.
                 if !snap.vrchat.running {
-                    let mut inner = self.booster.inner.lock().unwrap();
+                    let mut inner = self.booster.inner.locked();
                     let before = inner.to_put_back.len();
                     inner.to_put_back.retain(|t| !(t.was.is_some() && t.was == current_from(t.item, limits.max_shown, limits.hide_beyond)));
                     if inner.to_put_back.len() != before {

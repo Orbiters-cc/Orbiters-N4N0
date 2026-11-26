@@ -332,20 +332,24 @@ fn install_with(bytes: &[u8], options: &Options, progress: &Progress, silent: bo
     let staging = dir.join(STAGING);
     let backup = dir.join(BACKUP);
     // What a swap that was cut left, before anything else is looked at.
-    let left = crate::swap::left_programs(dir);
+    let left = crate::swap::left_programs(dir)?;
     if !left.is_empty() {
         close_app(dir, &own_programs(dir, left.iter().map(String::as_str)), progress, silent)?;
     }
     crate::swap::recover(dir)?;
-    let previous = InstallRecord::read(dir);
+    // A record there that cannot be read now is not "no install" (W1-1): that would take this app's files for the person's.
+    let previous = InstallRecord::load(dir).map_err(|e| crate::swap::unreadable(&dir.join(RECORD_FILE), e))?;
     // Nothing is changed when a file of the payload would replace one of the person's, or would be reached through a
     // folder redirected elsewhere.
     let mut taken = collisions(dir, &index, previous.as_ref());
     // The record's own names (PROJECTS-34): without a record of ours, a file there is the person's.
     if previous.is_none() {
         for name in [RECORD_FILE.to_string(), format!("{RECORD_FILE}.tmp"), crate::swap::JOURNAL.to_string()] {
-            if std::fs::symlink_metadata(dir.join(&name)).is_ok() {
-                taken.push(name);
+            let file = dir.join(&name);
+            match std::fs::symlink_metadata(&file) {
+                Ok(_) => taken.push(name),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(crate::swap::unreadable(&file, e)),
             }
         }
     }
@@ -454,7 +458,7 @@ fn integrate(dir: &Path, record: &InstallRecord, previous: Option<&InstallRecord
 
 /// Updates the install in `dir` to the payload, keeping its options and channel.
 pub fn update(bytes: &[u8], dir: &Path, progress: &Progress, silent: bool) -> anyhow::Result<InstallRecord> {
-    let record = InstallRecord::read(dir).with_context(|| tr!("Orbiters - N4N0 is not installed in {folder}.", folder = dir.display()))?;
+    let record = InstallRecord::load(dir).map_err(|e| crate::swap::unreadable(&dir.join(RECORD_FILE), e))?.with_context(|| tr!("Orbiters - N4N0 is not installed in {folder}.", folder = dir.display()))?;
     let options = Options {
         dir: dir.to_path_buf(),
         desktop_shortcut: record.desktop_shortcut,
@@ -463,7 +467,7 @@ pub fn update(bytes: &[u8], dir: &Path, progress: &Progress, silent: bool) -> an
         channel: record.channel,
     };
     install(bytes, &options, progress, silent, false)?;
-    InstallRecord::read(dir).with_context(|| tr("The install record is missing after the update."))
+    InstallRecord::load(dir).map_err(|e| crate::swap::unreadable(&dir.join(RECORD_FILE), e))?.with_context(|| tr("The install record is missing after the update."))
 }
 
 /// How long an uninstall waits for SteamVR to be closed, for a value still owed to it.
@@ -473,13 +477,13 @@ const BOOSTER_PATIENCE: Duration = Duration::from_secs(120);
 /// folder once empty. `remove_data` also removes its settings, caches and speech models; the person's sessions are
 /// never touched.
 pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: bool) -> anyhow::Result<()> {
-    let record = InstallRecord::read(dir).with_context(|| tr!("Orbiters - N4N0 is not installed in {folder}.", folder = dir.display()))?;
+    let record = InstallRecord::load(dir).map_err(|e| crate::swap::unreadable(&dir.join(RECORD_FILE), e))?.with_context(|| tr!("Orbiters - N4N0 is not installed in {folder}.", folder = dir.display()))?;
     progress.set(0.05, tr("Closing Orbiters - N4N0…"));
     close_app(dir, &own_programs(dir, record.files.iter().map(String::as_str)), progress, silent)?;
     // An update that was cut: what its journal names goes with the rest, whichever version it was.
-    let _ = crate::swap::recover(dir);
+    crate::swap::recover(dir)?;
+    let record = InstallRecord::load(dir).map_err(|e| crate::swap::unreadable(&dir.join(RECORD_FILE), e))?.with_context(|| tr!("Orbiters - N4N0 is not installed in {folder}.", folder = dir.display()))?;
     system::cancel_recovery();
-    let record = InstallRecord::read(dir).unwrap_or(record);
 
     finish_booster(progress, silent);
 
@@ -917,12 +921,35 @@ fn retrying<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T>
 }
 
 pub(crate) fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    before_move();
+    retrying(|| std::fs::rename(from, to))
+}
+
+/// Publish a transaction marker, waiting for the move to reach disk.
+pub(crate) fn rename_marker(from: &Path, to: &Path, replace: bool) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
+    let wide = |path: &Path| path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
+    let (from, to) = (wide(from), wide(to));
+    let mut flags = MOVEFILE_WRITE_THROUGH;
+    if replace {
+        flags |= MOVEFILE_REPLACE_EXISTING;
+    }
+    before_move();
+    retrying(|| {
+        // SAFETY: both buffers are NUL-terminated and live through the call.
+        unsafe { MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), flags) }
+            .map_err(|e| std::io::Error::from_raw_os_error(e.code().0 & 0xffff))
+    })
+}
+
+fn before_move() {
     #[cfg(test)]
     CUT.with(|cut| match cut.get() {
         Some(0) => std::panic::panic_any(Cut),
         left => cut.set(left.map(|n| n - 1)),
     });
-    retrying(|| std::fs::rename(from, to))
 }
 
 pub(crate) fn remove_file(path: &Path) -> std::io::Result<()> {
@@ -1142,6 +1169,50 @@ pub(crate) mod tests {
         assert!(said.contains(RECORD_FILE), "{said}");
         assert_eq!(std::fs::read(dir.join(RECORD_FILE)).unwrap(), b"the person's");
         remove_tree(&dir);
+    }
+
+    /// W1-3: a first install cut before its record is in place (at its journal's publication, at a file's move, during the
+    /// record's own write) is installed by the next run of the setup in that folder, never refused as files of the person's;
+    /// a journal's name held by a file of the person's still stops a first install.
+    #[test]
+    fn a_cut_first_install_installs_on_the_next_run() {
+        struct Quiet;
+        impl Surroundings for Quiet {
+            fn integrate(&self, _: &Path, _: &InstallRecord, _: Option<&InstallRecord>, _: u64, _: bool) -> Vec<String> {
+                vec![]
+            }
+            fn swapping(&self, _: &Path, _: bool) {}
+        }
+        let source = scratch("first-cut-source");
+        std::fs::write(source.join(APP_EXE), b"app").unwrap();
+        let packed = source.join("payload.bin");
+        payload::pack("1.0.0", &[(APP_EXE.to_string(), source.join(APP_EXE))], &packed).unwrap();
+        let bytes = std::fs::read(&packed).unwrap();
+        let tmp = format!("{RECORD_FILE}.tmp");
+        for cut in [0, 2] {
+            let dir = scratch("first-cut");
+            let options = Options { dir: dir.clone(), desktop_shortcut: false, start_with_windows: false, start_with_steamvr: false, channel: STABLE.into() };
+            let run = || install_with(&bytes, &options, &Progress::default(), true, true, &Quiet);
+            assert!(cut_after(Some(cut), run).is_none(), "cut at move {cut}");
+            let draft = if cut == 0 { crate::swap::JOURNAL } else { &tmp };
+            assert!(dir.join(STAGING).join(draft).is_file());
+            assert_eq!(dir.join(crate::swap::JOURNAL).is_file(), cut != 0);
+            assert!(!dir.join(&tmp).exists() && !dir.join(RECORD_FILE).exists());
+            // Model a kill during the write as well as one after syncing the draft.
+            std::fs::write(dir.join(STAGING).join(draft), b"{").unwrap();
+            run().unwrap_or_else(|e| panic!("cut at move {cut}: {e:#}"));
+            assert_eq!(InstallRecord::read(&dir).unwrap().version, "1.0.0");
+            assert_eq!(std::fs::read(dir.join(APP_EXE)).unwrap(), b"app");
+            assert!(!dir.join(crate::swap::JOURNAL).exists() && !dir.join(&tmp).exists());
+            remove_tree(&dir);
+        }
+        let dir = scratch("first-persons-journal");
+        std::fs::write(dir.join(crate::swap::JOURNAL), b"").unwrap();
+        let options = Options { dir: dir.clone(), desktop_shortcut: false, start_with_windows: false, start_with_steamvr: false, channel: STABLE.into() };
+        let said = format!("{:#}", install_with(&bytes, &options, &Progress::default(), true, true, &Quiet).unwrap_err());
+        assert!(said.contains(crate::swap::JOURNAL) && !dir.join(APP_EXE).exists(), "{said}");
+        remove_tree(&dir);
+        remove_tree(&source);
     }
 
     /// PROJECTS-15: a program of someone else's running from the install folder (a folder in it) is neither waited for

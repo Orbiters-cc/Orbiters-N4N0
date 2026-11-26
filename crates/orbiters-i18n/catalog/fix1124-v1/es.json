@@ -1,0 +1,4 @@
+{
+  "{path} cannot be read right now ({why}). Try again in a moment.": "Ahora no se puede leer {path} ({why}). Inténtalo de nuevo en un momento.",
+  "{name} was added before the change finished. Its files are kept in {path}.": "{name} se añadió antes de que terminara el cambio. Sus archivos se conservan en {path}."
+}

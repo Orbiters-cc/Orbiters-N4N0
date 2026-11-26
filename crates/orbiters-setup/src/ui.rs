@@ -94,6 +94,8 @@ struct Setup {
     dir: PathBuf,
     /// The install already there (it is updated where it is).
     existing: Option<InstallRecord>,
+    /// Whether the folder held one version whole when the task failed: only then is it offered to open.
+    whole_after_failure: bool,
     desktop_shortcut: bool,
     start_with_windows: bool,
     start_with_steamvr: bool,
@@ -148,6 +150,7 @@ impl Setup {
             start_with_steamvr: existing.as_ref().is_some_and(|r| r.start_with_steamvr),
             dir,
             existing,
+            whole_after_failure: false,
             launch: true,
             remove_data: false,
             picker: None,
@@ -243,6 +246,7 @@ impl Setup {
                 Some(Err(e)) => {
                     self.task = None;
                     self.code.store(1, Ordering::Relaxed);
+                    self.whole_after_failure = crate::swap::whole(&self.dir);
                     self.error = Some(e);
                     self.go(Page::Failed, now);
                 }
@@ -616,7 +620,8 @@ impl Setup {
             });
         });
         let retry = self.job.clone();
-        let reopen = self.args.mode == Mode::Update && self.existing.is_some();
+        // Only a version whole is offered to open (W1-4): not the old program beside new files after a put-back that could not end.
+        let reopen = self.args.mode == Mode::Update && self.whole_after_failure;
         let (mut again, mut close, mut open) = (false, false, false);
         footer(ui, visit, since, 2, r, |ui, row| {
             let mut right = row.right();

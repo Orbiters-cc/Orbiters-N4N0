@@ -1,0 +1,4 @@
+{
+  "{path} cannot be read right now ({why}). Try again in a moment.": "今は {path} を読み込めません（{why}）。少ししてからもう一度お試しください。",
+  "{name} was added before the change finished. Its files are kept in {path}.": "変更が完了する前に {name} が追加されました。ファイルは {path} に保存されています。"
+}

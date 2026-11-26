@@ -1074,6 +1074,9 @@ impl Machine for RealMachine {
 
     #[cfg(target_os = "linux")]
     fn running_profiles(&self) -> Vec<(u32, bool, Option<u32>)> {
+        if orbiters_core::paths::roots().is_some() {
+            return Vec::new();
+        }
         let vrchats = super::linux_vrchat::running();
         let alive: Vec<(u32, u64)> = vrchats.iter().map(|p| (p.pid, p.started_s())).collect();
         let mut lines = self.desktop.lock().unwrap();
@@ -1090,6 +1093,9 @@ impl Machine for RealMachine {
 
     #[cfg(not(target_os = "linux"))]
     fn running_profiles(&self) -> Vec<(u32, bool, Option<u32>)> {
+        if orbiters_core::paths::roots().is_some() {
+            return Vec::new();
+        }
         // Names and start times only (no process is opened for them); the command line is read for VRChat's processes
         // alone: once each, and again a few times while Windows would not give it.
         let mut system = sysinfo::System::new();

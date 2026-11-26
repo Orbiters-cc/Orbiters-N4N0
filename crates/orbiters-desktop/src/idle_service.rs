@@ -80,14 +80,17 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 }
 
 fn require_idle_host() -> anyhow::Result<()> {
-    let names = ["vrchat.exe", "vrserver.exe", "vrserver"];
-    let mut system = sysinfo::System::new();
-    system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
+    #[cfg(windows)]
+    let processes = orbiters_booster::programs::scan().into_iter().map(|p| p.name);
+    #[cfg(target_os = "linux")]
+    let processes = orbiters_core::processes::all().into_iter().map(|p| p.name);
+    #[cfg(not(any(windows, target_os = "linux")))]
+    let processes = std::iter::empty::<String>();
+    let names = ["vrchat.exe", "vrchat", "vrserver.exe", "vrserver"];
     anyhow::ensure!(
-        !system.processes().values().any(|p| names.contains(&p.name().to_string_lossy().to_lowercase().as_str())),
+        !processes.into_iter().any(|p| names.iter().any(|name| p.eq_ignore_ascii_case(name))),
         "VRChat or SteamVR runs: not an idle computer"
     );
-    drop(system);
     Ok(())
 }
 

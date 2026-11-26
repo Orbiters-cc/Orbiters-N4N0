@@ -351,25 +351,38 @@ fn one_at_a_time(running: &'static std::sync::atomic::AtomicBool, name: &str, wo
 /// The SHA-256 of each screenshot (computed once, then kept in the index): Orbiters knows the pictures this member
 /// shared by it.
 pub fn hashes(paths: Vec<PathBuf>) -> HashMap<PathBuf, String> {
-    let index_file = visited::shot_index_file();
-    let _one = shot_index_lock();
-    let mut index = visited::ShotIndex::load(&index_file);
-    if index.hash(&paths) {
-        let _ = index.save(&index_file);
-    }
+    let index = hashed_index(&visited::shot_index_file(), &paths);
     // Layers without a world of their own are shared too.
     paths.into_iter().filter_map(|p| index.hashes_of(&p).0.map(str::to_owned).map(|hash| (p, hash))).collect()
+}
+
+/// The screenshot index at `file` with the hashes of `paths` it lacked, read with the index's lock let go (DPG-27): the
+/// lock is held to see what is missing, and again to put what was read into the index as it is by then and save it.
+/// Held over the reading, it kept the folder scan, Visited worlds and Photos & captures waiting behind every byte of
+/// every picture of a world.
+fn hashed_index(file: &Path, paths: &[PathBuf]) -> visited::ShotIndex {
+    let todo = {
+        let _one = shot_index_lock();
+        let index = visited::ShotIndex::load(file);
+        let todo = index.unhashed(paths);
+        if todo.is_empty() {
+            return index;
+        }
+        todo
+    };
+    let hashed = visited::hash_files(todo);
+    let _one = shot_index_lock();
+    let mut index = visited::ShotIndex::load(file);
+    if index.put_hashes(hashed) {
+        let _ = index.save(file);
+    }
+    index
 }
 
 /// Every hash Orbiters may know each screenshot by: the file's own (what was sent before PRIV-8, and a gallery share's
 /// `sourceKey`) and its copy without metadata's (what is sent now): the Map explorer recognises a picture by either.
 pub fn map_hashes(paths: Vec<PathBuf>) -> HashMap<PathBuf, Vec<String>> {
-    let index_file = visited::shot_index_file();
-    let _one = shot_index_lock();
-    let mut index = visited::ShotIndex::load(&index_file);
-    if index.hash(&paths) {
-        let _ = index.save(&index_file);
-    }
+    let index = hashed_index(&visited::shot_index_file(), &paths);
     paths
         .into_iter()
         .map(|p| {
@@ -1628,5 +1641,58 @@ pub(crate) mod tests {
             });
             out.textures_delta.clear();
         }
+    }
+
+    /// DPG-27: hashing a world's 24 pictures (4 MB each) held the screenshot index's lock over every byte read: the
+    /// folder scan, Visited worlds and Photos & captures, which take the same lock, waited until the last one was read.
+    /// Now the lock is let go while the files are read, and each hash still lands in the index and its file.
+    #[test]
+    fn hashing_a_world_s_pictures_lets_the_index_go_while_it_reads() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = std::env::temp_dir().join(format!("orbiters-hash-lock-{}", uuid::Uuid::new_v4()));
+        let pictures = dir.join("pictures");
+        std::fs::create_dir_all(&pictures).unwrap();
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let noise = image::RgbaImage::from_fn(1024, 1024, |_, _| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            image::Rgba((seed as u32).to_le_bytes())
+        });
+        let mut png = std::io::Cursor::new(Vec::new());
+        noise.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let paths: Vec<PathBuf> = (0..24).map(|i| pictures.join(format!("VRChat_2026-11-26_10-00-{i:02}.000_1024x1024.png"))).collect();
+        for p in &paths {
+            std::fs::write(p, png.get_ref()).unwrap();
+        }
+        let file = dir.join("screenshots.json");
+        let mut index = visited::ShotIndex::default();
+        assert!(index.refresh(std::slice::from_ref(&pictures)));
+        index.save(&file).unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        let (f, p, d) = (file.clone(), paths.clone(), done.clone());
+        let hasher = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let index = hashed_index(&f, &p);
+            d.store(true, Ordering::Release);
+            (index, started.elapsed())
+        });
+        let (mut longest, mut looks) = (std::time::Duration::ZERO, 0);
+        while !done.load(Ordering::Acquire) {
+            let asked = std::time::Instant::now();
+            drop(shot_index_lock());
+            longest = longest.max(asked.elapsed());
+            looks += 1;
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let (index, took) = hasher.join().unwrap();
+        println!("DPG-27, 24 pictures of 4 MB hashed in {:.0} ms: another job waited for the index at most {:.1} ms ({looks} looks)", took.as_secs_f64() * 1e3, longest.as_secs_f64() * 1e3);
+        let saved = visited::ShotIndex::load(&file);
+        for p in &paths {
+            assert!(index.hashes_of(p).0.is_some() && index.hashes_of(p).1.is_some(), "both hashes of {}", p.display());
+            assert_eq!(saved.hashes_of(p), index.hashes_of(p), "and saved");
+        }
+        assert!(longest * 4 < took, "the index was held for {longest:?} of the {took:?} the reading took");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

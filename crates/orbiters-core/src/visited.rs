@@ -698,22 +698,74 @@ impl ShotIndex {
 
     /// Hashes the given screenshots that have no hash yet; returns whether any was added.
     pub fn hash(&mut self, paths: &[PathBuf]) -> bool {
+        let hashed = hash_files(self.unhashed(paths));
+        self.put_hashes(hashed)
+    }
+
+    /// Which of the given screenshots lack a hash, as the index knows them: what [`hash_files`] reads, with nothing of
+    /// the index held meanwhile (DPG-27: the index's lock was held over reading every file whole, so the folder scan,
+    /// Visited worlds and Photos & captures waited behind gigabytes of reads).
+    pub fn unhashed(&self, paths: &[PathBuf]) -> Vec<Unhashed> {
+        paths
+            .iter()
+            .filter_map(|p| {
+                let e = self.files.get(p)?;
+                let (own, clean) = (e.sha256.is_none(), e.clean_sha256.is_none());
+                (own || clean).then(|| Unhashed { path: p.clone(), size: e.size, modified: e.modified, own, clean })
+            })
+            .collect()
+    }
+
+    /// Puts in the hashes [`hash_files`] read, of each screenshot the index still has as the same file (its size and
+    /// date as when it was asked: one changed meanwhile is read again by the folder scan, with no hash); returns
+    /// whether any was added.
+    pub fn put_hashes(&mut self, hashed: Vec<Hashed>) -> bool {
         let mut changed = false;
-        for p in paths {
-            let Some(e) = self.files.get_mut(p) else { continue };
-            let (own, clean) = match (e.sha256.is_none(), e.clean_sha256.is_none()) {
-                (false, false) => continue,
-                // Both from one reading: of one and the same file.
-                (true, true) => crate::png_meta::both_sha256(p),
-                (true, false) => (sha256_file(p).ok(), None),
-                (false, true) => (None, crate::png_meta::clean_sha256(p).ok()),
-            };
+        for h in hashed {
+            let Some(e) = self.files.get_mut(&h.path).filter(|e| e.size == h.size && e.modified == h.modified) else { continue };
+            let own = h.own.filter(|_| e.sha256.is_none());
+            let clean = h.clean.filter(|_| e.clean_sha256.is_none());
             changed |= own.is_some() || clean.is_some();
             e.sha256 = e.sha256.take().or(own);
             e.clean_sha256 = e.clean_sha256.take().or(clean);
         }
         changed
     }
+}
+
+/// A screenshot whose hashes the index lacks ([`ShotIndex::unhashed`]): its file as the index knew it, and which hash.
+#[derive(Clone, Debug)]
+pub struct Unhashed {
+    path: PathBuf,
+    size: u64,
+    modified: u64,
+    own: bool,
+    clean: bool,
+}
+
+/// What [`hash_files`] read of an [`Unhashed`] screenshot.
+#[derive(Clone, Debug)]
+pub struct Hashed {
+    path: PathBuf,
+    size: u64,
+    modified: u64,
+    own: Option<String>,
+    clean: Option<String>,
+}
+
+/// The hashes each screenshot lacked, each file read once (both from one reading when both are wanted).
+pub fn hash_files(todo: Vec<Unhashed>) -> Vec<Hashed> {
+    todo.into_iter()
+        .map(|u| {
+            let (own, clean) = match (u.own, u.clean) {
+                (true, true) => crate::png_meta::both_sha256(&u.path),
+                (true, false) => (sha256_file(&u.path).ok(), None),
+                (false, true) => (None, crate::png_meta::clean_sha256(&u.path).ok()),
+                (false, false) => (None, None),
+            };
+            Hashed { path: u.path, size: u.size, modified: u.modified, own, clean }
+        })
+        .collect()
 }
 
 /// SHA-256 of a file as lowercase hex.
@@ -832,6 +884,35 @@ mod tests {
         assert!(index.hash(std::slice::from_ref(first)));
         assert_eq!(index.hashes_of(first), (Some("kept"), crate::png_meta::clean_sha256(first).ok().as_deref()));
         assert!(!index.hash(&paths[..2]), "both are known");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// DPG-27: hashes read with the index let go are put back only on the file they were read from: a picture the folder
+    /// scan found changed meanwhile (another size or date) keeps none, to be read again; one hashed meanwhile by another
+    /// job keeps its own.
+    #[test]
+    fn hashes_read_outside_the_index_go_only_to_the_same_file() {
+        let dir = std::env::temp_dir().join(format!("orbiters-hashes-outside-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = png_with_text("Description", "who took it");
+        let mut index = ShotIndex::default();
+        let paths: Vec<PathBuf> = ["a.png", "b.png", "c.png"].iter().map(|n| dir.join(n)).collect();
+        for p in &paths {
+            std::fs::write(p, &png).unwrap();
+            index.files.insert(p.clone(), ShotEntry { size: png.len() as u64, modified: 1, info: ShotInfo::default(), sha256: None, clean_sha256: None });
+        }
+        let todo = index.unhashed(&paths);
+        assert_eq!(todo.len(), 3);
+        let hashed = hash_files(todo);
+        // Meanwhile: b was written again (the scan saw it), c was hashed by another job.
+        index.files.get_mut(&paths[1]).unwrap().modified = 2;
+        index.files.get_mut(&paths[2]).unwrap().sha256 = Some("other job".into());
+        assert!(index.put_hashes(hashed));
+        assert_eq!(index.hashes_of(&paths[0]).0.map(str::to_owned), sha256_file(&paths[0]).ok());
+        assert_eq!(index.hashes_of(&paths[1]), (None, None), "changed meanwhile: read again later");
+        assert_eq!(index.hashes_of(&paths[2]).0, Some("other job"));
+        assert!(index.hashes_of(&paths[2]).1.is_some(), "the hash it lacked is put in");
+        assert!(index.unhashed(&paths[..1]).is_empty() && index.unhashed(&paths).len() == 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

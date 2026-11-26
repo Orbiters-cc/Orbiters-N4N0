@@ -43,10 +43,11 @@ pub(crate) struct Rest {
 
 impl Rest {
     /// Sleeps until what the loop watches changed, something woke it, or `most` passed (never, without one). What came while
-    /// it worked is not missed: the wait is over at once.
-    pub(crate) fn wait(&self, most: Option<Duration>) {
-        self.mailbox.wait(most);
+    /// it worked is not missed: the wait is over at once. Returns false on a timeout.
+    pub(crate) fn wait(&self, most: Option<Duration>) -> bool {
+        let notified = self.mailbox.wait(most);
         self.turns.fetch_add(1, Ordering::Relaxed);
+        notified
     }
 
     /// Ends the wait under way, or the next one.
@@ -136,32 +137,28 @@ mod tests {
     fn a_rest_ends_for_what_it_watches_and_nothing_else() {
         let ctl = Controller::new(Settings::default());
         let rest = ctl.rest("test", |s| (s.vrchat.running, Part::of(&s.vrchat.world)));
-        let waited = |most: u64| {
-            let began = Instant::now();
-            rest.wait(Some(Duration::from_millis(most)));
-            began.elapsed()
-        };
-        assert!(waited(30) >= Duration::from_millis(30), "nothing happened: its time");
+        let notified = || rest.wait(Some(Duration::ZERO));
+        assert!(!notified(), "nothing happened");
         // Something else changed, then what it watches.
         ctl.update(|s| s.n4n0.afk = true);
-        assert!(waited(30) >= Duration::from_millis(30));
+        assert!(!notified());
         ctl.update(|s| s.vrchat.running = true);
-        assert!(waited(5000) < Duration::from_millis(2500));
+        assert!(notified());
         // A part written to with what it held is the same part.
         ctl.update(|s| s.vrchat.world.players.clear());
-        assert!(waited(30) >= Duration::from_millis(30));
+        assert!(!notified());
         ctl.update(|s| s.vrchat.world.in_world = true);
-        assert!(waited(5000) < Duration::from_millis(2500));
+        assert!(notified());
         // Woken while it worked: the next wait is over at once, and only that one.
         rest.wake();
-        assert!(waited(5000) < Duration::from_millis(2500));
-        assert!(waited(30) >= Duration::from_millis(30));
+        assert!(notified());
+        assert!(!notified());
         ctl.rests.wake_all();
-        assert!(waited(5000) < Duration::from_millis(2500));
+        assert!(notified());
         ctl.rests.wake("another");
-        assert!(waited(30) >= Duration::from_millis(30));
+        assert!(!notified());
         ctl.rests.wake("test");
-        assert!(waited(5000) < Duration::from_millis(2500));
+        assert!(notified());
         assert_eq!(ctl.wake_ups()["test"], 10);
         // Gone with its loop.
         drop(rest);
@@ -231,9 +228,7 @@ mod tests {
         let window = Mailbox::new(true);
         ctl.subscribe(window.clone());
         assert!(ctl.shown());
-        let began = Instant::now();
-        rest.wait(Some(Duration::from_secs(5)));
-        assert!(began.elapsed() < Duration::from_millis(2500), "a window that links wakes every loop");
+        assert!(rest.wait(Some(Duration::ZERO)), "a window that links wakes every loop");
         window.close();
         assert!(!ctl.shown());
     }

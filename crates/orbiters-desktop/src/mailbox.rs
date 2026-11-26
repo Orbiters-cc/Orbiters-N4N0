@@ -115,13 +115,13 @@ impl Mailbox {
     }
 
     /// Waits for mail, a nudge or `most` (for ever, without one), and drops what came: for a reader that looks at the state
-    /// itself.
-    pub fn wait(&self, most: Option<std::time::Duration>) {
+    /// itself. Returns false on a timeout.
+    pub fn wait(&self, most: Option<std::time::Duration>) -> bool {
         let until = most.map(|most| std::time::Instant::now() + most);
         let mut state = self.state.lock().unwrap();
         while state.snapshot.is_none() && state.messages.is_empty() && !state.nudged && !state.closed {
             state = match until.map(|until| until.saturating_duration_since(std::time::Instant::now())) {
-                Some(std::time::Duration::ZERO) => return,
+                Some(std::time::Duration::ZERO) => return false,
                 Some(left) => self.ready.wait_timeout(state, left).unwrap().0,
                 None => self.ready.wait(state).unwrap(),
             };
@@ -129,6 +129,7 @@ impl Mailbox {
         state.nudged = false;
         state.snapshot = None;
         state.messages.clear();
+        true
     }
 
     /// Ends the [`Mailbox::wait`] under way, or the next one.

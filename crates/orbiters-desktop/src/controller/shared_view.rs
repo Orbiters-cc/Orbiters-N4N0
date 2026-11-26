@@ -483,8 +483,8 @@ impl Controller {
     /// Starts the shares presence's thread (it does nothing while N4N0 is off, signed out or out of an instance).
     pub(super) fn start_shared_view(self: &Shared) {
         let ctl = self.clone();
+        let rest = self.shared_rest();
         let _ = std::thread::Builder::new().name("shared-view".into()).spawn(move || {
-            let rest = ctl.rest("shared-view", |s| (Part::of(&s.settings), Part::of(&s.account), s.vrchat.running, Part::of(&s.vrchat.world)));
             while !ctl.quitting.load(std::sync::atomic::Ordering::Relaxed) {
                 ctl.shared_tick();
                 rest.wait(ctl.shared_rests());
@@ -499,6 +499,14 @@ impl Controller {
     }
 
     /// Whether the calls' event stream is wanted for shares (open even with Calls off).
+    fn shared_rest(&self) -> std::sync::Arc<super::rest::Rest> {
+        self.rest("shared-view", |s| {
+            let view = &s.shared_view;
+            let active = view.offer.is_some() || view.outgoing.is_some() || view.watching.is_some() || !view.targets.is_empty();
+            (Part::of(&s.settings), Part::of(&s.account), s.vrchat.running, Part::of(&s.vrchat.world), active)
+        })
+    }
+
     pub(super) fn shared_view_wants_stream(&self) -> bool {
         self.shared_view.lock().unwrap().present
     }
@@ -826,6 +834,18 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_offer_wakes_the_share_loop_outside_vrchat() {
+        let ctl = crate::controller::Controller::new(orbiters_core::settings::Settings::default());
+        let waiting = ctl.shared_rest();
+        assert!(ctl.shared_rests().is_none());
+        assert!(!waiting.wait(Some(Duration::ZERO)));
+        ctl.shared_view_event("share_offer", &offer_event(SHARE));
+        assert!(ctl.view().shared_view.offer.is_some());
+        assert!(waiting.wait(Some(Duration::ZERO)));
+        assert!(ctl.shared_rests().is_some(), "while an offer can expire");
+    }
 
     /// Verify4: the shares let go of an account on the same turn it leaves (a friend's offer on screen goes), and Orbiters
     /// hears the presence withdrawn with the credential of the identity that left, also when N4N0 is switched off in an

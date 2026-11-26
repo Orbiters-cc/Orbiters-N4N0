@@ -82,14 +82,6 @@ struct SignIn {
 }
 
 impl AccountRuntime {
-    /// A sign-in ended without one, and `before` shows again. The check under way then was dropped with it: the account is read
-    /// and checked again, or "Checking" (and "Connecting", without the member's id) would stay (verify5-r21 m7).
-    fn put_back(&mut self, before: &AccountState) {
-        if matches!(before, AccountState::Checking { .. }) {
-            self.read = self.read.map(|(server, _)| (server, Some(SystemTime::UNIX_EPOCH)));
-        }
-    }
-
     /// Whose all this is; `None` while nothing was read at all.
     pub(super) fn identity(&self) -> Option<super::identity::Identity> {
         use super::identity::Identity;
@@ -231,6 +223,15 @@ impl Controller {
         due = sooner(due, self.assistant_access_wait());
         // (Never in a row: one due but still being asked is looked at again at the old pace.)
         due.map(|due| due.max(LOOK_APART))
+    }
+
+    /// A sign-in ended while it was replacing a saved account's check.
+    /// Check the file again even when its contents stayed the same.
+    fn check_restored_account(&self, rt: &mut AccountRuntime, before: &AccountState) {
+        if matches!(before, AccountState::Checking { .. }) {
+            rt.read = rt.read.map(|(server, _)| (server, Some(SystemTime::UNIX_EPOCH)));
+            self.rests.wake("account");
+        }
     }
 
     fn account_tick(self: &Shared) {
@@ -539,7 +540,7 @@ impl Controller {
                 // Unless a newer sign-in or a sign-out came meanwhile, the account shows what it did before.
                 let mut rt = self.account_runtime.lock().unwrap();
                 if rt.generation == generation {
-                    rt.put_back(&before);
+                    self.check_restored_account(&mut rt, &before);
                     drop(rt);
                     self.update(|s| s.account.state = before);
                 }
@@ -625,7 +626,7 @@ impl Controller {
                 }
                 Exchange::Ended(message) => {
                     let before = rt.signing_in.take().map(|s| s.before.clone());
-                    before.iter().for_each(|b| rt.put_back(b));
+                    before.iter().for_each(|b| self.check_restored_account(&mut rt, b));
                     drop(rt);
                     self.update_if(|s| {
                         let current = self.account_generation.load(std::sync::atomic::Ordering::SeqCst) == generation;
@@ -643,7 +644,7 @@ impl Controller {
             let mut rt = self.account_runtime.lock().unwrap();
             if rt.signing_in.as_ref().is_some_and(|s| s.generation == generation) {
                 let before = rt.signing_in.take().map(|s| s.before.clone());
-                before.iter().for_each(|b| rt.put_back(b));
+                before.iter().for_each(|b| self.check_restored_account(&mut rt, b));
                 drop(rt);
                 self.update(|s| {
                     s.account.state = before.unwrap_or(AccountState::SignedOut);
@@ -669,7 +670,7 @@ impl Controller {
             rt.generation += 1;
             self.account_generation.store(rt.generation, std::sync::atomic::Ordering::SeqCst);
             let before = rt.signing_in.take().map(|s| s.before.clone()).unwrap_or_else(|| rt.resting());
-            rt.put_back(&before);
+            self.check_restored_account(&mut rt, &before);
             before
         };
         self.update(|s| {
@@ -1065,7 +1066,10 @@ mod tests {
         });
         assert_eq!(c.view().account.state, AccountState::SigningIn);
         let modified = Some(SystemTime::UNIX_EPOCH + Duration::from_secs(9));
+        let waiting = c.rest("account", |_| ());
+        assert!(!waiting.wait(Some(Duration::ZERO)));
         c.cancel_sign_in();
+        assert!(waiting.wait(Some(Duration::ZERO)), "reread even without a file change");
         assert!(matches!(c.view().account.state, AccountState::Checking { .. }), "{:?}", c.view().account.state);
         assert!(c.account_runtime.lock().unwrap().read != Some((Server::Production, modified)), "read again at the next look");
         c.read_account_with(Server::Production, modified, false, move || Ok(Some(bare)), |_| Ok(Check::Valid(member("fake-a", "1"))));

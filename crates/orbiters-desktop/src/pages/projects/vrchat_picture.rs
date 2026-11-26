@@ -5,6 +5,7 @@
 //! its outcome comes as a toast. Which items are the member's is asked once per account, a batch at a time, for the
 //! thumbnails drawn. Anyone else's thumbnails, and every thumbnail while signed out of VRChat, stay as they are.
 
+use orbiters_core::locks::*;
 use orbiters_i18n::tr;
 use super::art;
 use super::state::{Poke, State};
@@ -123,7 +124,7 @@ pub(super) fn poll(ctx: &egui::Context, cx: &Cx, state: &mut State) {
                     if u.outcome == Some(Ok(())) {
                         let id = u.id.clone();
                         // Invalidate both queued results and disk writes from pre-upload requests.
-                        *state.thumb_versions.lock().unwrap().entry(id.clone()).or_default() += 1;
+                        *state.thumb_versions.locked().entry(id.clone()).or_default() += 1;
                         state.thumb_ids.insert(id.clone());
                         state.thumb_fresh.insert(id.clone());
                         p.shown = Job::spawn(ctx, move || {

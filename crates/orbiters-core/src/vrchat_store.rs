@@ -17,6 +17,7 @@
 //!
 //! Nothing here talks to the network.
 
+use crate::locks::*;
 use crate::launcher::{Friend, Game, LauncherState, Source, VerifiedFor};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::de::DeserializeOwned;
@@ -500,7 +501,7 @@ impl Pictures {
         Self { dir, mark: None, cap: Mutex::new(cap), touched: Mutex::default(), measured: Mutex::default() }
     }
     pub fn set_cap(&self, cap: u64) {
-        *self.cap.lock().unwrap_or_else(|e| e.into_inner()) = cap;
+        *self.cap.locked() = cap;
     }
     fn writable(&self) -> bool {
         self.mark.as_ref().is_none_or(|(root, account)| there(root, account))
@@ -592,9 +593,9 @@ impl Pictures {
                 let _ = crate::write_atomic(&of, key.as_bytes());
             }
         }
-        self.touched.lock().unwrap_or_else(|e| e.into_inner()).insert(path);
+        self.touched.locked().insert(path);
         let due = {
-            let mut measured = self.measured.lock().unwrap_or_else(|e| e.into_inner());
+            let mut measured = self.measured.locked();
             let due = measured.is_none_or(|at| at.elapsed() >= MEASURE_EVERY);
             if due {
                 *measured = Some(Instant::now());
@@ -609,7 +610,7 @@ impl Pictures {
 
     /// One shown now is used: it goes last (once a run a file).
     fn touch(&self, path: &Path) {
-        if self.touched.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_path_buf()) {
+        if self.touched.locked().insert(path.to_path_buf()) {
             if let Ok(file) = std::fs::File::options().write(true).open(path) {
                 let _ = file.set_modified(SystemTime::now());
             }
@@ -619,7 +620,7 @@ impl Pictures {
     /// Past the size allowed: what VRChat sent goes first (the small copies are what is shown), then the small copies, each
     /// the ones used longest ago, until a quarter is free; and what an interrupted write left over an hour ago.
     pub fn evict(&self) {
-        let cap = *self.cap.lock().unwrap_or_else(|e| e.into_inner());
+        let cap = *self.cap.locked();
         let mut files: Vec<(bool, SystemTime, u64, PathBuf)> = Vec::new();
         for folder in folders(&self.dir) {
             let people = folder.file_name().is_some_and(|n| n == "people");
@@ -649,7 +650,7 @@ impl Pictures {
             }
             if std::fs::remove_file(&path).is_ok() {
                 total -= size;
-                self.touched.lock().unwrap_or_else(|e| e.into_inner()).remove(&path);
+                self.touched.locked().remove(&path);
             }
         }
     }

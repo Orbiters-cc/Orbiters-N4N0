@@ -6,6 +6,7 @@
 //! Nothing is drawn while nothing moves. The picture gets smaller, and later larger again, by what the last ones took. Everything of it,
 //! on the GPU and in memory, goes with its thread when the view closes.
 
+use orbiters_core::locks::*;
 use super::super::worlds::catalog::{self, Capture};
 use super::super::worlds::pacing::DUTY;
 use super::super::worlds::render::{self, FaceRenderer};
@@ -139,12 +140,12 @@ impl SheetView {
         let for_thread = shared.clone();
         let spawned = std::thread::Builder::new().name("orbit-sheet-view".into()).spawn(move || {
             if let Err(e) = run(&for_thread, load, turning) {
-                eprintln!("the sheet's 3D view: {e:#}");
-                *for_thread.state.lock().unwrap_or_else(|e| e.into_inner()) = ViewState::Failed(format!("{e:#}"));
+                log_warn!("the sheet's 3D view: {e:#}", e = e);
+                *for_thread.state.locked() = ViewState::Failed(format!("{e:#}"));
             }
         });
         if let Err(e) = spawned {
-            *shared.state.lock().unwrap_or_else(|e| e.into_inner()) = ViewState::Failed(e.to_string());
+            *shared.state.locked() = ViewState::Failed(e.to_string());
         }
         Self { shared }
     }
@@ -156,20 +157,20 @@ impl SheetView {
 
     /// The newest picture, once.
     pub fn take_frame(&self) -> Option<Frame> {
-        self.shared.frame.lock().unwrap_or_else(|e| e.into_inner()).take()
+        self.shared.frame.locked().take()
     }
 
     pub fn state(&self) -> ViewState {
-        self.shared.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.shared.state.locked().clone()
     }
 
     pub fn costs(&self) -> Costs {
-        *self.shared.costs.lock().unwrap_or_else(|e| e.into_inner())
+        *self.shared.costs.locked()
     }
 
     /// A hand took it, or let it go.
     pub fn hold(&self, held: bool) {
-        let mut asked = self.shared.asked.lock().unwrap_or_else(|e| e.into_inner());
+        let mut asked = self.shared.asked.locked();
         if asked.held && !held {
             asked.let_go = Some(Instant::now());
         }
@@ -178,13 +179,13 @@ impl SheetView {
 
     /// The pointer moved this far over it, in the sheet's page's units.
     pub fn turn(&self, dx: f32, dy: f32) {
-        let mut asked = self.shared.asked.lock().unwrap_or_else(|e| e.into_inner());
+        let mut asked = self.shared.asked.locked();
         asked.pose = asked.pose.turned(dx * 0.008, dy * 0.005);
     }
 
     /// The mouse's wheel, in notches: up comes closer.
     pub fn zoom(&self, notches: f32) {
-        let mut asked = self.shared.asked.lock().unwrap_or_else(|e| e.into_inner());
+        let mut asked = self.shared.asked.locked();
         asked.pose = asked.pose.zoomed(notches);
         asked.let_go = Some(Instant::now());
     }
@@ -241,7 +242,7 @@ fn run(shared: &Shared, load: impl FnOnce() -> anyhow::Result<Capture>, turning:
     renderer.load(&capture)?;
     renderer.make_transparent()?;
     {
-        let mut costs = shared.costs.lock().unwrap_or_else(|e| e.into_inner());
+        let mut costs = shared.costs.locked();
         costs.load_ms = started.elapsed().as_secs_f32() * 1000.0;
         costs.splats = capture.gaussians.len();
     }
@@ -255,7 +256,7 @@ fn run(shared: &Shared, load: impl FnOnce() -> anyhow::Result<Capture>, turning:
     while !shared.stop.load(Ordering::Relaxed) {
         // It looks slowly around by itself, unless a hand has it or just had it.
         let pose = {
-            let asked = shared.asked.lock().unwrap_or_else(|e| e.into_inner());
+            let asked = shared.asked.locked();
             let free = !asked.held && asked.let_go.is_none_or(|t| t.elapsed() >= STAYS_AFTER_A_DRAG);
             if turning && free {
                 swaying += last.elapsed().as_secs_f32();
@@ -290,14 +291,14 @@ fn run(shared: &Shared, load: impl FnOnce() -> anyhow::Result<Capture>, turning:
         let ms = began.elapsed().as_secs_f32() * 1000.0;
         smooth_ms = if smooth_ms == 0.0 { ms } else { smooth_ms * 0.8 + ms * 0.2 };
         {
-            let mut costs = shared.costs.lock().unwrap_or_else(|e| e.into_inner());
+            let mut costs = shared.costs.locked();
             costs.frames += 1;
             costs.total_ms += ms;
             costs.longest_ms = costs.longest_ms.max(ms);
             costs.width = w;
         }
-        *shared.frame.lock().unwrap_or_else(|e| e.into_inner()) = Some(Frame { size: [w as usize, h as usize], rgba, plate: Vec::new() });
-        *shared.state.lock().unwrap_or_else(|e| e.into_inner()) = ViewState::Shown;
+        *shared.frame.locked() = Some(Frame { size: [w as usize, h as usize], rgba, plate: Vec::new() });
+        *shared.state.locked() = ViewState::Shown;
         drawn = Some((pose, size));
         // The budget: at most this share of the time on the GPU's side of it, as in VR.
         if smooth_ms > TOO_LONG_MS && size + 1 < SIZES.len() {

@@ -13,6 +13,7 @@
 //! each stage finished goes into a file beside the cache ([`PartialFile`], orbiters_reconstruct::tree_tune::Keep), and
 //! the next preparation of the same reconstruction, in the background or for a share, goes on after it.
 
+use orbiters_core::locks::*;
 use orbiters_core::{contracts::manifest, maps::PreviewFiles, reconstruction, visited::sha256_file};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -225,7 +226,7 @@ impl orbiters_reconstruct::tree_tune::Keep for PartialFile {
         let bytes = std::fs::read(&self.path).ok()?;
         let partial = self.open(&bytes).and_then(orbiters_reconstruct::tree_tune::Partial::from_bytes);
         if partial.is_none() {
-            eprintln!("{} is of another result, or damaged: preparing from the start", self.path.display());
+            log_warn!("{} is of another result, or damaged: preparing from the start", self.path.display());
         }
         partial
     }
@@ -241,7 +242,7 @@ impl orbiters_reconstruct::tree_tune::Keep for PartialFile {
         let digest = Sha256::digest(&out[40..]);
         out[8..40].copy_from_slice(&digest);
         if let Err(e) = orbiters_core::write_atomic(&self.path, &out) {
-            eprintln!("could not keep how far the upload preparation got: {e}");
+            log_warn!("could not keep how far the upload preparation got: {e}", e = e);
         }
     }
 }
@@ -396,7 +397,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let device = orbiters_reconstruct::gpu::DeviceOptions { low_priority: true, low_power: integrated, ..Default::default() };
     let start = Instant::now();
     crate::controller::prepare_upload(&session, device)?;
-    eprintln!("prepared {} for sharing in {:.1} s", session.display(), start.elapsed().as_secs_f32());
+    log_info!("prepared {} for sharing in {:.1} s", session.display(), start.elapsed().as_secs_f32());
     Ok(())
 }
 
@@ -422,11 +423,11 @@ struct Running {
 static BACKGROUND: Mutex<Option<Background>> = Mutex::new(None);
 
 fn background<R>(f: impl FnOnce(&mut Background) -> R) -> R {
-    f(BACKGROUND.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Background::default))
+    f(BACKGROUND.locked().get_or_insert_with(Background::default))
 }
 
 fn stop(child: &Mutex<Child>) {
-    let _ = child.lock().unwrap_or_else(|e| e.into_inner()).kill();
+    let _ = child.locked().kill();
 }
 
 /// How long a share waits for its session's background preparation before stopping it and preparing at once.
@@ -474,7 +475,7 @@ pub fn pause() {
 /// Starts the first waiting session's preparation when none runs, on the integrated GPU with `integrated`. `on_log`
 /// gets its log lines; `on_exit` runs once it has exited (the service then looks for its next work).
 pub fn start_next(integrated: bool, on_log: impl Fn(String) + Send + 'static, on_exit: impl FnOnce() + Send + 'static) -> anyhow::Result<bool> {
-    let mut guard = BACKGROUND.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = BACKGROUND.locked();
     let b = guard.get_or_insert_with(Background::default);
     if b.running.is_some() {
         return Ok(false);
@@ -520,7 +521,7 @@ pub fn start_next(integrated: bool, on_log: impl Fn(String) + Send + 'static, on
             meanwhile();
         }
         stop(child);
-        let _ = child.lock().unwrap_or_else(|e| e.into_inner()).wait();
+        let _ = child.locked().wait();
         background(|b| {
             b.running = None;
             // Back first in line, unless it was forgotten or claimed meanwhile (a pause put it there itself).
@@ -530,7 +531,7 @@ pub fn start_next(integrated: bool, on_log: impl Fn(String) + Send + 'static, on
             }
         });
         let (flag, wake) = &**done;
-        *flag.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        *flag.locked() = true;
         wake.notify_all();
         e
     };
@@ -553,7 +554,7 @@ pub fn start_next(integrated: bool, on_log: impl Fn(String) + Send + 'static, on
         let (child, done, dir) = (child_w, done_w, dir_w);
         // Polled rather than waited on: pause and claim kill it through the same handle.
         let status = loop {
-            match child.lock().unwrap_or_else(|e| e.into_inner()).try_wait() {
+            match child.locked().try_wait() {
                 Ok(Some(status)) => break Some(status),
                 Ok(None) => {}
                 Err(_) => break None,
@@ -561,11 +562,11 @@ pub fn start_next(integrated: bool, on_log: impl Fn(String) + Send + 'static, on
             std::thread::sleep(Duration::from_millis(100));
         };
         if !stopped.load(Ordering::SeqCst) && !status.is_some_and(|s| s.success()) {
-            eprintln!("background upload preparation of {} failed ({status:?}): a share prepares it then", dir.display());
+            log_warn!("background upload preparation of {} failed ({status:?}): a share prepares it then", dir.display(), status = status);
         }
         background(|b| b.running = None);
         let (flag, wake) = &*done;
-        *flag.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        *flag.locked() = true;
         wake.notify_all();
         on_exit();
     });
@@ -606,8 +607,8 @@ fn fail_point(_at: u8) -> anyhow::Result<()> {
 pub fn claim(dir: &Path) {
     let Some((child, done, stopped)) = withdraw(dir) else { return };
     let (flag, wake) = &*done;
-    let finished = flag.lock().unwrap_or_else(|e| e.into_inner());
-    let (finished, _) = wake.wait_timeout_while(finished, CLAIM_WAIT, |finished| !*finished).unwrap_or_else(|e| e.into_inner());
+    let finished = flag.locked();
+    let (finished, _) = wake.wait_timeout_while_locked(finished, CLAIM_WAIT, |finished| !*finished);
     if !*finished {
         drop(finished);
         stopped.store(true, Ordering::SeqCst);

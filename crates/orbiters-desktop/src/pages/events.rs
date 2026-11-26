@@ -10,6 +10,7 @@
 //! instance under way that takes no sign-ups, Orbiters' own VRChat account invites them there, as Home's Previous
 //! instances do (`orbiters_n4n0_core::invites`).
 
+use orbiters_core::locks::*;
 use super::{sharing, Cx, Job};
 use crate::worlds::{Picture, Pictures};
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Order, Painter, Pos2, Rect, Sense, TextureHandle, Ui, UiBuilder};

@@ -12,6 +12,7 @@
 //! for one use only: a start without Orbiters (offline) goes on a yes of the last [`LAST_KNOWN_FOR`] until the server
 //! answers. The server stays the judge: a modified app gains nothing.
 
+use orbiters_core::locks::*;
 use super::Controller;
 use crate::state::AccountState;
 use orbiters_core::account::{Api, ApiError, Server};
@@ -137,7 +138,7 @@ impl CallsAccess {
         let mut all = read_file(file);
         all.insert(whose.key(), known);
         if let Err(e) = write_file(file, &all) {
-            eprintln!("calls access: {e:#}");
+            log_warn!("calls access: {e:#}", e = e);
         }
         true
     }
@@ -166,7 +167,7 @@ fn refresh_outcome(answer: anyhow::Result<bool>) -> Option<bool> {
         Ok(allowed) => Some(allowed),
         Err(e) if e.downcast_ref::<ApiError>().is_some_and(|a| matches!(a.status, 401 | 403 | 404 | 425)) => Some(false),
         Err(e) => {
-            eprintln!("calls access: {e:#}");
+            log_warn!("calls access: {e:#}", e = e);
             None
         }
     }
@@ -186,7 +187,7 @@ impl Controller {
     /// The identity calls are about now, with the server's API and the credential, read together: the server the account
     /// was read for (the chosen one before it was), the account and its credential.
     pub(super) fn calls_identity(&self) -> Option<(Whose, Api, String)> {
-        let rt = self.account_runtime.lock().unwrap();
+        let rt = self.account_runtime.locked();
         let account = rt.account.as_ref()?;
         let server = rt.read.map_or_else(Server::current, |(s, _)| s);
         Some((Whose::of(server, account.user.as_deref(), &account.token), Api::new(server), account.token.clone()))
@@ -195,9 +196,9 @@ impl Controller {
     /// May this account use calls now? The one question every way into a call asks.
     pub(crate) fn calls_open(&self) -> bool {
         let whose = self.calls_identity().map(|(w, ..)| w);
-        let state = self.snapshot.lock().unwrap().account.state.clone();
+        let state = self.snapshot.locked().account.state.clone();
         let file = self.calls_access_file();
-        let mut rt = self.calls.lock().unwrap();
+        let mut rt = self.calls.locked();
         rt.access.follow(whose, &file);
         rt.access.open(&state, unix_now())
     }
@@ -212,7 +213,7 @@ impl Controller {
             return;
         }
         let file = self.calls_access_file();
-        let mut rt = self.calls.lock().unwrap();
+        let mut rt = self.calls.locked();
         rt.access.follow(Some(whose.clone()), &file);
         rt.access.heard(&whose, allowed, &file);
     }
@@ -227,7 +228,7 @@ impl Controller {
         }
         let file = self.calls_access_file();
         {
-            let mut rt = self.calls.lock().unwrap();
+            let mut rt = self.calls.locked();
             rt.access.follow(Some(whose.clone()), &file);
             rt.access.heard(&whose, false, &file);
         }
@@ -239,14 +240,14 @@ impl Controller {
     /// the answer is kept for that identity only. On the calls thread: the answer can take a moment.
     pub(super) fn calls_access_refresh(&self) {
         // Only an account read for a server is asked about (before that, its server is not settled).
-        if self.account_runtime.lock().unwrap().read.is_none() {
+        if self.account_runtime.locked().read.is_none() {
             return;
         }
         let Some((whose, api, token)) = self.calls_identity() else { return };
         let file = self.calls_access_file();
         let now = Instant::now();
         {
-            let mut rt = self.calls.lock().unwrap();
+            let mut rt = self.calls.locked();
             rt.access.follow(Some(whose.clone()), &file);
             if !rt.access.due(now) {
                 return;
@@ -254,13 +255,13 @@ impl Controller {
             rt.access.asked = Some(now);
         }
         let Some(answer) = refresh_outcome(api.member_feature(&token, N4N0_CALLS)) else { return };
-        self.calls.lock().unwrap().access.heard(&whose, answer, &file);
+        self.calls.locked().access.heard(&whose, answer, &file);
     }
 
     /// How long until [`Self::calls_access_refresh`] asks again (never, with nobody signed in).
     pub(super) fn calls_access_wait(&self) -> Option<Duration> {
         self.calls_identity()?;
-        Some(self.calls.lock().unwrap().access.wait())
+        Some(self.calls.locked().access.wait())
     }
 }
 #[cfg(test)]

@@ -1,5 +1,7 @@
 //! Scoped data requests, picture updates and deliberate instance creation/self-invites for the signed-in account.
 //! Only workers call this module; session credentials never cross IPC.
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use super::{Controller, NoticeKind, Shared};
 use crate::state::Snapshot;
 use orbiters_i18n::tr;
@@ -260,7 +262,7 @@ pub type Result = std::result::Result<Response, String>;
 fn picture_lock(file: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
     use std::sync::{Arc, Mutex, Weak};
     static LOCKS: Mutex<std::collections::BTreeMap<PathBuf, Weak<Mutex<()>>>> = Mutex::new(std::collections::BTreeMap::new());
-    let mut locks = LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut locks = LOCKS.locked();
     if let Some(lock) = locks.get(file).and_then(Weak::upgrade) {
         return lock;
     }
@@ -325,7 +327,7 @@ impl Controller {
                         files.sort();
                         files.dedup();
                         let locks: Vec<_> = files.iter().map(|file| picture_lock(file)).collect();
-                        let _ours: Vec<_> = locks.iter().map(|lock| lock.lock().unwrap_or_else(|e| e.into_inner())).collect();
+                        let _ours: Vec<_> = locks.iter().map(|lock| lock.locked()).collect();
                         match orbiters_projects::network::thumbnails(server, missing) {
                             Ok(paths) => {
                                 for (id, t) in paths {
@@ -400,7 +402,7 @@ impl Controller {
 
     /// The VRChat account the instance was made here for.
     pub(crate) fn made_for(&self, world: &str, instance: &str) -> Option<String> {
-        self.instance_permits.lock().unwrap().owner(world, instance).map(str::to_owned)
+        self.instance_permits.locked().owner(world, instance).map(str::to_owned)
     }
 
     #[cfg(test)]
@@ -424,9 +426,9 @@ impl Controller {
                 Request::WorldDetails { world } => source.personal_until(user, || scope == Scope::of(&self.view()), deadline, |c| c.world(&world)).map(Response::WorldDetails).map_err(WorldError::Api),
                 Request::WorldInstances { world } | Request::WorldInstancesNext { world, .. } => {
                     let ids = continuation;
-                    if ids.is_none() { let mut permits = self.instance_permits.lock().unwrap(); permits.allow(&scope, &world, &[]); permits.pending.retain(|(_, w, _, _)| *w != world); }
+                    if ids.is_none() { let mut permits = self.instance_permits.locked(); permits.allow(&scope, &world, &[]); permits.pending.retain(|(_, w, _, _)| *w != world); }
                     let ids = match ids { Some(ids) => {
-                        if !self.instance_permits.lock().unwrap().pending.iter().any(|(s, w, pending, at)| *s == scope && *w == world && *pending == ids && at.elapsed().as_secs() < 300) { return Err(WorldError::NotListed); }
+                        if !self.instance_permits.locked().pending.iter().any(|(s, w, pending, at)| *s == scope && *w == world && *pending == ids && at.elapsed().as_secs() < 300) { return Err(WorldError::NotListed); }
                         ids
                     }, None => source.personal_until(user, || scope == Scope::of(&self.view()), deadline, |c| c.world_instance_ids(&world)).map_err(WorldError::Api)? };
                     let remaining = ids.iter().skip(16).cloned().collect();
@@ -440,7 +442,7 @@ impl Controller {
                         }
                     }
                     if scope != Scope::of(&self.view()) { return Err(WorldError::AccountChanged); }
-                    let mut permits = self.instance_permits.lock().unwrap();
+                    let mut permits = self.instance_permits.locked();
                     permits.pending.retain(|(s, w, _, at)| *s == scope && *w != world && at.elapsed().as_secs() < 300);
                     if !list.remaining.is_empty() { permits.pending.push((scope.clone(), world.clone(), list.remaining.clone(), std::time::Instant::now())); }
                     permits.entries.extend(list.items.iter().filter(|i| i.can_join).map(|i| (scope.clone(), world.clone(), i.id.clone(), std::time::Instant::now())));
@@ -449,11 +451,11 @@ impl Controller {
                 Request::CreateInstance { world, access, region } => {
                     let instance = source.personal_until(user, || scope == Scope::of(&self.view()), deadline, |c| c.create_instance(&world, access, region)).map_err(WorldError::Api)?;
                     // Whose it is, first: VRChat made it, whatever becomes of the answer.
-                    self.instance_permits.lock().unwrap().owned(&world, &instance.id, user);
+                    self.instance_permits.locked().owned(&world, &instance.id, user);
                     if scope != Scope::of(&self.view()) { return Err(WorldError::AccountChanged); }
                     // Made for this press: it may be gone to, whatever VRChat says of a room nobody entered yet, and the
                     // instances listed before stay as they were (allow() would forget them).
-                    self.instance_permits.lock().unwrap().made(&scope, &world, &instance.id);
+                    self.instance_permits.locked().made(&scope, &world, &instance.id);
                     Ok(Response::CreatedInstance(instance))
                 }
                 Request::InviteSelf { world, instance } | Request::GoThere { world, instance } => {
@@ -463,7 +465,7 @@ impl Controller {
                     let another = made_for.as_deref().is_some_and(|owner| owner != user);
                     if another && self.launcher_several(self.launcher_machine_now().as_ref(), None) { return Err(WorldError::NotListed); }
                     let bound = made_for.is_some();
-                    if !self.instance_permits.lock().unwrap().contains(&scope, &world, &instance) { return Err(WorldError::NotListed); }
+                    if !self.instance_permits.locked().contains(&scope, &world, &instance) { return Err(WorldError::NotListed); }
                     let fresh = source.personal_until(user, || scope == Scope::of(&self.view()), deadline, |c| c.world_instance(&world, &instance)).map_err(WorldError::Api)?
                         .ok_or(WorldError::NotJoinable)?;
                     if fresh.full { return Err(WorldError::Full); }
@@ -471,13 +473,13 @@ impl Controller {
                     if !fresh.can_join { return Err(WorldError::NotJoinable); }
                     if scope != Scope::of(&self.view()) { return Err(WorldError::AccountChanged); }
                     let detour = if direct {
-                        let travel: std::sync::Arc<dyn super::travel::Travel> = self.travel.lock().unwrap().clone().unwrap_or_else(|| std::sync::Arc::new(super::travel::Real));
+                        let travel: std::sync::Arc<dyn super::travel::Travel> = self.travel.locked().clone().unwrap_or_else(|| std::sync::Arc::new(super::travel::Real));
                         let machine = self.launcher_machine_now();
                         let bridge = self.launcher_bridges(machine.as_ref());
                         // The person's VRChat is started under Home's one start lock: never two at once, and while one
                         // is starting the invite to oneself goes instead (that VRChat shows it once up).
                         let remote = self.view().vrchat.remote;
-                        let started = self.launcher_started.lock().unwrap();
+                        let started = self.launcher_started.locked();
                         // The route decided once, from one look at the processes, is the one taken.
                         let processes = travel.running();
                         let chosen = super::travel::route(remote, &processes, &bridge, |p| travel.whose(p));
@@ -684,7 +686,7 @@ fn keep_picture(data: &Path, id: &str, png: &[u8]) {
     };
     for file in files {
         let lock = picture_lock(&file);
-        let _ours = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _ours = lock.locked();
         let tmp = file.with_extension("tmp");
         let written =
             file.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&tmp, png)).and_then(|()| std::fs::rename(&tmp, &file));
@@ -708,7 +710,7 @@ fn cached_avatar_picture(file: &Path, fetch: impl FnOnce() -> anyhow::Result<Opt
         }
     }
     let lock = picture_lock(file);
-    let _ours = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let _ours = lock.locked();
     let kept = read();
     if fresh() && kept.is_some() {
         return Ok(kept);
@@ -721,7 +723,7 @@ fn cached_avatar_picture(file: &Path, fetch: impl FnOnce() -> anyhow::Result<Opt
     }
     let miss = || {
         if let Some(parent) = missing.parent() {
-            let _ = std::fs::create_dir_all(parent).and_then(|()| std::fs::write(&missing, b""));
+            std::fs::create_dir_all(parent).and_then(|()| std::fs::write(&missing, b"")).or_log("a file could not be written");
         }
     };
     match fetch() {
@@ -729,7 +731,7 @@ fn cached_avatar_picture(file: &Path, fetch: impl FnOnce() -> anyhow::Result<Opt
             if let Some(picture) = avatar_picture(&bytes) {
                 if let Some(parent) = file.parent() {
                     let tmp = file.with_extension("tmp");
-                    let _ = std::fs::create_dir_all(parent).and_then(|()| std::fs::write(&tmp, &bytes)).and_then(|()| std::fs::rename(tmp, file));
+                    std::fs::create_dir_all(parent).and_then(|()| std::fs::write(&tmp, &bytes)).and_then(|()| std::fs::rename(tmp, file)).or_log("a file could not be written");
                 }
                 let _ = std::fs::remove_file(&missing);
                 Ok(Some(picture))

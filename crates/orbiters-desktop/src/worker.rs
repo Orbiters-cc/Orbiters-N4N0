@@ -46,7 +46,7 @@ pub fn keep_with_service(child: &Child) {
         });
         if let Some(job) = *job {
             if let Err(e) = unsafe { AssignProcessToJobObject(HANDLE(job as *mut _), HANDLE(child.as_raw_handle())) } {
-                eprintln!("process {} is not in the service's job: {e}", child.id());
+                log_warn!("process {} is not in the service's job: {e}", child.id(), e = e);
             }
         }
     }
@@ -69,7 +69,7 @@ pub fn records(pipe: impl Read, what: &'static str) -> impl Iterator<Item = Stri
     Lines(BufReader::new(pipe)).filter_map(move |line| match String::from_utf8(line) {
         Ok(text) => Some(text),
         Err(e) => {
-            eprintln!("{what}: a line of {} bytes that is not UTF-8, left out", e.as_bytes().len());
+            log_info!("{what}: a line of {} bytes that is not UTF-8, left out", e.as_bytes().len(), what = what);
             None
         }
     })
@@ -126,7 +126,7 @@ impl WorkerHandle {
                 // session "being saved" (`WorkerEvent::from_line`).
                 match WorkerEvent::from_line(&line) {
                     Some(e) => on_event(e),
-                    None => eprintln!("worker: unexpected output: {line}"),
+                    None => log_info!("worker: unexpected output: {line}", line = line),
                 }
             }
             on_exit();

@@ -40,6 +40,7 @@ pub mod tools;
 pub mod tour;
 pub mod win;
 
+use orbiters_core::locks::*;
 use game::{Failure, Game, OscArg};
 use guard::Guard;
 use input::{Held, Hold, Input};
@@ -310,7 +311,7 @@ impl Session {
 
     /// The sandbox of a VR session.
     pub fn vr(&self) -> Option<Arc<dyn vr::VrRig>> {
-        self.vr.lock().unwrap().clone()
+        self.vr.locked().clone()
     }
 
     pub fn is_main(&self) -> bool {
@@ -320,7 +321,7 @@ impl Session {
     /// The VRChat this session started, while it runs.
     /// The VRChat this session owns: never a candidate not proven yet.
     pub fn pid(&self) -> Option<u32> {
-        let run = self.run.lock().unwrap();
+        let run = self.run.locked();
         run.pid.filter(|_| !run.candidate)
     }
 }
@@ -482,12 +483,12 @@ impl Bridge {
 
     /// What this computer's VRChat can be made to do.
     pub fn capabilities(&self) -> caps::Capabilities {
-        *self.caps.lock().unwrap()
+        *self.caps.locked()
     }
 
     /// Another computer's capabilities, for the tests that play a Mac's or a PC's bridge on any computer.
     pub fn set_capabilities(&self, caps: caps::Capabilities) {
-        *self.caps.lock().unwrap() = caps;
+        *self.caps.locked() = caps;
     }
 
     /// Fills in what the bridge itself knows.
@@ -496,8 +497,8 @@ impl Bridge {
         status.paused = self.paused_for_status();
         status.client = self.client_seen();
         status.acting = self.in_flight.load(Ordering::Relaxed) > 0;
-        status.log = self.log.lock().unwrap().iter().cloned().collect();
-        let mut driven: Vec<u32> = self.sessions().iter().filter_map(|s| s.run.lock().unwrap().pid).collect();
+        status.log = self.log.locked().iter().cloned().collect();
+        let mut driven: Vec<u32> = self.sessions().iter().filter_map(|s| s.run.locked().pid).collect();
         driven.sort_unstable();
         driven.dedup();
         status.driven = driven;
@@ -512,7 +513,7 @@ impl Bridge {
     }
 
     fn client_seen(&self) -> Option<ClientSeen> {
-        let client = self.client.lock().unwrap();
+        let client = self.client.locked();
         client
             .as_ref()
             .map(|(name, at)| ClientSeen { name: name.clone(), connected: at.elapsed() < CONNECTED_FOR || self.in_flight.load(Ordering::Relaxed) > 0 })
@@ -520,7 +521,7 @@ impl Bridge {
 
     /// A client made a request. `name` is what it calls itself, when it said.
     pub(crate) fn client_heard(&self, name: Option<&str>) {
-        let mut client = self.client.lock().unwrap();
+        let mut client = self.client.locked();
         // What a client calls itself is shown in Settings: a name, not a page.
         let name = name
             .map(|n| n.chars().filter(|c| !c.is_control()).take(64).collect::<String>())
@@ -530,7 +531,7 @@ impl Bridge {
     }
 
     pub fn log(&self, ok: bool, text: impl Into<String>) {
-        let mut log = self.log.lock().unwrap();
+        let mut log = self.log.locked();
         log.push_back(LogLine { at: orbiters_core::visited::now(), text: text.into(), ok });
         while log.len() > LOG_LINES {
             log.pop_front();
@@ -540,7 +541,7 @@ impl Bridge {
     /// Paused on the whole computer: the hotkey, Settings, or the person's input anywhere in the last 30 s. The main session,
     /// and every step that needs the keyboard and the mouse, stop for it.
     pub fn paused(&self) -> Option<Paused> {
-        self.presence.lock().unwrap().paused(Instant::now())
+        self.presence.locked().paused(Instant::now())
     }
 
     /// Paused for this session: the main session as [`Bridge::paused`] (as ever); a side session by the hotkey, Settings,
@@ -550,35 +551,35 @@ impl Bridge {
             return self.paused();
         }
         let now = Instant::now();
-        match self.presence.lock().unwrap().paused(now) {
+        match self.presence.locked().paused(now) {
             Some(Paused::Held) => Some(Paused::Held),
             // The person records in this session's VRChat (they chose it on the Capture page): its input waits for them.
             _ if session.game.persons_capture_here() => Some(Paused::Person { resumes_in_s: 30 }),
-            _ => session.presence.lock().unwrap().paused(now),
+            _ => session.presence.locked().paused(now),
         }
     }
 
     /// Every session, main first.
     pub fn sessions(&self) -> Vec<Arc<Session>> {
-        std::iter::once(self.main.clone()).chain(self.sides.lock().unwrap().iter().cloned()).collect()
+        std::iter::once(self.main.clone()).chain(self.sides.locked().iter().cloned()).collect()
     }
 
     /// What starts side sessions and knows the computer.
     pub fn set_opener(&self, opener: Arc<dyn game::Opener>) {
-        *self.opener.lock().unwrap() = Some(opener);
+        *self.opener.locked() = Some(opener);
     }
 
     pub fn set_feedback(&self, feedback: Arc<dyn game::Feedback>) {
-        *self.feedback.lock().unwrap() = Some(feedback);
+        *self.feedback.locked() = Some(feedback);
     }
 
     pub fn set_publish(&self, publish: Arc<dyn game::Publish>) {
-        *self.publish.lock().unwrap() = Some(publish);
+        *self.publish.locked() = Some(publish);
     }
 
     /// Keeps the journal in `path` from now on (read from it now).
     pub fn keep_journal(&self, path: &std::path::Path) {
-        *self.journal.lock().unwrap() = journal::Journal::at(path);
+        *self.journal.locked() = journal::Journal::at(path);
     }
 
     /// What the person's listener heard.
@@ -586,12 +587,12 @@ impl Bridge {
         match heard {
             Heard::PersonInput => {
                 let now = Instant::now();
-                self.presence.lock().unwrap().person_input(now);
+                self.presence.locked().person_input(now);
                 // Their input in a side session's window is theirs to that session: it waits for them.
-                for side in self.sides.lock().unwrap().iter() {
+                for side in self.sides.locked().iter() {
                     if let Some(window) = side.pid().and_then(|pid| side.game.window(pid)) {
                         if side.game.is_foreground(&window) {
-                            side.presence.lock().unwrap().person_input(now);
+                            side.presence.locked().person_input(now);
                         }
                     }
                 }
@@ -599,7 +600,7 @@ impl Bridge {
             }
             Heard::Hotkey => {
                 let held = {
-                    let mut presence = self.presence.lock().unwrap();
+                    let mut presence = self.presence.locked();
                     let held = !presence.held();
                     if held {
                         presence.set_held(true);
@@ -617,7 +618,7 @@ impl Bridge {
     /// Settings' Pause and Resume.
     pub fn hold(&self, held: bool) {
         {
-            let mut presence = self.presence.lock().unwrap();
+            let mut presence = self.presence.locked();
             if held {
                 presence.set_held(true);
             } else {
@@ -643,7 +644,7 @@ impl Bridge {
 
     /// Why the calls running now were ended: the person's Stop, or the bridge closing by itself.
     pub(crate) fn stopped_failure(&self) -> Failure {
-        match self.last_close.lock().unwrap().clone() {
+        match self.last_close.locked().clone() {
             Some((false, why)) => Failure::new("bridge_closed", why, "Wait 30 s, then call get_state: the bridge opens again by itself when it can."), // i18n: not shown (an AI client reads it in the tool's answer)
             _ => Failure::new(
                 "stopped",
@@ -654,14 +655,14 @@ impl Bridge {
     }
 
     fn close_down(&self, why: &str, by_person: bool) {
-        *self.last_close.lock().unwrap() = Some((by_person, why.to_string()));
+        *self.last_close.locked() = Some((by_person, why.to_string()));
         self.stops.fetch_add(1, Ordering::Relaxed);
         self.release_all();
         // A copy, a Library move, a scan or a size ends where it safely can; a package change finishes.
         self.projects.stop_all();
         for session in self.sessions() {
             let (was_running, was_going) = {
-                let mut run = session.run.lock().unwrap();
+                let mut run = session.run.locked();
                 // A side session's VRChat stays the bridge's, to be closed by close_session: only what runs ends. The main
                 // one's is the person's from their Stop on; a close of the bridge's own keeps it, and where it was going.
                 // A candidate never proven is nobody's to stop anything of.
@@ -683,7 +684,7 @@ impl Bridge {
             // Only the recording this session started: never one of the person's.
             let capture = session.game.seen().capture;
             let mine = {
-                let run = session.run.lock().unwrap();
+                let run = session.run.locked();
                 run.starting_picture || (capture.session.is_some() && capture.session == run.recording)
             };
             if was_running && mine && matches!(capture.state.as_str(), "starting" | "recording" | "paused") {
@@ -699,17 +700,17 @@ impl Bridge {
     pub(crate) fn start_guard(&self) -> Result<(), String> {
         let Some(exe) = &self.guard_exe else { return Ok(()) };
         let guard = Guard::spawn(exe).map_err(|e| tr!("The input guard did not start: {error}", error = e))?;
-        *self.guard.lock().unwrap() = Some(guard);
+        *self.guard.locked() = Some(guard);
         Ok(())
     }
 
     /// Ends the guard; called when the service stops listening, with everything released.
     pub(crate) fn stop_guard(&self) {
-        *self.guard.lock().unwrap() = None;
+        *self.guard.locked() = None;
     }
 
     fn tell_guard(&self, line: String) {
-        if let Some(guard) = self.guard.lock().unwrap().as_mut() {
+        if let Some(guard) = self.guard.locked().as_mut() {
             guard.tell(&line);
         }
     }
@@ -752,7 +753,7 @@ impl Bridge {
     /// are followed.
     pub fn tick(&self) {
         let now = Instant::now();
-        if let Some(opener) = self.opener.lock().unwrap().clone() {
+        if let Some(opener) = self.opener.locked().clone() {
             opener.set_main(self.main.pid());
         }
         for session in self.sessions() {

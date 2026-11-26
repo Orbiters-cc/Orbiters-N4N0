@@ -82,7 +82,9 @@ fn a_world_s_capture_stops_behind_another_tab_and_with_the_menu() {
     person.turns(2);
     let mut again = crate::overlay::worlds::catalog::parse(r#"{"previews":[{"slot":1,"key":1,"id":1,"worldId":"wrld_00000000-0000-4000-8000-000000000001","name":"W","author":"a","uploader":"b","view":{"position":[0,1,0],"target":[0,1,1]}}],"feedback":{}}"#).unwrap();
     again[0].local = Some(std::env::temp_dir().join("orbiters-no-capture-flow-again"));
-    person.panels.stage.worlds.as_mut().unwrap().chosen_for_test(again, 1);
+    let earlier = person.panels.stage.worlds.as_mut().unwrap().chosen_for_test(again, 1);
+    // An earlier request finishing after the fixture was installed must leave its world in place.
+    earlier.put_for_test(Vec::new());
     person.turns(2);
     assert_eq!(turning(&person), (Some(1), true), "back on Worlds: it turns again");
     person.around = None;

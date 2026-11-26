@@ -5,6 +5,7 @@
 //! copies (a scroll's next rows); what does not fit comes from the loader threads a frame or two later. The textures are kept
 //! by name and not by page or session: the sign-in's state changing, another page opened, change nothing of what is shown.
 
+use orbiters_core::locks::*;
 use super::profile_pictures::{Kept, Profiles, Size};
 use super::Picture;
 use crate::overlay::PaintTextures;
@@ -31,7 +32,7 @@ struct Budget {
 #[cfg(not(test))]
 fn budget<R>(f: impl FnOnce(&mut Budget) -> R) -> R {
     static BUDGET: Mutex<Budget> = Mutex::new(Budget { frame: f64::NEG_INFINITY, frames: 0, spent: Duration::ZERO });
-    f(&mut BUDGET.lock().unwrap_or_else(|e| e.into_inner()))
+    f(&mut BUDGET.locked())
 }
 /// Tests draw on many threads at once: each has its own.
 #[cfg(test)]
@@ -83,7 +84,7 @@ type Textures = HashMap<(usize, String), Texture>;
 
 fn textures() -> std::sync::MutexGuard<'static, Textures> {
     static TEXTURES: OnceLock<Mutex<Textures>> = OnceLock::new();
-    TEXTURES.get_or_init(Mutex::default).lock().unwrap_or_else(|e| e.into_inner())
+    TEXTURES.get_or_init(Mutex::default).locked()
 }
 
 /// What names a picture of VRChat's, whatever page, sign-in state or address asks; none for other pictures.

@@ -2,12 +2,12 @@
 //! A direct session's cookies are private to `vrchat_api`; the fallback sees only the Orbiters bearer credential.
 use crate::account::Api;
 use orbiters_i18n::tr;
-use crate::vrchat_api::{Avatar, Client, Error, Replaced, Step, Turns, User};
-use std::sync::{Arc, Mutex};
+use crate::vrchat_api::{Avatar, Client, ClientLock, Error, Replaced, Step, Turns, User};
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Source {
-    direct: Option<Arc<Mutex<Client>>>,
+    direct: Option<Arc<ClientLock>>,
     orbiters: Option<(Api, String)>,
     log_account: Option<String>,
     operation: Option<crate::vrchat_api::Operation>,
@@ -21,7 +21,7 @@ impl Source {
         // Capture cancellation before contending for the mutex.
         let direct = self.direct.as_ref().ok_or(Error::Unauthorized)?;
         let operation = self.operation.as_ref().copied().ok_or(Error::Disabled)?;
-        let mut client = direct.lock().unwrap();
+        let mut client = direct.locked();
         if !client.signed_in() { return Err(Error::Unauthorized); }
         // Cached authenticated identity, no additional HTTP request.
         if client.signed_in_user_id() != Some(user) { return Err(Error::Unauthorized); }
@@ -31,7 +31,7 @@ impl Source {
         result
     }
     pub fn direct_available(&self) -> bool {
-        self.direct.as_ref().is_some_and(|c| c.lock().unwrap().signed_in())
+        self.direct.as_ref().is_some_and(|c| c.locked().signed_in())
     }
     /// Selection changes the playing account, so a matching log identity is mandatory.
     pub fn select_avatar(&self, id: &str) -> anyhow::Result<()> {
@@ -45,17 +45,17 @@ impl Source {
             c.select_avatar_while(id, current)
         }).ok_or(Error::Unauthorized)?
     }
-    pub fn new(direct: Option<Arc<Mutex<Client>>>, orbiters: Option<(Api, String)>, log_account: Option<String>) -> Self {
-        let operation = direct.as_ref().map(|c| c.lock().unwrap().operation(std::time::Instant::now() + std::time::Duration::from_secs(60)));
+    pub fn new(direct: Option<Arc<ClientLock>>, orbiters: Option<(Api, String)>, log_account: Option<String>) -> Self {
+        let operation = direct.as_ref().map(|c| c.locked().operation(std::time::Instant::now() + std::time::Duration::from_secs(60)));
         Self { direct, orbiters, log_account, operation }
     }
-    pub fn scoped(direct: Option<Arc<Mutex<Client>>>, orbiters: Option<(Api, String)>, log_account: Option<String>, operation: crate::vrchat_api::Operation) -> Self {
+    pub fn scoped(direct: Option<Arc<ClientLock>>, orbiters: Option<(Api, String)>, log_account: Option<String>, operation: crate::vrchat_api::Operation) -> Self {
         Self { direct, orbiters, log_account, operation: Some(operation) }
     }
     /// [`Self::direct`] for a read of several requests: the client is held for one at a time ([`Turns`]).
     fn in_turns<T>(&self, f: impl FnOnce(&mut Turns) -> crate::vrchat_api::Result<T>) -> Option<anyhow::Result<T>> {
         let client = self.direct.as_ref()?;
-        if !client.lock().unwrap().signed_in() {
+        if !client.locked().signed_in() {
             return None;
         }
         let mut turns = Turns::new(client);
@@ -66,7 +66,7 @@ impl Source {
         }
     }
     fn direct<T>(&self, f: impl FnOnce(&mut Client) -> crate::vrchat_api::Result<T>) -> Option<anyhow::Result<T>> {
-        let mut c = self.direct.as_ref()?.lock().unwrap();
+        let mut c = self.direct.as_ref()?.locked();
         if !c.signed_in() {
             return None;
         }
@@ -115,7 +115,7 @@ impl Source {
     /// Replaces the picture of an avatar or world the signed-in VRChat account uploaded
     /// ([`crate::vrchat_api::replace_image`]). A change has no fallback: it needs the personal session.
     pub fn replace_image(&self, id: &str, png: &[u8], progress: impl FnMut(Step)) -> anyhow::Result<Replaced> {
-        let Some(client) = self.direct.as_ref().filter(|c| c.lock().unwrap().signed_in()) else {
+        let Some(client) = self.direct.as_ref().filter(|c| c.locked().signed_in()) else {
             anyhow::bail!("{}", tr("Sign in to VRChat in Settings to change pictures."))
         };
         Ok(crate::vrchat_api::replace_image(client, id, png, progress)?)
@@ -272,7 +272,7 @@ mod tests {
         });
         // An expired personal session falls back too.
         let direct = crate::vrchat_api::tests::expired_session();
-        let source = Source::new(Some(Arc::new(Mutex::new(direct))), Some((api, "orbit-test".into())), None);
+        let source = Source::new(Some(Arc::new(ClientLock::new(direct))), Some((api, "orbit-test".into())), None);
         let found = source.worlds(&crate::maps::WorldList::Search("black cat".into()), 1).unwrap();
         server.join().unwrap();
         assert_eq!(found.source, crate::maps::FoundBy::Orbiters);
@@ -305,7 +305,7 @@ mod tests {
         // The direct request really starts with a cookie, expires, and then falls back to Orbiters.
         let direct = crate::vrchat_api::tests::expired_session();
         assert!(direct.signed_in());
-        assert!(Source::new(Some(Arc::new(Mutex::new(direct))), Some((api, "orbit-test".into())), None).avatar("avtr_test").unwrap().is_none());
+        assert!(Source::new(Some(Arc::new(ClientLock::new(direct))), Some((api, "orbit-test".into())), None).avatar("avtr_test").unwrap().is_none());
         server.join().unwrap();
     }
 }

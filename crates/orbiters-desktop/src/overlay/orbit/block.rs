@@ -18,6 +18,7 @@
 //! - **Nothing can stay blocked.** What is active is said anew every frame, so a closing overlay frees it by not saying it, and SteamVR forgets
 //!   it with the process. The one case left is this process hanging with a block on: [`Stuck`] ends it after [`STUCK_AFTER`].
 
+use orbiters_core::app_log::OrLog as _;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -76,14 +77,14 @@ impl Stuck {
     pub fn start() -> Self {
         let this = Self { blocked: Arc::new(AtomicBool::new(false)), beat_ms: Arc::new(AtomicU64::new(0)), started: Instant::now() };
         let watch = this.clone();
-        let _ = std::thread::Builder::new().name("orbit-block-watch".into()).spawn(move || loop {
+        std::thread::Builder::new().name("orbit-block-watch".into()).spawn(move || loop {
             std::thread::sleep(Duration::from_millis(250));
             let silent = Duration::from_millis((watch.started.elapsed().as_millis() as u64).saturating_sub(watch.beat_ms.load(Ordering::Relaxed)));
             if stuck(watch.blocked.load(Ordering::Relaxed), silent) {
-                eprintln!("the overlay's loop stopped with the trigger blocked: ending it frees the trigger");
+                log_info!("the overlay's loop stopped with the trigger blocked: ending it frees the trigger");
                 std::process::exit(1);
             }
-        });
+        }).or_log("a thread could not be started");
         this
     }
 

@@ -2,6 +2,7 @@
 //! (`CGEventSourceKeyState`), only while the game is in front; and how often the scroll wheel turned, which macOS counts, while VRChat's wheel is up. No event tap, no hot key (which would keep the key from the game), no Accessibility. And what a key types
 //! in a page of ours, in the person's layout, for the keys macOS gives our own window while it holds the keyboard.
 
+use orbiters_core::app_log::OrLog as _;
 use super::super::detect::MenuKey;
 use std::ffi::c_void;
 use std::time::{Duration, Instant};
@@ -131,7 +132,7 @@ pub fn ask_listening() {
     // SAFETY: a plain call; macOS shows its own question at most once.
     let allowed = unsafe { IOHIDRequestAccess(1) };
     if !allowed {
-        let _ = std::process::Command::new("/usr/bin/open").arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent").spawn();
+        std::process::Command::new("/usr/bin/open").arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent").spawn().or_log("a program could not be started");
     }
 }
 

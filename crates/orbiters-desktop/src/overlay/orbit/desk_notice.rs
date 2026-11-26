@@ -188,7 +188,7 @@ impl<T: Shown> Card<T> {
         }
         let px = [rect.width().ceil() as u32, rect.height().ceil() as u32];
         if self.px != px || self.window.is_none() {
-            self.window = PanelWindow::new(px[0], px[1], true).map_err(|e| eprintln!("corner card window: {e}")).ok(); // i18n: not shown (a log's line)
+            self.window = PanelWindow::new(px[0], px[1], true).map_err(|e| log_warn!("corner card window: {e}", e = e)).ok(); // i18n: not shown (a log's line)
             self.canvas = Some(crate::overlay::Canvas::new(px[0], px[1]));
             self.px = px;
             self.drawn = None;

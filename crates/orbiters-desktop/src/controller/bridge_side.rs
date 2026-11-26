@@ -5,6 +5,7 @@
 //! with the account signed in in Settings, the capture for a 3D picture, the reconstructions) it borrows from the
 //! controller: a picture lends the app to this VRChat for the recording ([`Controller::lend_vrchat`]).
 
+use orbiters_core::locks::*;
 use super::bridge_game::{api_failure, RealGame};
 use super::{Controller, Shared};
 use crate::bridge::game::{CaptureSeen, Failure, Find, Game, GameWindow, LaunchPlan, Opener, OscArg, PictureFiles, ReconstructionSeen, Seen, Shot, WorldPage};
@@ -171,7 +172,7 @@ impl RealOpener {
     /// The bridge asks for a profile's game only while no session of it lives: a game still here on these ports is a start
     /// that failed or was left (2026-11-15 07:13: its OSC listener kept 9011 until the app restarted). It goes, its port freed.
     fn drop_stale(&self, osc: (u16, u16)) {
-        let stale: Vec<String> = self.games.lock().unwrap().iter().filter(|(_, g)| g.osc == osc).map(|(id, _)| id.clone()).collect();
+        let stale: Vec<String> = self.games.locked().iter().filter(|(_, g)| g.osc == osc).map(|(id, _)| id.clone()).collect();
         for id in stale {
             self.forget(&id);
         }
@@ -187,19 +188,19 @@ impl Opener for RealOpener {
         self.drop_stale(osc);
         let ctl = self.ctl.upgrade().ok_or_else(|| Failure::new("app_closing", "Orbiters - N4N0 is closing.", "Stop here."))?; // i18n: not shown
         let game = SideGame::new(Arc::downgrade(&ctl), self.exe.clone(), session, profile, osc, ctl.sides.clone())?;
-        self.games.lock().unwrap().insert(session.to_string(), game.clone());
+        self.games.locked().insert(session.to_string(), game.clone());
         Ok(game)
     }
 
     fn forget(&self, session: &str) {
-        let game = self.games.lock().unwrap().remove(session);
+        let game = self.games.locked().remove(session);
         if let Some(game) = game {
             game.stop.store(true, Ordering::Relaxed);
             if game.lent_to_me() {
                 game.unlend();
             }
             // Its OSC port is free once this returns (the listener looks at `stop` every 250 ms).
-            if let Some(listener) = game.listener.lock().unwrap().take() {
+            if let Some(listener) = game.listener.locked().take() {
                 let _ = listener.join();
             }
         }
@@ -209,10 +210,10 @@ impl Opener for RealOpener {
     }
 
     fn rename(&self, from: &str, to: &str) {
-        let game = self.games.lock().unwrap().remove(from);
+        let game = self.games.locked().remove(from);
         if let Some(game) = game {
             let lent = game.lent_to_me();
-            *game.session.lock().unwrap() = to.to_string();
+            *game.session.locked() = to.to_string();
             if let Some(sides) = self.sides() {
                 let mark = sides.marks().into_iter().find(|m| m.session == from);
                 sides.remove(from);
@@ -223,7 +224,7 @@ impl Opener for RealOpener {
                     sides.lend(Some(to));
                 }
             }
-            self.games.lock().unwrap().insert(to.to_string(), game);
+            self.games.locked().insert(to.to_string(), game);
         }
     }
 
@@ -434,7 +435,7 @@ impl SideGame {
                             let mut messages = Vec::new();
                             flatten(packet, &mut messages);
                             let at = orbiters_core::clock::now_ns();
-                            let mut values = values.lock().unwrap();
+                            let mut values = values.locked();
                             for message in messages {
                                 let args: Vec<OscValue> = message.args.iter().filter_map(OscValue::from_osc).collect();
                                 values.record(message.addr, args, at);
@@ -465,7 +466,7 @@ impl SideGame {
     }
 
     fn id(&self) -> String {
-        self.session.lock().unwrap().clone()
+        self.session.locked().clone()
     }
 
     fn to_vrchat(&self) -> SocketAddr {
@@ -478,7 +479,7 @@ impl SideGame {
 
     /// Follows its VRChat: the process, the log, who signed in, its OSCQuery service. At most a few times a second.
     fn look(&self) {
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.locked();
         if st.looked.is_some_and(|t| t.elapsed() < Duration::from_millis(300)) {
             return;
         }
@@ -587,13 +588,13 @@ impl SideGame {
         if let Ok(ctl) = self.ctl() {
             ctl.lend_vrchat(None, None);
         }
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.locked();
         st.lent_at = None;
         st.lent_since = None;
     }
 
     fn values(&self) -> Latest {
-        self.values.lock().unwrap().clone()
+        self.values.locked().clone()
     }
 }
 
@@ -667,7 +668,7 @@ fn own_log(dir: &Path, since: SystemTime, profile: u32, osc: (u16, u16), followe
 
 impl Game for SideGame {
     fn unresolved(&self) -> Option<String> {
-        self.state.lock().unwrap().unresolved.clone()
+        self.state.locked().unresolved.clone()
     }
 
     fn give_back(&self) {
@@ -681,10 +682,10 @@ impl Game for SideGame {
         let Ok(ctl) = self.ctl() else { return Seen::default() };
         let snap = ctl.view();
         let lent = self.lent_to_me();
-        let st = self.state.lock().unwrap();
+        let st = self.state.locked();
         let world = st.watcher.as_ref().map(|w| w.state.clone()).unwrap_or_default();
         let running = st.pid.is_some();
-        let values = self.values.lock().unwrap();
+        let values = self.values.locked();
         let pose_known = values.get(super::burst::POSE).is_some_and(|(v, _)| {
             let floats = super::burst::floats(v);
             floats.len() == 6 && floats.iter().any(|f| *f != 0.0)
@@ -740,7 +741,7 @@ impl Game for SideGame {
     }
 
     fn camera_open(&self) -> Option<bool> {
-        let query = self.state.lock().unwrap().query?;
+        let query = self.state.locked().query?;
         orbiters_core::osc::vrchat_camera_values(query, Duration::from_millis(500)).into_iter().find_map(|(p, v)| match v {
             OscValue::Int(mode) if p == "/usercamera/Mode" => Some(mode != 0),
             _ => None,
@@ -748,17 +749,17 @@ impl Game for SideGame {
     }
 
     fn persons_capture_here(&self) -> bool {
-        let pid = self.state.lock().unwrap().pid;
+        let pid = self.state.locked().pid;
         pid.is_some() && self.sides.chosen() == pid && !self.lent_to_me() && self.ctl().is_ok_and(|c| c.is_capturing())
     }
 
     fn chosen_by_person(&self) -> bool {
-        let pid = self.state.lock().unwrap().pid;
+        let pid = self.state.locked().pid;
         pid.is_some() && self.sides.chosen() == pid
     }
 
     fn capture_kit(&self) -> Option<bool> {
-        let query = self.state.lock().unwrap().query?;
+        let query = self.state.locked().query?;
         let values = orbiters_core::osc::vrchat_values(query, Duration::from_secs(1)).ok()?;
         super::hide_self::kit_in(&values)
     }
@@ -773,7 +774,7 @@ impl Game for SideGame {
 
     fn launch(&self, plan: &LaunchPlan) -> Result<(), Failure> {
         {
-            let mut st = self.state.lock().unwrap();
+            let mut st = self.state.locked();
             let last_picture = st.last_picture.take();
             // A profile's account does not change between its starts: kept, so that a start that failed is not taken for a
             // profile waiting at its sign-in page (2026-11-15 07:09: go_to_world answered a stale needs_sign_in). The new
@@ -786,11 +787,11 @@ impl Game for SideGame {
             followed.drain(..drop_old);
             *st = SideState { launched: Some((Instant::now(), SystemTime::now())), before: vrchat_pids(), last_picture, followed, account, ..Default::default() };
         }
-        self.values.lock().unwrap().clone_from(&Latest::default());
+        self.values.locked().clone_from(&Latest::default());
         // Never onto a profile Orbiters' Home (or Go there) is starting a VRChat on: checked under their start lock, which
         // Home holds from its look at the bridge's sessions to its own claim (REQUEST15 fix B4).
         let ctl = self.ctl()?;
-        let _started = ctl.launcher_started.lock().unwrap();
+        let _started = ctl.launcher_started.locked();
         if ctl.launcher_profile_barred(self.profile) {
             return Err(Failure::new("vrchat_starting", "Orbiters' Home is starting a VRChat on this profile.", "Use another profile.")); // i18n: not shown (an AI client reads it in the tool's answer)
         }
@@ -824,7 +825,7 @@ impl Game for SideGame {
         let since_s = since.and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_secs());
         // Never a log whose process went before (its survivor would be a guess), nor a process running before the launch.
         let (followed, before) = {
-            let st = self.state.lock().unwrap();
+            let st = self.state.locked();
             (st.followed.clone(), st.before.clone())
         };
         if followed.contains(&log) {
@@ -832,7 +833,7 @@ impl Game for SideGame {
         }
         let (pid, start) = self.process_of_log(created_s, since_s, &before, logs_made_near(&dir, created_s))?;
         {
-            let mut st = self.state.lock().unwrap();
+            let mut st = self.state.locked();
             st.started = Some(start);
             st.unresolved = None;
             if st.log.as_ref() != Some(&log) {
@@ -853,7 +854,7 @@ impl Game for SideGame {
 
     fn send_link(&self, plan: &LaunchPlan) -> Result<(), Failure> {
         use super::travel::Travel as _;
-        let Some(pid) = self.state.lock().unwrap().pid else {
+        let Some(pid) = self.state.locked().pid else {
             return Err(Failure::new("link_unavailable", "This session's VRChat is not running.", "It is started in the instance instead.")); // i18n: not shown (an AI client reads it)
         };
         let (pipe, server) = super::travel::Real.connect().map_err(|e| Failure::new("link_unavailable", format!("VRChat's link pipe cannot be opened: {e}"), "It is started in the instance instead."))?; // i18n: not shown (an AI client reads it)
@@ -920,7 +921,7 @@ impl Game for SideGame {
     }
 
     fn camera_pose(&self) -> Option<[f32; 6]> {
-        let values = self.values.lock().unwrap();
+        let values = self.values.locked();
         values.get(super::burst::POSE).and_then(|(v, _)| <[f32; 6]>::try_from(super::burst::floats(v).as_slice()).ok()).filter(|p| p.iter().any(|f| *f != 0.0))
     }
 
@@ -930,7 +931,7 @@ impl Game for SideGame {
         self.sender.send_to(&bytes, self.to_vrchat()).map_err(|e| Failure::new("osc_failed", format!("OSC to VRChat failed: {e}"), "Call get_state."))?; // i18n: not shown
         // What a picture starts from, and what a lend carries to the app.
         let values = pose.iter().map(|v| OscValue::Float(*v)).collect();
-        self.values.lock().unwrap().record(super::burst::POSE.to_string(), values, orbiters_core::clock::now_ns());
+        self.values.locked().record(super::burst::POSE.to_string(), values, orbiters_core::clock::now_ns());
         Ok(())
     }
 
@@ -947,7 +948,7 @@ impl Game for SideGame {
     fn take_picture(&self, length: Photo3dLength, mode: PictureMode) -> Result<(), Failure> {
         let ctl = self.ctl()?;
         let (pid, query) = {
-            let st = self.state.lock().unwrap();
+            let st = self.state.locked();
             (st.pid, st.query)
         };
         let (Some(pid), Some(query)) = (pid, query) else {
@@ -981,7 +982,7 @@ impl Game for SideGame {
             return Err(Failure::new("picture_busy", "Orbiters - N4N0 is recording already (another session's picture).", "Try again in 30 s.").retry_after(30)); // i18n: not shown
         }
         // From the lend to the picture's start: `tick` leaves this lend alone meanwhile.
-        let _lending = self.lending.lock().unwrap_or_else(|e| e.into_inner());
+        let _lending = self.lending.locked();
         if !self.sides.lend(Some(&self.id())) {
             return Err(Failure::new("picture_busy", "Another session is taking a 3D picture: one at a time on this computer.", "Try again in 30 s.").retry_after(30)); // i18n: not shown
         }
@@ -995,9 +996,9 @@ impl Game for SideGame {
             query: None,
         }) };
         ctl.lend_vrchat(Some(mark), Some(self.values()));
-        self.state.lock().unwrap().lent_since = Some(Instant::now());
+        self.state.locked().lent_since = Some(Instant::now());
         // The app follows this VRChat once its watcher has looked (every 3 s) and read its log to the end.
-        let world = self.state.lock().unwrap().watcher.as_ref().and_then(|w| w.state.world_id.clone());
+        let world = self.state.locked().watcher.as_ref().and_then(|w| w.state.world_id.clone());
         let began = Instant::now();
         while began.elapsed() < Duration::from_secs(10) {
             let view = ctl.view();
@@ -1012,7 +1013,7 @@ impl Game for SideGame {
         }
         let taken = self.inner.take_picture(length, mode);
         match taken {
-            Ok(()) => self.state.lock().unwrap().lent_at = Some(Instant::now()),
+            Ok(()) => self.state.locked().lent_at = Some(Instant::now()),
             Err(_) => self.unlend(),
         }
         taken
@@ -1036,9 +1037,9 @@ impl Game for SideGame {
     fn tick(&self) {
         self.look();
         // A picture still starting (the lend is being made, the watchers following): not judged now.
-        let Ok(_lending) = self.lending.try_lock() else { return };
+        let Some(_lending) = self.lending.try_locked() else { return };
         let (started, since) = {
-            let st = self.state.lock().unwrap();
+            let st = self.state.locked();
             (st.lent_at, st.lent_since)
         };
         let Some(since) = since else { return };
@@ -1047,7 +1048,7 @@ impl Game for SideGame {
         let idle = matches!(view.capture.state, crate::state::CaptureState::Idle);
         if give_back_due(started.map(|t| t.elapsed()), since.elapsed(), idle) {
             if let Some(session) = view.capture.session_dir.clone() {
-                self.state.lock().unwrap().last_picture = Some(session);
+                self.state.locked().last_picture = Some(session);
             }
             self.unlend();
         }
@@ -1073,7 +1074,7 @@ impl Controller {
     pub(crate) fn lend_vrchat(&self, to: Option<SideMark>, values: Option<Latest>) {
         // One lend or give-back at a time, whole: the bridge's tick (listener thread) and a picture (client thread) no
         // longer interleave their four steps (CTL2-5).
-        let _one = self.lend_gate.lock().unwrap_or_else(|e| e.into_inner());
+        let _one = self.lend_gate.locked();
         match &to {
             Some(mark) => {
                 self.sides.lend(Some(&mark.session));
@@ -1086,7 +1087,7 @@ impl Controller {
         let _ = self.with_osc(|o| o.lend(route));
         // Another VRChat's camera from here: an answer asked before the loan (or the give-back) is not this one's.
         self.camera_route_changed();
-        let mut osc = self.osc_values.lock().unwrap();
+        let mut osc = self.osc_values.locked();
         // The camera's opening was heard, on the session's own out port, by the session: the proof the app asks of a live
         // camera before it records (`require_live_camera`) is that VRChat's, not a value the app wrote.
         let camera_open = values.as_ref().and_then(|v| v.first(super::CAMERA_MODE)).map(|m| matches!(m, OscValue::Int(mode) if mode != 0));
@@ -1112,10 +1113,10 @@ impl Controller {
         self.update(|s| s.camera_open_said = camera_open);
         match to.and_then(|m| m.pid) {
             // What was just put in is this VRChat's: followed as it stands.
-            Some(pid) => *self.followed.lock().unwrap() = Some(pid),
+            Some(pid) => *self.followed.locked() = Some(pid),
             // Back to the VRChat the person's capture follows (theirs, or the one they chose), with its own camera state.
             None => {
-                *self.followed.lock().unwrap() = None;
+                *self.followed.locked() = None;
                 self.follow_target();
             }
         }

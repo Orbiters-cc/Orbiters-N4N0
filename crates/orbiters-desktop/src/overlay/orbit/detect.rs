@@ -300,8 +300,14 @@ fn rim_at(line: &[f32], from: i32, thick: i32) -> Option<f32> {
     (band < CAMERA_RIM_BRIGHTEST && band <= 0.45 * side + 10.0 && core < band + 25.0 && side - band >= CAMERA_RIM_STANDS_OUT).then_some(side - band)
 }
 
+// Tests: how often a rim was looked for in a line, on this thread.
+#[cfg(test)]
+thread_local!(static LOOKED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) });
+
 /// The best of a rim within `slack` pixels of `from`: where, and how much it stands out.
 fn rim_near(line: &[f32], from: i32, thick: i32, slack: i32) -> Option<(i32, f32)> {
+    #[cfg(test)]
+    LOOKED.set(LOOKED.get() + 1);
     (-slack..=slack).filter_map(|d| rim_at(line, from + d, thick).map(|s| (from + d, s))).max_by(|a, b| a.1.total_cmp(&b.1))
 }
 
@@ -1216,16 +1222,15 @@ mod tests {
         let client = vec2(2560.0, 1440.0);
         let bgra = frame_at("panel-bright-station.jpg", client);
         let parts = camera_parts_in(&bgra, 2560, 1440);
-        let time = |shown: Option<Rect>| {
-            let began = Instant::now();
-            for _ in 0..20 {
-                std::hint::black_box(camera_look(&parts, client, shown, true));
-            }
-            began.elapsed().as_secs_f64() * 1000.0 / 20.0
+        // How often a rim is looked for in a line of the picture, which is what a look costs: what a clock says of it on a loaded
+        // computer held three releases (2026-11).
+        let looked = |shown: Option<Rect>| {
+            LOOKED.set(0);
+            std::hint::black_box(camera_look(&parts, client, shown, true));
+            LOOKED.get()
         };
-        let (search, held) = (time(None), time(Some(rim_in(client))));
-        eprintln!("camera look at 2560 x 1440: search {search:.2} ms, while shown {held:.3} ms"); // i18n: not shown (a test's measurement)
-        assert!(held * 3.0 < search, "the look while shown checks the rim only");
+        let (search, held) = (looked(None), looked(Some(rim_in(client))));
+        assert!(held > 0 && held * 10 < search, "the look while shown checks the rim only: {held}, a search {search}");
     }
 
     /// L-deskcam-glitch, blinking: a replay of looks at real frames in which one look in three cannot tell (the world gone pitch dark around and inside the panel) and

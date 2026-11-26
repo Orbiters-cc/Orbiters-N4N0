@@ -1,6 +1,7 @@
 //! Settings › Beta usage statistics: the performance self-check's hint and the Performance report (`crate::perf`). The
 //! report is made only when pressed, shown line by line, saved, and sent only with Send.
 
+use orbiters_core::app_log::OrLog as _;
 use crate::backend::Ctl;
 use crate::perf::Command;
 use crate::state::Snapshot;
@@ -80,10 +81,10 @@ pub fn show(ui: &mut Ui, ctl: &Ctl, snap: &Snapshot) {
 fn show_file(path: &std::path::Path) {
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("explorer.exe").arg(format!("/select,{}", path.display())).spawn();
+        std::process::Command::new("explorer.exe").arg(format!("/select,{}", path.display())).spawn().or_log("a program could not be started");
     }
     #[cfg(target_os = "linux")]
-    let _ = crate::linux::open::reveal(path);
+    crate::linux::open::reveal(path).or_log("a folder could not be shown");
     #[cfg(target_os = "macos")]
     {
         if let Some(dir) = path.parent() {

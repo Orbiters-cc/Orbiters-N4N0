@@ -58,6 +58,7 @@ pub fn set_start_with_windows(on: bool) -> anyhow::Result<()> {
 /// that runs the app in the menu bar.
 #[cfg(target_os = "macos")]
 pub mod mac {
+    use orbiters_core::app_log::OrLog as _;
     use orbiters_i18n::tr;
     use std::path::{Path, PathBuf};
 
@@ -123,7 +124,7 @@ pub mod mac {
         let (Ok(path), Ok(exe)) = (agent_file(), std::env::current_exe()) else { return };
         let wanted = agent(&exe);
         if std::fs::read_to_string(&path).ok().as_deref() != Some(wanted.as_str()) {
-            let _ = std::fs::write(&path, wanted);
+            std::fs::write(&path, wanted).or_log("a file could not be written");
         }
     }
 
@@ -156,13 +157,13 @@ pub fn reconcile(client: &orbiters_openvr::Client, startup: &StartupSettings) ->
     if startup.steamvr_pending {
         match client.set_start_with_steamvr(&manifest, &path, startup.steamvr) {
             Ok(()) => next.steamvr_pending = false,
-            Err(e) => eprintln!("SteamVR's start of the app: {e}"),
+            Err(e) => log_warn!("SteamVR's start of the app: {e}", e = e),
         }
     } else {
         next.steamvr = client.starts_with_steamvr(STEAMVR_APP_KEY);
         if next.steamvr && may_claim(&exe, applications::manifest_binary(&path).as_deref()) && std::fs::read_to_string(&path).ok().as_deref() != Some(manifest.json().as_str()) {
             if let Err(e) = client.set_start_with_steamvr(&manifest, &path, true) {
-                eprintln!("SteamVR's manifest of the app: {e}");
+                log_warn!("SteamVR's manifest of the app: {e}", e = e);
             }
         }
     }
@@ -186,7 +187,7 @@ pub fn keep_known(client: &orbiters_openvr::Client) {
         return;
     }
     if let Err(code) = client.register_manifest(&manifest(&exe), &path) {
-        eprintln!("SteamVR's manifest of the app: error {code}");
+        log_warn!("SteamVR's manifest of the app: error {code}", code = code);
     }
 }
 

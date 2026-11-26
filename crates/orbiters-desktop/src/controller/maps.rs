@@ -4,6 +4,7 @@
 //! the PC one also the website's `.splat` (Orbiters makes it from its leaves), starting from the view the desktop's 3D
 //! view opens on.
 
+use orbiters_core::locks::*;
 use super::{Controller, NoticeKind, Shared};
 use crate::ipc::ToClient;
 use crate::state::{MapsMine, UploadKind, UploadState, UploadStatus};
@@ -28,12 +29,12 @@ impl Controller {
     /// What this member added to the Map explorer, as last fetched.
     pub fn maps(&self) -> Option<MapsMine> {
         let identity = self.maps_identity();
-        self.maps_mine.lock().unwrap().as_ref().filter(|(of, _)| *of == identity).map(|(_, mine)| mine.clone())
+        self.maps_mine.locked().as_ref().filter(|(of, _)| *of == identity).map(|(_, mine)| mine.clone())
     }
 
     /// Replaces what this member added (screenshots).
     pub fn set_maps(&self, mine: MapsMine) {
-        *self.maps_mine.lock().unwrap() = Some((self.maps_identity(), mine));
+        *self.maps_mine.locked() = Some((self.maps_identity(), mine));
     }
 
     /// Whose "My maps" a list is: the server and credential signed in now (`None` signed out).
@@ -44,7 +45,7 @@ impl Controller {
     /// Keeps a fetched list when it is the answer of the newest fetch (`turn`) and of the account still signed in: an
     /// older, slower answer, or one asked as another account, is dropped (CTL2-8).
     fn store_maps(&self, turn: u64, identity: Option<String>, mine: &MapsMine) -> bool {
-        let mut stored = self.maps_mine.lock().unwrap();
+        let mut stored = self.maps_mine.locked();
         if self.maps_turn.load(Ordering::Acquire) != turn || self.maps_identity() != identity {
             return false;
         }
@@ -55,7 +56,7 @@ impl Controller {
     /// Signed out: the last account's list is no longer anyone's to show.
     pub(super) fn forget_maps(&self) {
         self.maps_turn.fetch_add(1, Ordering::AcqRel);
-        *self.maps_mine.lock().unwrap() = None;
+        *self.maps_mine.locked() = None;
         self.broadcast(|| ToClient::Maps { mine: MapsMine::default() });
     }
 
@@ -77,7 +78,7 @@ impl Controller {
                 return;
             }
             c.broadcast(|| ToClient::Maps { mine: mine.clone() });
-            if let Some(ctx) = c.repaint.lock().unwrap().as_ref() {
+            if let Some(ctx) = c.repaint.locked().as_ref() {
                 ctx.request_repaint();
             }
         });
@@ -325,7 +326,7 @@ pub fn prepare(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions)
         if prepared.generation == before && after == before && crate::upload_prep::ResultIdentity::read(session) == prepared.identity {
             return Ok(prepared);
         }
-        eprintln!("the splat edits or the result of {} changed while it was prepared: again", session.display());
+        log_info!("the splat edits or the result of {} changed while it was prepared: again", session.display());
     }
     anyhow::bail!("{}", tr("Its splat edits kept changing while it was being prepared: share it again once they are done."))
 }
@@ -334,7 +335,7 @@ pub fn prepare(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions)
 fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions) -> anyhow::Result<Prepared> {
     use orbiters_reconstruct::timing::PrepStage;
     let _total = PrepStage::new("total");
-    let _preparing = crate::upload_prep::PREPARING.lock().unwrap_or_else(|e| e.into_inner());
+    let _preparing = crate::upload_prep::PREPARING.locked();
     let identity = crate::upload_prep::ResultIdentity::read(session);
     let result = reconstruction::result_dir(session);
     let key = crate::upload_prep::tree_key();
@@ -358,7 +359,7 @@ fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions
                 drop(g);
                 if view.is_some() && crate::upload_prep::ViewInputs::read(session).ok() == view {
                     if let Err(e) = crate::upload_prep::save(&result, fingerprint, view.as_ref(), &files, &metadata) {
-                        eprintln!("Could not cache upload preparation: {e:#}");
+                        log_warn!("Could not cache upload preparation: {e:#}", e = e);
                     }
                 }
                 drop(stage);
@@ -388,7 +389,7 @@ fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions
     })
     .ok();
     if std::env::var_os("ORBITERS_PREP_TIMING").is_some() {
-        eprintln!("upload preparation adapter: {}", gpu.as_ref().map_or("CPU (untuned)", |g| g.adapter.as_str()));
+        log_info!("upload preparation adapter: {}", gpu.as_ref().map_or("CPU (untuned)", |g| g.adapter.as_str()));
     }
     drop(stage);
     // Names this upload in its three trees, so a world can tell when a slot's files have been replaced.
@@ -399,7 +400,7 @@ fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions
     let trees = orbiters_reconstruct::tree_tune::vrchat_files_kept(&g, &cameras, gpu.as_mut(), key, &options, kept.as_mut().map(|k| k as &mut dyn orbiters_reconstruct::tree_tune::Keep), |_| {})?;
     if let Some(gpu) = &gpu {
         if let Some(p) = &gpu.profiler {
-            eprintln!("upload preparation GPU span: {:?}; passes: {:?}", p.span.get(), p.totals.borrow());
+            log_info!("upload preparation GPU span: {:?}; passes: {:?}", p.span.get(), p.totals.borrow());
         }
     }
     let files = PreviewFiles { vrchat_pc: trees.pc, vrchat_quest: trees.quest, vrchat_coarse: trees.coarse };
@@ -415,7 +416,7 @@ fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions
             // The metadata under what its view was made from, while that is what is still there.
             let view = view.filter(|v| crate::upload_prep::ViewInputs::read(session).ok().as_ref() == Some(v));
             if let Err(e) = crate::upload_prep::save(&result, fingerprint, view.as_ref(), &files, &metadata) {
-                eprintln!("Could not cache upload preparation: {e:#}");
+                log_warn!("Could not cache upload preparation: {e:#}", e = e);
             }
         }
         drop(stage);

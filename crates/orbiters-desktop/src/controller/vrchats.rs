@@ -9,6 +9,7 @@
 //! The app's process watcher, log watcher, OSC (input port, tree, the datagrams it takes) and capture then follow one of
 //! them: the person's own by default, or the one they choose on the Capture page ([`super::Controller::choose_vrchat`]).
 
+use orbiters_core::locks::*;
 use crate::bridge::sessions::{self, Driver, VrchatRun};
 use orbiters_core::vrchat_log::{Lines, LogEvent, LogWatcher};
 use std::collections::HashMap;
@@ -237,7 +238,7 @@ pub struct Seen(Mutex<Vec<Life>>);
 impl Seen {
     /// Takes in the VRChats that run at `now`; the ones that run, and the ended ones that count.
     fn look(&self, procs: &[(u32, u64)], now: u64) -> Vec<Life> {
-        let mut lives = self.0.lock().unwrap();
+        let mut lives = self.0.locked();
         let mut new: Vec<(u32, u64)> = procs.to_vec();
         for life in lives.iter_mut() {
             match new.iter().position(|(pid, start)| life.is(*pid, *start)) {
@@ -571,7 +572,7 @@ impl super::Controller {
         let target = self.sides.target();
         let pid = target.as_ref().map(|t| t.pid);
         let before = {
-            let mut followed = self.followed.lock().unwrap();
+            let mut followed = self.followed.locked();
             if *followed == pid {
                 return;
             }
@@ -581,7 +582,7 @@ impl super::Controller {
         // What the last one said of its camera stays with it, for when it is followed again.
         if let Some(old) = before {
             let view = self.view();
-            let received = self.osc_values.lock().unwrap().camera_received;
+            let received = self.osc_values.locked().camera_received;
             match (view.camera_open_said, received) {
                 (Some(false), _) => self.sides.hear_camera(old, false, now),
                 (Some(true), Some(true)) => self.sides.hear_camera(old, true, now),
@@ -599,7 +600,7 @@ impl super::Controller {
         self.camera_route_changed();
         let heard = pid.and_then(|p| self.sides.camera_heard(p));
         {
-            let mut osc = self.osc_values.lock().unwrap();
+            let mut osc = self.osc_values.locked();
             osc.camera_command = None;
             osc.camera_commanded.clear();
             osc.camera_received = heard.map(|(open, _)| open);
@@ -613,7 +614,7 @@ impl super::Controller {
             s.camera_tools.qr = super::camera_tools::Qr::Off;
         });
         self.invalidate_kit(None);
-        eprintln!("following VRChat {pid:?} (was {before:?}), its camera heard {heard:?}"); // i18n: not shown (diagnostics)
+        log_info!("following VRChat {pid:?} (was {before:?}), its camera heard {heard:?}", pid = pid, before = before, heard = heard); // i18n: not shown (diagnostics)
         if heard.is_none() && pid.is_some() {
             // Its tree says how its camera is, as at an OSC start: shown, never proof for a recording.
             let camera = self.camera_values().into_iter().find_map(|(p, v)| match v {
@@ -622,7 +623,7 @@ impl super::Controller {
             });
             if let Some(open) = camera {
                 self.update_if(|s| {
-                    if s.camera_open_said.is_some() || *self.followed.lock().unwrap() != pid {
+                    if s.camera_open_said.is_some() || *self.followed.locked() != pid {
                         return false;
                     }
                     s.camera_open_said = Some(open);
@@ -671,19 +672,19 @@ impl super::Controller {
             if open && streaming {
                 let to = SocketAddr::from(([127, 0, 0, 1], run.osc_in));
                 if send_streaming(to, false).is_ok() {
-                    eprintln!("Spout: VRChat {} streams too: its Spout Stream is off while this recording runs", run.pid); // i18n: not shown (diagnostics)
+                    log_info!("Spout: VRChat {} streams too: its Spout Stream is off while this recording runs", run.pid); // i18n: not shown (diagnostics)
                     quieted.push(to);
                 }
             }
         }
         let any = !quieted.is_empty();
-        self.quieted.lock().unwrap().extend(quieted);
+        self.quieted.locked().extend(quieted);
         any
     }
 
     /// Switches the Spout Stream of the VRChats [`Self::quiet_other_streams`] switched off on again.
     pub(crate) fn unquiet_other_streams(&self) {
-        for to in std::mem::take(&mut *self.quieted.lock().unwrap()) {
+        for to in std::mem::take(&mut *self.quieted.locked()) {
             let _ = send_streaming(to, true);
         }
     }

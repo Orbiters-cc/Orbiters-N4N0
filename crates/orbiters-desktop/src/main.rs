@@ -6,6 +6,9 @@
 // No console window in release builds on Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[macro_use(log_error, log_info, log_warn)]
+extern crate orbiters_core;
+
 mod app;
 mod appearance;
 mod chat_bar;
@@ -76,6 +79,8 @@ mod worker;
 #[cfg(test)]
 mod layers;
 #[cfg(test)]
+mod unseen;
+#[cfg(test)]
 mod test_alloc;
 #[cfg(all(test, windows))]
 mod test_crash;
@@ -114,7 +119,7 @@ pub(crate) fn hold_the_mta() {
     HELD.call_once(|| {
         // SAFETY: a plain call; its cookie is never handed back, so the apartment lasts as long as the process.
         if let Err(e) = unsafe { windows::Win32::System::Com::CoIncrementMTAUsage() } {
-            eprintln!("COM: the multithreaded apartment could not be held ({e})"); // i18n: not shown (a log's line)
+            log_warn!("COM: the multithreaded apartment could not be held ({e})", e = e); // i18n: not shown (a log's line)
         }
     });
 }
@@ -131,6 +136,9 @@ fn main() -> anyhow::Result<()> {
         ipc::SAY_STATE.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     orbiters_core::panic_log::install();
+    // Which process of the app this is, in its log (`orbiters_core::app_log`).
+    let role = args.first().and_then(|a| a.strip_prefix("--")).filter(|a| *a != "hidden").unwrap_or("service");
+    orbiters_core::app_log::open(&orbiters_core::paths::logs_dir(), role);
     let result = match args.first().map(String::as_str) {
         Some("--screenshot") => {
             // On a thread of its own: its table of scenarios and a page's frames outgrow the main thread's 1 MB stack in
@@ -183,6 +191,10 @@ fn main() -> anyhow::Result<()> {
         }
         _ => service::run(args.iter().any(|a| a == "--hidden")),
     };
+    if let Err(e) = &result {
+        log_error!("the process ends: {e:#}", e = e);
+    }
+    orbiters_core::app_log::flush(std::time::Duration::from_secs(1));
     if let Some(private_roots) = private_roots { private_roots.cleanup()?; }
     result
 }

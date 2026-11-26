@@ -17,6 +17,10 @@ fn session(name: &str) -> PathBuf {
 
 /// A controller with a run of `dir` under way, half trained, whose worker says `lines` once it is asked anything.
 fn running(ctl: &Shared, dir: &Path, integrated: bool, lines: &str) {
+    running_with(ctl, dir, integrated, lines, || {});
+}
+
+fn running_with(ctl: &Shared, dir: &Path, integrated: bool, lines: &str, before_event: impl Fn() + Send + 'static) {
     use std::os::windows::process::CommandExt;
     let mut cmd = std::process::Command::new("cmd");
     cmd.raw_arg(format!(r#"/S /C "set /p asked= {lines}""#));
@@ -24,7 +28,10 @@ fn running(ctl: &Shared, dir: &Path, integrated: bool, lines: &str) {
     let exit = ctl.clone();
     let exits = stand_in_exits(ctl);
     exits.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let handle = ReconstructHandle::spawn_command(cmd, move |e| events.on_reconstruct_event(e), |_| {}, move || {
+    let handle = ReconstructHandle::spawn_command(cmd, move |e| {
+        before_event();
+        events.on_reconstruct_event(e);
+    }, |_| {}, move || {
         exit.on_reconstruct_exit();
         exits.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }).unwrap();
@@ -89,17 +96,30 @@ fn a_capture_pauses_the_run_and_its_progress_stays_on_show() {
     let ctl = Controller::new(Settings::default());
     let dir = session("capture");
     capturing(&ctl, true);
-    running(&ctl, &dir, false, PAUSED);
+    let (acknowledge, wait_for_ack) = std::sync::mpsc::channel();
+    let wait_for_ack = std::cell::Cell::new(Some(wait_for_ack));
+    running_with(&ctl, &dir, false, PAUSED, move || {
+        if let Some(wait) = wait_for_ack.take() {
+            let _ = wait.recv();
+        }
+    });
     let before = ctl.view().reconstruction.as_ref().map(overall_progress).unwrap();
     assert!((before - 0.52).abs() < 1e-5);
-    let asked = Instant::now();
-    ctl.capture_takes_the_gpu();
-    assert!(asked.elapsed() < Duration::from_millis(100), "a capture does not wait for it: {:?}", asked.elapsed());
+    let (asked, wait_for_request) = std::sync::mpsc::channel();
+    let capture = ctl.clone();
+    let request = std::thread::spawn(move || {
+        capture.capture_takes_the_gpu();
+        let _ = asked.send(());
+    });
+    // Capture returns even though the worker's reply is still blocked.
+    wait_for_request.recv_timeout(Duration::from_secs(30)).expect("the capture waited for the worker's reply");
+    request.join().unwrap();
     assert!(toast(&ctl, "continues from where it was"), "the notice");
     let j = ctl.view().reconstruction.clone().unwrap();
     assert!(j.paused && overall_progress(&j) == before);
     assert_eq!(ctl.view().reconstruct_queue, vec![dir.clone()], "first in line");
     assert!(!ctl.pause_reconstruction(), "asked once");
+    acknowledge.send(()).unwrap();
     gone(&ctl);
     let j = ctl.view().reconstruction.clone().expect("on show, paused");
     assert!(j.paused && overall_progress(&j) == before && j.iteration == 500);

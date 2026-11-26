@@ -17,6 +17,7 @@
 mod edit3d;
 mod select;
 
+use orbiters_core::locks::*;
 pub use select::{discard_edits, pictures};
 
 use super::splat_worker::{Request, Worker};
@@ -326,7 +327,7 @@ impl Viewer {
                         }
                     }
                     Err(e) => {
-                        eprintln!("3D view: {e}");
+                        log_warn!("3D view: {e}", e = e);
                         self.refused = Some(to);
                     }
                 }
@@ -433,7 +434,10 @@ impl Viewer {
                 Source::Window(renderer) => {
                     let callback = SplatCallback { renderer: renderer.clone(), camera, confidence, far, dof: DepthOfField::default(), probe: None, marks };
                     p.add(egui_wgpu::Callback::new_paint_callback(rect, callback));
-                    let (error, checking) = renderer.lock().map(|r| (r.error.clone(), r.checks > 0)).unwrap_or_default();
+                    let (error, checking) = {
+                        let r = renderer.locked();
+                        (r.error.clone(), r.checks > 0)
+                    };
                     if checking {
                         ctx.request_repaint();
                     }
@@ -999,7 +1003,7 @@ fn load(dir: &Path, ctx: &egui::Context, window: (wgpu::Device, wgpu::Queue), in
     let source = match integrated.then(|| source(ctx, window.clone(), true, &g, sky.as_ref(), marks)) {
         Some(Ok(s)) => s,
         Some(Err(e)) => {
-            eprintln!("3D view on the window's GPU, not the integrated one: {e:#}");
+            log_warn!("3D view on the window's GPU, not the integrated one: {e:#}", e = e);
             source(ctx, window, false, &g, sky.as_ref(), marks)?
         }
         None => source(ctx, window, false, &g, sky.as_ref(), marks)?,
@@ -1166,7 +1170,7 @@ impl egui_wgpu::CallbackTrait for SplatCallback {
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         let Some(blit) = Blit::of(device, resources) else { return Vec::new() };
-        let mut r = self.renderer.lock().unwrap();
+        let mut r = self.renderer.locked();
         let size = (self.camera.width, self.camera.height);
         if r.target.as_ref().is_none_or(|t| t.size != size) {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -1223,7 +1227,7 @@ impl egui_wgpu::CallbackTrait for SplatCallback {
     }
 
     fn paint(&self, _info: egui::PaintCallbackInfo, pass: &mut wgpu::RenderPass<'static>, resources: &egui_wgpu::CallbackResources) {
-        let (Some(blit), Ok(r)) = (resources.get::<Blit>(), self.renderer.lock()) else { return };
+        let (Some(blit), r) = (resources.get::<Blit>(), self.renderer.locked()) else { return };
         let Some(t) = r.target.as_ref() else { return };
         blit.draw(pass, &t.bind_group);
     }

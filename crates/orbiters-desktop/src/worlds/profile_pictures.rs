@@ -21,6 +21,8 @@
 //! Picture addresses are never written to a log. What happened to each person's picture is ([`note`]): a short digest
 //! of their id, the kind of address and the outcome, so the next session's log says why a missing picture is missing.
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use egui::ColorImage;
 use image::RgbaImage;
 use orbiters_contracts::qoi;
@@ -56,7 +58,7 @@ const MAGIC: &[u8; 8] = b"ORBPIC1\n";
 pub fn note(line: &str) {
     use std::io::Write;
     static LOCK: Mutex<()> = Mutex::new(());
-    let _one = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = LOCK.locked();
     let dir = orbiters_core::paths::logs_dir();
     let path = dir.join("profile-pictures.log");
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1 << 20) {
@@ -303,7 +305,7 @@ impl Fetcher {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Line> {
-        self.line.0.lock().unwrap_or_else(|e| e.into_inner())
+        self.line.0.locked()
     }
 
     fn start(&self, line: &mut Line) {
@@ -312,7 +314,7 @@ impl Fetcher {
         }
         for i in 0..FETCHERS {
             let (line, store) = (self.line.clone(), self.store.clone());
-            let _ = std::thread::Builder::new().name(format!("profile-pictures-{i}")).spawn(move || work(&line, &store));
+            std::thread::Builder::new().name(format!("profile-pictures-{i}")).spawn(move || work(&line, &store)).or_log("a thread could not be started");
         }
     }
 
@@ -384,7 +386,7 @@ fn work(line: &(Mutex<Line>, Condvar), store: &Store) {
     let (lock, ready) = line;
     loop {
         let job = {
-            let mut l = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let mut l = lock.locked();
             loop {
                 if l.stopped {
                     return;
@@ -395,8 +397,8 @@ fn work(line: &(Mutex<Line>, Condvar), store: &Store) {
                         l.most_running = l.most_running.max(l.running.len());
                         break job;
                     }
-                    Err(Some(wait)) => l = ready.wait_timeout(l, wait).unwrap_or_else(|e| e.into_inner()).0,
-                    Err(None) => l = ready.wait(l).unwrap_or_else(|e| e.into_inner()),
+                    Err(Some(wait)) => l = ready.wait_timeout_locked(l, wait).0,
+                    Err(None) => l = ready.wait_locked(l),
                 }
             }
         };
@@ -428,7 +430,7 @@ fn work(line: &(Mutex<Line>, Condvar), store: &Store) {
         };
         let Job { id, url, user, via, replies, tries, .. } = job;
         let image = {
-            let mut l = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let mut l = lock.locked();
             l.running.remove(&id);
             let image = match outcome {
                 Outcome::Got(image) => {
@@ -466,7 +468,7 @@ type Shared = Vec<(Option<Account>, Arc<Profiles>)>;
 /// Those of the accounts asked about in this process.
 fn shared() -> std::sync::MutexGuard<'static, Shared> {
     static SHARED: Mutex<Shared> = Mutex::new(Vec::new());
-    SHARED.lock().unwrap_or_else(|e| e.into_inner())
+    SHARED.locked()
 }
 
 /// The account on show is `account`: what this process holds of another's goes (what asks for its pictures ends with it).
@@ -582,7 +584,7 @@ impl Profiles {
         let me = self.clone();
         // A new list, or the session back: asked again at once.
         self.fetcher.resume();
-        let _ = std::thread::Builder::new().name("profile-pictures-warm".into()).spawn(move || {
+        std::thread::Builder::new().name("profile-pictures-warm".into()).spawn(move || {
             me.fetcher.clear_background();
             let (mut kept, mut elsewhere, mut queued) = (0, 0, 0);
             let total = items.len();
@@ -602,7 +604,7 @@ impl Profiles {
                 me.fetcher.queue(&url, user.as_deref(), via.clone());
             }
             note(&format!("list of {total} pictures: {kept} kept, {elsewhere} from VRCX or VRCNext, {queued} to ask of VRChat")); // i18n: not shown (a log line)
-        });
+        }).or_log("a thread could not be started");
     }
 }
 

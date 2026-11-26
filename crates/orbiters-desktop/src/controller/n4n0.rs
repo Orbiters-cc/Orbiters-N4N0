@@ -4,6 +4,8 @@
 //! walk boost) and its OSC (the service's own, on this computer's loopback, and the values VRChat sent), through
 //! [`Link`], which holds the controller weakly: N4N0 lives inside it.
 
+use orbiters_core::locks::*;
+use orbiters_core::app_log::OrLog as _;
 use super::rest::Part;
 use super::{Controller, NoticeKind, Shared};
 use crate::state::{CallsStatus, N4n0Status, ProcessUsage};
@@ -59,14 +61,14 @@ impl Host for Link {
 
     fn scene(&self) -> Scene {
         self.with(|c| {
-            let s = c.snapshot.lock().unwrap();
+            let s = c.snapshot.locked();
             Scene { vrchat: s.vrchat.running, vrchat_pid: s.vrchat.pid, steamvr: s.steamvr.running }
         })
         .unwrap_or_default()
     }
 
     fn world(&self) -> WorldState {
-        self.with(|c| (*c.snapshot.lock().unwrap().vrchat.world).clone()).unwrap_or_default()
+        self.with(|c| (*c.snapshot.locked().vrchat.world).clone()).unwrap_or_default()
     }
 
     fn capturing(&self) -> bool {
@@ -133,7 +135,7 @@ impl Host for Link {
     }
 
     fn calls(&self) -> CallsStatus {
-        self.with(|c| (*c.snapshot.lock().unwrap().n4n0.calls).clone()).unwrap_or_default()
+        self.with(|c| (*c.snapshot.locked().n4n0.calls).clone()).unwrap_or_default()
     }
 
     fn ringing_in(&self) -> bool {
@@ -295,7 +297,7 @@ impl Osc for Link {
 
     fn latest(&self, addresses: &mut dyn Iterator<Item = String>) -> HashMap<String, OscValue> {
         self.with(|c| {
-            let osc = c.osc_values.lock().unwrap();
+            let osc = c.osc_values.locked();
             addresses.filter_map(|a| osc.latest.first(&a).map(|v| (a, v))).collect()
         })
         .unwrap_or_default()
@@ -379,7 +381,7 @@ impl Controller {
             }
         });
         let ctl = self.clone();
-        let _ = std::thread::Builder::new().name("n4n0-resources".into()).spawn(move || {
+        std::thread::Builder::new().name("n4n0-resources".into()).spawn(move || {
             let mut system = sysinfo::System::new();
             let mut before: Option<(Instant, Vec<crate::perf::Raw>)> = None;
             let (mut read, mut sent): (Option<Instant>, Option<Instant>) = (None, None);
@@ -416,7 +418,7 @@ impl Controller {
                 }
                 rest.wait(if busy { Some(Duration::from_secs(1)) } else { (performance && ctl.performance_waits()).then_some(PERFORMANCE_EVERY) });
             }
-        });
+        }).or_log("a thread could not be started");
     }
 
     /// What the window and the overlay ask of N4N0.

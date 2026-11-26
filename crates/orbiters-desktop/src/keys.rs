@@ -4,6 +4,8 @@
 //! keyboard layout writes them (Shift, AltGr, Caps Lock); Backspace, Enter (Search or Done), Escape (back) and Ctrl+V
 //! (the clipboard's text) do what they do in a text field. Shift, Ctrl, Alt and the Windows keys go through untouched.
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use orbiters_n4n0_core::menu::KeyInput;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
@@ -117,14 +119,14 @@ pub fn start(sink: mpsc::Sender<KeyInput>) {
     }
     #[cfg(windows)]
     {
-        let _ = std::thread::Builder::new().name("keyboard".into()).spawn(windows_thread);
+        std::thread::Builder::new().name("keyboard".into()).spawn(windows_thread).or_log("a thread could not be started");
     }
 }
 
 /// A key typed where the menu's keyboard page shows over VRChat and holds the keyboard itself (a Mac, `overlay::orbit::desktop_mac`): to where the hook's keys go.
 pub fn typed(key: KeyInput) {
     if let Some(sink) = SINK.get() {
-        let _ = sink.lock().unwrap_or_else(|e| e.into_inner()).send(key);
+        let _ = sink.locked().send(key);
     }
 }
 
@@ -232,7 +234,7 @@ unsafe extern "system" fn hook(
             if !injected && !(vrchat != 0 && pid == vrchat && !passes(info.vkCode)) {
                 // Not the menu's to look at: only who holds the key is kept.
                 let down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
-                if KEYS.lock().map(|mut keys| keys.elsewhere(info.vkCode, down)).unwrap_or(false) {
+                if KEYS.locked().elsewhere(info.vkCode, down) {
                     return windows::Win32::Foundation::LRESULT(1);
                 }
             }
@@ -243,12 +245,12 @@ unsafe extern "system" fn hook(
                 let shortcut = windows_shortcut(info.vkCode, ctrl, alt, key_down(VK_SHIFT.0), key_down(VK_LWIN.0) || key_down(VK_RWIN.0));
                 // A down the menu takes, and that down's up: VRChat sees none of it (a W walks nobody). Any other up, a
                 // key held before the menu took the keyboard, and Windows' shortcuts go on.
-                let taken = KEYS.lock().map(|mut k| k.take(info.vkCode, down, !shortcut)).unwrap_or(!shortcut);
+                let taken = KEYS.locked().take(info.vkCode, down, !shortcut);
                 if taken {
                     if down {
                         if let Some(input) = input_of(info.vkCode, info.scanCode, ctrl, alt) {
                             if let Some(sink) = SINK.get() {
-                                let _ = sink.lock().map(|s| s.send(input));
+                                let _ = sink.locked().send(input);
                             }
                         }
                     }
@@ -281,12 +283,10 @@ fn windows_thread() {
                     use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
                     match SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), None, 0) {
                         Ok(h) => hooked = Some(h),
-                        Err(e) => eprintln!("keyboard: {e}"),
+                        Err(e) => log_warn!("keyboard: {e}", e = e),
                     }
                     let down = (1u32..256).filter(|&vk| (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0);
-                    if let Ok(mut keys) = KEYS.lock() {
-                        *keys = Owners::taken_with(down);
-                    }
+                    *KEYS.locked() = Owners::taken_with(down);
                 }
                 (false, Some(h)) => {
                     let _ = UnhookWindowsHookEx(h);

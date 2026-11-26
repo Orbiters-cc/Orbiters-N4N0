@@ -12,6 +12,7 @@
 //! The parts are functions of the frame's place on screen and the geometry ([`target`], [`View`], [`overlay_input`],
 //! [`draw_overlay`]) so another picture (a 3D view) can be cropped by the same frame.
 
+use orbiters_core::locks::*;
 use super::Editor;
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Painter, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2};
 use orbiters_i18n::{mark, tr};
@@ -800,7 +801,7 @@ fn tools_row(ed: &mut Editor, ui: &mut Ui, id: Id, r: Rect, size: (f32, f32)) {
         ed.crop.shapes = !shapes;
     }
     let more_r = next(36.0);
-    let pasted = COPIED.lock().ok().and_then(|c| c.clone());
+    let pasted = COPIED.locked().clone();
     let items = [
         Item::new(tr("Rotate a quarter to the right")).icon(icons::ARROW_ARC_RIGHT),
         Item::new(tr("Flip upside down")).icon(icons::FLIP_VERTICAL),
@@ -812,9 +813,7 @@ fn tools_row(ed: &mut Editor, ui: &mut Ui, id: Id, r: Rect, size: (f32, f32)) {
         Some(0) => turn(g, false),
         Some(1) => flip(g, false),
         Some(2) => {
-            if let Ok(mut c) = COPIED.lock() {
-                *c = Some(g.clone());
-            }
+            *COPIED.locked() = Some(g.clone());
         }
         Some(3) => {
             if let Some(mut copied) = pasted {

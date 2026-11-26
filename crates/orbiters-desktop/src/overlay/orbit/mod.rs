@@ -36,6 +36,8 @@ pub mod sheet_view;
 pub mod vr;
 pub mod zones;
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use super::menu_ui::{self, Skin, View};
 use super::menu_retro;
 use super::worlds::Worlds;
@@ -625,9 +627,9 @@ impl Recents {
             let (tx, rx) = mpsc::channel();
             self.rx = Some(rx);
             let list = self.lister.unwrap_or(list_pictures);
-            let _ = std::thread::Builder::new().name("orbit-recent".into()).spawn(move || {
+            std::thread::Builder::new().name("orbit-recent".into()).spawn(move || {
                 let _ = tx.send(list(&sessions, &folders));
-            });
+            }).or_log("a thread could not be started");
         }
         changed
     }
@@ -709,9 +711,9 @@ impl Recents {
                 let (give, got) = mpsc::sync_channel(4);
                 for _ in 0..PICTURE_READERS {
                     let (asked, give) = (asked.clone(), give.clone());
-                    let _ = std::thread::Builder::new().name("orbit-pictures".into()).spawn(move || loop {
+                    std::thread::Builder::new().name("orbit-pictures".into()).spawn(move || loop {
                         let picture = {
-                            let mut queue = asked.0.lock().unwrap_or_else(|e| e.into_inner());
+                            let mut queue = asked.0.locked();
                             loop {
                                 if let Some(picture) = queue.pop() {
                                     break picture;
@@ -720,14 +722,14 @@ impl Recents {
                                 if std::sync::Arc::strong_count(&asked) <= PICTURE_READERS {
                                     return;
                                 }
-                                queue = asked.1.wait_timeout(queue, Duration::from_secs(1)).unwrap_or_else(|e| e.into_inner()).0;
+                                queue = asked.1.wait_timeout_locked(queue, Duration::from_secs(1)).0;
                             }
                         };
                         let image = crate::worlds::decode_local(&picture).map(|image| if matches!(picture, crate::worlds::Picture::Session(_)) { lifted(image) } else { image });
                         if give.send((picture, image)).is_err() {
                             return;
                         }
-                    });
+                    }).or_log("a thread could not be started");
                 }
                 (asked, got)
             })
@@ -746,7 +748,7 @@ impl Recents {
             self.asked.push(i);
         }
         let asked = self.reader().clone();
-        asked.0.lock().unwrap_or_else(|e| e.into_inner()).extend(pictures);
+        asked.0.locked().extend(pictures);
         asked.1.notify_all();
     }
 
@@ -800,7 +802,7 @@ impl Recents {
             self.asked.push(i);
         }
         let asked = self.reader().clone();
-        asked.0.lock().unwrap_or_else(|e| e.into_inner()).extend(pictures);
+        asked.0.locked().extend(pictures);
         asked.1.notify_all();
     }
 
@@ -820,7 +822,7 @@ impl Recents {
         if self.asked.len() != before {
             let wanted: std::collections::HashSet<&crate::worlds::Picture> = self.asked.iter().filter_map(|i| self.loaded.get(*i)).map(|r| &r.source).chain(self.big.iter().map(|b| &b.0)).collect();
             if let Some((asked, _)) = &self.reader {
-                asked.0.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| wanted.contains(p));
+                asked.0.locked().retain(|p| wanted.contains(p));
             }
         }
     }
@@ -831,7 +833,7 @@ impl Recents {
         let picture = crate::worlds::Picture::Shot { path, size, width: LARGE_PICTURE };
         self.big = Some((picture.clone(), None));
         let asked = self.reader().clone();
-        asked.0.lock().unwrap_or_else(|e| e.into_inner()).push(picture);
+        asked.0.locked().push(picture);
         asked.1.notify_all();
     }
 }
@@ -1375,12 +1377,12 @@ impl Panels {
         if let Some(panel) = self.takeover.as_mut() {
             panel.dirty = true;
         }
-        let _ = std::thread::Builder::new().name("orbit-mic-default".into()).spawn(move || { // i18n: not shown (a thread's name)
+        std::thread::Builder::new().name("orbit-mic-default".into()).spawn(move || { // i18n: not shown (a thread's name)
             use crate::audio_devices::{set_default, ROLES};
             if let Err(e) = ROLES.iter().try_for_each(|role| set_default(&id, *role)) {
                 super::vr_log::line(&format!("mic: Windows did not take {id}: {e}")); // i18n: not shown (a log's line)
             }
-        });
+        }).or_log("a thread could not be started");
     }
 
     /// The page of microphones, each turn it shows: what they hear now.
@@ -2190,11 +2192,11 @@ impl Panels {
         #[cfg(not(test))]
         {
             let url = url.to_string();
-            let _ = std::thread::Builder::new().name("orbit-open-link".into()).spawn(move || {
+            std::thread::Builder::new().name("orbit-open-link".into()).spawn(move || {
                 if let Err(e) = crate::controller::open_url(&url) {
-                    eprintln!("orbit: the code's page did not open: {e}"); // i18n: not shown (a log's line)
+                    log_warn!("orbit: the code's page did not open: {e}", e = e); // i18n: not shown (a log's line)
                 }
-            });
+            }).or_log("a thread could not be started");
         }
     }
 
@@ -2259,11 +2261,11 @@ impl Panels {
             self.share_thumb = key.clone().map(|k| (k, None));
             self.share_thumb_coming = key.map(|key| {
                 let (tx, rx) = mpsc::channel();
-                let _ = std::thread::Builder::new().name("share-here-picture".into()).spawn(move || {
+                std::thread::Builder::new().name("share-here-picture".into()).spawn(move || {
                     let picture = orbiters_core::bundle::read_thumbnail(std::path::Path::new(&key))
                         .map(|(w, h, rgba)| ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba));
                     let _ = tx.send((key, picture));
-                });
+                }).or_log("a thread could not be started");
                 rx
             });
             self.share_here_dirty();
@@ -3738,9 +3740,9 @@ impl Panels {
                 // The sound devices there are, read off this thread: it is COM, and may take a moment.
                 let (tx, rx) = mpsc::channel();
                 self.audio_outputs_coming = Some(rx);
-                let _ = std::thread::Builder::new().name("orbit-sound-devices".into()).spawn(move || {
+                std::thread::Builder::new().name("orbit-sound-devices".into()).spawn(move || {
                     let _ = tx.send(crate::audio_devices::list(crate::audio_devices::Flow::Output).unwrap_or_default());
-                });
+                }).or_log("a thread could not be started");
             }
             Action::Translate => self.open_sheet(Sheet::Translate, mark("Translation"), snap),
             Action::Set(pick) => self.set(pick, snap),

@@ -1,5 +1,6 @@
 //! Projects the person hid from the Unity projects page (`Orbiters/hidden-projects.json`): this computer's choice for
 //! that page only. VCC and ALCOM keep listing them, and nothing in the projects changes.
+use orbiters_core::locks::*;
 use crate::{discovery, own};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
@@ -48,7 +49,7 @@ impl Change {
     fn save_to(self, file: &Path) -> anyhow::Result<()> {
         // Workers may finish out of order: an older change of a project must never land over its newer one.
         static LAST: Mutex<Option<HashMap<(PathBuf, String), u64>>> = Mutex::new(None);
-        let mut last = LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut last = LAST.locked();
         let last = last.get_or_insert_default().entry((file.into(), self.key.clone())).or_default();
         if self.number < *last {
             return Ok(());

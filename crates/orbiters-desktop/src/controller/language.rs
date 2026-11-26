@@ -1,6 +1,7 @@
 //! The language with the account, on a thread of its own so nothing waits on the network: a pick goes up, a change on the website comes down. Unreachable
 //! (or a server without this yet), nothing changes: the last language known stays until the next try.
 
+use orbiters_core::app_log::OrLog as _;
 use super::rest::Part;
 use super::{Controller, Shared};
 use std::time::{Duration, Instant};
@@ -49,7 +50,7 @@ pub(super) fn wait(signed_in: Option<bool>, unsent: bool, since_try: Option<Dura
 impl Controller {
     pub(super) fn start_language(self: &Shared) {
         let ctl = self.clone();
-        let _ = std::thread::Builder::new().name("language".into()).spawn(move || {
+        std::thread::Builder::new().name("language".into()).spawn(move || {
             let mut token: Option<String> = None;
             let mut tried: Option<Instant> = None;
             let mut told = false;
@@ -59,7 +60,7 @@ impl Controller {
                 let unsent = ctl.with_settings(|s| s.language_unsent);
                 rest.wait(wait(ctl.language_account().as_ref().map(Option::is_some), unsent, tried.map(|t| t.elapsed())));
             }
-        });
+        }).or_log("a thread could not be started");
     }
 
     fn language_turn(self: &Shared, token: &mut Option<String>, tried: &mut Option<Instant>, told: &mut bool) {
@@ -85,7 +86,7 @@ impl Controller {
         };
         let mut note = |e: anyhow::Error| {
             if !std::mem::replace(told, true) {
-                eprintln!("language with the account: {e:#}");
+                log_warn!("language with the account: {e:#}", e = e);
             }
         };
         match what {

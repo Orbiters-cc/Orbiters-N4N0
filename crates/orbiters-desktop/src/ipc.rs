@@ -9,6 +9,7 @@
 //! the state the service published, whole. An unreadable line ends the link immediately, just as service EOF does.
 //! A newly made link starts with the whole state. Service and clients are one program: there is no other version to support.
 
+use orbiters_core::locks::*;
 use crate::controller::Notice;
 use crate::state::{MapsMine, Snapshot};
 use orbiters_contracts::performance::calibration::Calibration;
@@ -439,7 +440,7 @@ pub fn write_state(w: &mut impl Write, sent: Option<&Arc<Snapshot>>, snapshot: &
     }
     static LAST: Mutex<Option<Written>> = Mutex::new(None);
     let line = {
-        let mut last = LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut last = LAST.locked();
         let made = last.as_ref().filter(|made| {
             is(&made.now, snapshot)
                 && match (&made.since, sent) {
@@ -744,10 +745,13 @@ pub const BACKGROUND_PACE: Duration = Duration::from_millis(200);
 fn leave_soon() {
     // Tests make links that close: their process stays.
     #[cfg(all(target_os = "macos", not(test)))]
-    let _ = std::thread::Builder::new().name("leaving".into()).spawn(|| {
-        std::thread::sleep(Duration::from_secs(3));
-        std::process::exit(0);
-    });
+    {
+        use orbiters_core::app_log::OrLog as _;
+        std::thread::Builder::new().name("leaving".into()).spawn(|| {
+            std::thread::sleep(Duration::from_secs(3));
+            std::process::exit(0);
+        }).or_log("a thread could not be started");
+    }
 }
 
 impl Client {
@@ -819,46 +823,46 @@ impl Client {
                 let news = matches!(msg, ToClient::Snapshot { .. });
                 match msg {
                     ToClient::SmoothingAck { id, revision } => {
-                        let mut held = c.state.lock().unwrap();
+                        let mut held = c.state.locked();
                         // Taken in their order: it says it for those before it whose own went (mailbox.rs).
                         for p in held.smoothing.iter_mut().filter(|p| p.0 <= id) { p.2.get_or_insert(revision); }
                         held.follow_smoothing();
                     }
                     ToClient::EditSettled { id } => {
-                        let mut held = c.state.lock().unwrap();
+                        let mut held = c.state.locked();
                         if held.closed || held.edit != Some(id) {
                             continue;
                         }
                         held.follow_smoothing();
                     }
                     ToClient::Snapshot { snapshot } => c.take_snapshot(Arc::new(*snapshot)),
-                    ToClient::Notice { notice } => c.notices.lock().unwrap().push(notice),
+                    ToClient::Notice { notice } => c.notices.locked().push(notice),
                     ToClient::Library { version } => c.library.store(version, Ordering::Relaxed),
-                    ToClient::WorkerLog { lines } => *c.worker_log.lock().unwrap() = Some(lines),
-                    ToClient::Maps { mine } => *c.maps.lock().unwrap() = Some(mine),
+                    ToClient::WorkerLog { lines } => *c.worker_log.locked() = Some(lines),
+                    ToClient::Maps { mine } => *c.maps.locked() = Some(mine),
                     ToClient::VrchatData { id, result } => {
-                        if let Some(tx) = c.vrchat_data.lock().unwrap().remove(&id) {
+                        if let Some(tx) = c.vrchat_data.locked().remove(&id) {
                             let _ = tx.send(result);
                         }
                     }
                     ToClient::Groups { id, reply } => {
-                        if let Some(tx) = c.groups.lock().unwrap().remove(&id) {
+                        if let Some(tx) = c.groups.locked().remove(&id) {
                             let _ = tx.send(reply);
                         }
                     }
                     ToClient::Member { id, answer } => {
-                        if let Some(tx) = c.member.lock().unwrap().remove(&id) {
+                        if let Some(tx) = c.member.locked().remove(&id) {
                             let _ = tx.send(answer);
                         }
                     }
                     ToClient::Translated { id, result } => {
-                        if let Some(tx) = c.translated.lock().unwrap().remove(&id) {
+                        if let Some(tx) = c.translated.locked().remove(&id) {
                             let _ = tx.send(result);
                         }
                     }
                     ToClient::Locomotion { values } => {
                         let now = Instant::now();
-                        let mut held = c.locomotion.lock().unwrap();
+                        let mut held = c.locomotion.locked();
                         held.extend(values.into_iter().map(|(name, value)| (now, name, value)));
                         // Nobody took them (translation went off in between): the latest are enough.
                         let excess = held.len().saturating_sub(256);
@@ -868,7 +872,7 @@ impl Client {
                     }
                     ToClient::Show => c.show.store(true, Ordering::Relaxed),
                     ToClient::ShowPage { page } => {
-                        *c.show_page.lock().unwrap() = Some(page);
+                        *c.show_page.locked() = Some(page);
                         c.show.store(true, Ordering::Relaxed);
                     }
                     ToClient::Close => {
@@ -888,7 +892,7 @@ impl Client {
     /// With `--say-state`: the state the link holds, by its digest.
     fn say_state(&self) {
         if SAY_STATE.load(Ordering::Relaxed) {
-            let held = self.state.lock().unwrap().service.clone();
+            let held = self.state.locked().service.clone();
             println!("state {}", digest(&held));
         }
     }
@@ -896,7 +900,7 @@ impl Client {
     /// A frame for what came; for the service's news, while the window is behind VRChat, at most [`BACKGROUND_PACE`]
     /// after the last.
     fn repaint(&self, news: bool) {
-        if let Some(ctx) = self.repaint.lock().unwrap().as_ref() {
+        if let Some(ctx) = self.repaint.locked().as_ref() {
             if news && self.background.load(Ordering::Relaxed) {
                 ctx.request_repaint_after(BACKGROUND_PACE);
             } else {
@@ -912,7 +916,7 @@ impl Client {
     }
 
     pub fn attach(&self, ctx: &egui::Context) {
-        *self.repaint.lock().unwrap() = Some(ctx.clone());
+        *self.repaint.locked() = Some(ctx.clone());
     }
 
     pub fn send(&self, msg: &ToService) {
@@ -921,20 +925,20 @@ impl Client {
 
     /// [`Self::send`], saying whether the line was written (false: the link is closed or the write failed).
     pub fn try_send(&self, msg: &ToService) -> bool {
-        let mut writer = self.writer.lock().unwrap();
-        if self.state.lock().unwrap().closed {
+        let mut writer = self.writer.locked();
+        if self.state.locked().closed {
             return false;
         }
         write_line(&mut *writer, msg).is_ok()
     }
 
     pub fn snapshot(&self) -> Arc<Snapshot> {
-        self.state.lock().unwrap().shown.clone()
+        self.state.locked().shown.clone()
     }
 
     /// Keep released slider values until both their acknowledgement and its authoritative state arrive.
     pub fn patch_smoothing(&self, patch: serde_json::Value) {
-        let mut held = self.state.lock().unwrap();
+        let mut held = self.state.locked();
         held.next_smoothing += 1;
         let id = held.next_smoothing;
         held.smoothing.push((id, patch.clone(), None));
@@ -946,9 +950,9 @@ impl Client {
 
     /// Show an edit immediately and send it with the ID that its own reply will settle.
     pub(crate) fn send_edit(&self, edit: impl FnOnce(u64, &mut Snapshot) -> ToService) {
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = self.writer.locked();
         let message = {
-            let mut held = self.state.lock().unwrap();
+            let mut held = self.state.locked();
             if held.closed {
                 return;
             }
@@ -970,7 +974,7 @@ impl Client {
     /// Whole state replacement and closure are serialized. A terminated connection can never be revived by a
     /// late readable line; a new connection gets its own full baseline in connect.
     fn take_snapshot(&self, snapshot: Arc<Snapshot>) {
-        let mut held = self.state.lock().unwrap();
+        let mut held = self.state.locked();
         if held.closed { return; }
         crate::controller::follow_environment(snapshot.settings.development);
         held.service = snapshot.clone();
@@ -982,7 +986,7 @@ impl Client {
 
     /// Apply atomically, or terminate this connection under the very same lock. There is no retry or recovery worker.
     fn take_changes(&self, parts: &str) -> bool {
-        let mut held = self.state.lock().unwrap();
+        let mut held = self.state.locked();
         if held.closed { return false; }
         let mut next = (*held.service).clone();
         if let Err(e) = orbiters_core::slice::apply_changes(&mut next, parts) {
@@ -1016,7 +1020,7 @@ impl Client {
 
     /// EOF, unreadable input and I/O errors all use exactly the same disconnect path.
     fn disconnect(&self) {
-        let mut held = self.state.lock().unwrap();
+        let mut held = self.state.locked();
         if held.closed { return; }
         self.close_locked(&mut held);
         drop(held);
@@ -1026,17 +1030,17 @@ impl Client {
     fn finish_close(&self) {
         // Cancels waiting receivers, not work the service has already accepted. Nothing is replayed. A translation
         // waiting for its answer returns at once too, not after its 30 s (CTL-11 f).
-        self.vrchat_data.lock().unwrap().clear();
-        self.groups.lock().unwrap().clear();
-        self.member.lock().unwrap().clear();
-        self.translated.lock().unwrap().clear();
+        self.vrchat_data.locked().clear();
+        self.groups.locked().clear();
+        self.member.locked().clear();
+        self.translated.locked().clear();
         if SAY_STATE.load(Ordering::Relaxed) { println!("link ended"); }
         self.repaint(false);
         leave_soon();
     }
 
     pub fn take_notices(&self) -> Vec<Notice> {
-        std::mem::take(&mut *self.notices.lock().unwrap())
+        std::mem::take(&mut *self.notices.locked())
     }
 
     pub fn library_version(&self) -> u64 {
@@ -1044,11 +1048,11 @@ impl Client {
     }
 
     pub fn worker_log(&self) -> Option<Vec<String>> {
-        self.worker_log.lock().unwrap().clone()
+        self.worker_log.locked().clone()
     }
 
     pub fn maps(&self) -> Option<MapsMine> {
-        self.maps.lock().unwrap().clone()
+        self.maps.locked().clone()
     }
 
     /// A groups request, answered to this link alone; the service's own limits bound how long it takes.
@@ -1056,22 +1060,22 @@ impl Client {
         use crate::controller::groups::{Failure, Reply};
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = std::sync::mpsc::channel();
-        self.groups.lock().unwrap().insert(id.clone(), tx);
+        self.groups.locked().insert(id.clone(), tx);
         // A link already closed: nothing was asked of the service. A line that could not be written whole may have reached
         // it all the same: lost, not "not asked".
-        if self.state.lock().unwrap().closed {
-            self.groups.lock().unwrap().remove(&id);
+        if self.state.locked().closed {
+            self.groups.locked().remove(&id);
             crate::controller::groups::not_taken_in(&request);
             return Reply::Failed(Failure::Offline);
         }
         if !self.try_send(&ToService::Groups { id: id.clone(), scope, request }) {
-            self.groups.lock().unwrap().remove(&id);
+            self.groups.locked().remove(&id);
             return Reply::Failed(Failure::Lost);
         }
         // No answer (the link closed, the mailbox let it go, the time ran out): the request may have been carried out,
         // so it is "lost", never "unavailable" (verify-r22 Blocker 1).
         let reply = rx.recv_timeout(Duration::from_secs(150)).unwrap_or(Reply::Failed(Failure::Lost));
-        self.groups.lock().unwrap().remove(&id);
+        self.groups.locked().remove(&id);
         reply
     }
 
@@ -1082,16 +1086,16 @@ impl Client {
     ) -> crate::controller::vrchat_data::Result {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = std::sync::mpsc::channel();
-        self.vrchat_data.lock().unwrap().insert(id.clone(), tx);
+        self.vrchat_data.locked().insert(id.clone(), tx);
         // Registered after the link closed (its close cleared the waiting ones before this one came): no answer can
         // come, so none is waited for (verify-controller, CTL-11 f).
-        if self.state.lock().unwrap().closed {
-            self.vrchat_data.lock().unwrap().remove(&id);
+        if self.state.locked().closed {
+            self.vrchat_data.locked().remove(&id);
             return Err(orbiters_i18n::tr("VRChat data request timed out. Please try again.").into());
         }
         self.send(&ToService::VrchatData { id: id.clone(), scope, request });
         let result = rx.recv_timeout(Duration::from_secs(120)).unwrap_or_else(|_| Err(orbiters_i18n::tr("VRChat data request timed out. Please try again.").into()));
-        self.vrchat_data.lock().unwrap().remove(&id);
+        self.vrchat_data.locked().remove(&id);
         result
     }
 
@@ -1100,10 +1104,10 @@ impl Client {
         let unanswered = || orbiters_i18n::tr("Orbiters could not be reached").to_string();
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = std::sync::mpsc::channel();
-        self.member.lock().unwrap().insert(id.clone(), tx);
+        self.member.locked().insert(id.clone(), tx);
         // As for VRChat data: after the close, nothing answers.
-        if self.state.lock().unwrap().closed {
-            self.member.lock().unwrap().remove(&id);
+        if self.state.locked().closed {
+            self.member.locked().remove(&id);
             return Err(unanswered());
         }
         self.send(&ToService::Member { id: id.clone(), epoch, request: Box::new(request) });
@@ -1112,11 +1116,11 @@ impl Client {
         let answer = loop {
             match rx.recv_timeout(Duration::from_secs(5)) {
                 Ok(answer) => break answer,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if Instant::now() < until && !self.state.lock().unwrap().closed => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if Instant::now() < until && !self.state.locked().closed => {}
                 Err(_) => break Err(unanswered()),
             }
         };
-        self.member.lock().unwrap().remove(&id);
+        self.member.locked().remove(&id);
         answer
     }
 
@@ -1124,21 +1128,21 @@ impl Client {
     pub fn translate(&self, batch: orbiters_translate::provider::Batch) -> crate::controller::translate::Answer {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = std::sync::mpsc::channel();
-        self.translated.lock().unwrap().insert(id.clone(), tx);
+        self.translated.locked().insert(id.clone(), tx);
         // As for VRChat data: after the close, nothing answers.
-        if self.state.lock().unwrap().closed {
-            self.translated.lock().unwrap().remove(&id);
+        if self.state.locked().closed {
+            self.translated.locked().remove(&id);
             return Err(crate::controller::translate::Refused::Unreachable("the link to the service is closed".into())); // i18n: not shown (log detail)
         }
         self.send(&ToService::Translate { id: id.clone(), batch });
         let result = rx.recv_timeout(Duration::from_secs(30)).unwrap_or(Err(crate::controller::translate::Refused::Unreachable("no answer".into()))); // i18n: not shown (log detail)
-        self.translated.lock().unwrap().remove(&id);
+        self.translated.locked().remove(&id);
         result
     }
 
     /// VRChat's locomotion values since the last call ([`ToClient::Locomotion`]).
     pub fn take_locomotion(&self) -> Vec<(Instant, String, f32)> {
-        std::mem::take(&mut *self.locomotion.lock().unwrap())
+        std::mem::take(&mut *self.locomotion.locked())
     }
 
     pub fn take_show(&self) -> bool {
@@ -1146,7 +1150,7 @@ impl Client {
     }
 
     pub fn take_show_page(&self) -> Option<String> {
-        self.show_page.lock().unwrap().take()
+        self.show_page.locked().take()
     }
 
     pub fn should_close(&self) -> bool {
@@ -1155,11 +1159,11 @@ impl Client {
 
     /// Why the link ended, once it did.
     pub fn ended_because(&self) -> Option<String> {
-        self.ended.lock().unwrap().clone()
+        self.ended.locked().clone()
     }
 
     fn because(&self, why: String) {
-        self.ended.lock().unwrap().get_or_insert(why);
+        self.ended.locked().get_or_insert(why);
     }
 }
 
@@ -1296,13 +1300,13 @@ pub(crate) mod tests {
         (client, writer, reader)
     }
 
-    /// Waits up to two seconds for `done`.
-    fn until(done: impl Fn() -> bool) -> bool {
-        let started = Instant::now();
-        while !done() && started.elapsed() < Duration::from_secs(2) {
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        done()
+    /// The client dispatches replies after all earlier messages on the same stream.
+    fn wait_for_dispatch(client: &Client, writer: &mut TcpStream) {
+        let id = "state-test-barrier".to_string();
+        let (send, recv) = std::sync::mpsc::channel();
+        assert!(client.translated.lock().unwrap().insert(id.clone(), send).is_none());
+        write_line(writer, &ToClient::Translated { id, result: Ok(Vec::new()) }).unwrap();
+        recv.recv_timeout(Duration::from_secs(60)).expect("the client dispatched the barrier").unwrap();
     }
 
     /// A snapshot as a value that compares whole, whatever order a map of its settings is walked in.
@@ -1353,7 +1357,8 @@ pub(crate) mod tests {
             write_state(&mut writer, Some(&sent), &published).unwrap();
             sent = published.clone();
             let wanted = json(&published);
-            assert!(until(|| json(&client.snapshot()) == wanted), "round {round}: the client holds\n{}\nnot\n{wanted}", json(&client.snapshot()));
+            wait_for_dispatch(&client, &mut writer);
+            assert_eq!(json(&client.snapshot()), wanted, "round {round}");
             let after = client.snapshot();
             assert!(!Arc::ptr_eq(&before, &after), "a new snapshot for every state told");
             // What these rounds never touch was sent once, with the first snapshot.
@@ -1385,15 +1390,18 @@ pub(crate) mod tests {
         let mut next = (*first).clone();
         next.n4n0.afk = true;
         write_state(&mut writer, Some(&first), &Arc::new(next)).unwrap();
-        assert!(until(|| !client.snapshot().vrchat_login.busy));
+        wait_for_dispatch(&client, &mut writer);
+        assert!(!client.snapshot().vrchat_login.busy);
 
         client.send_edit(request);
         write_line(&mut writer, &ToClient::EditSettled { id: 1 }).unwrap();
         write_line(&mut writer, &ToClient::WorkerLog { lines: vec![] }).unwrap();
-        assert!(until(|| client.worker_log().is_some()));
+        wait_for_dispatch(&client, &mut writer);
+        assert!(client.worker_log().is_some());
         assert!(client.snapshot().vrchat_login.busy, "an earlier reply cannot settle the new edit");
         write_line(&mut writer, &ToClient::EditSettled { id: 2 }).unwrap();
-        assert!(until(|| !client.snapshot().vrchat_login.busy));
+        wait_for_dispatch(&client, &mut writer);
+        assert!(!client.snapshot().vrchat_login.busy);
     }
 
     /// A state in which every part differs from a new snapshot's: the busy evening of `--publish-cost`, and the rest.

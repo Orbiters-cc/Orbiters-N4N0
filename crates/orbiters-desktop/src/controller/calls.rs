@@ -14,6 +14,8 @@
 //! descriptions, and each side's own wait until both took the call. Calls go through the relay only unless direct
 //! calls are on (`N4n0Settings::direct_calls`), so the other side does not learn them then either.
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use super::rest::{sooner, until, Part};
 use super::{NoticeKind, Shared};
 use crate::state::{CallContact, CallLink, CallPhase, CallView};
@@ -86,13 +88,13 @@ impl Worker {
                 match serde_json::from_str::<CallEvent>(&line) {
                     Ok(e) => ctl.on_call_worker(e),
                     // Not the line: it may hold a description (addresses).
-                    Err(e) => eprintln!("call: unexpected output ({} bytes): {e}", line.len()),
+                    Err(e) => log_warn!("call: unexpected output ({} bytes): {e}", line.len(), e = e),
                 }
             }
             ctl.on_call_worker_exit(number);
         })?;
         std::thread::Builder::new().name("call-stderr".into()).spawn(move || {
-            crate::worker::log_lines(stderr).for_each(|line| eprintln!("call: {}", line.strip_prefix("call: ").unwrap_or(&line)));
+            crate::worker::log_lines(stderr).for_each(|line| log_info!("call: {}", line.strip_prefix("call: ").unwrap_or(&line)));
         })?;
         Ok(Self { child, stdin, number, ended: false })
     }
@@ -109,7 +111,7 @@ impl Worker {
     fn end_now(mut self) {
         let _ = self.child.kill();
         self.ended = true;
-        let _ = std::thread::Builder::new().name("call-worker-end".into()).spawn(move || drop(self));
+        std::thread::Builder::new().name("call-worker-end".into()).spawn(move || drop(self)).or_log("a thread could not be started");
     }
 }
 
@@ -373,7 +375,7 @@ impl CallsRuntime {
             _ if !open => fail(self, None),
             Relays::Got(servers) => Acts { worker: self.offer(number, servers, mic).into_iter().collect(), ..Default::default() },
             Relays::Failed(e) if self.direct && signed_in => {
-                eprintln!("calls ice-servers: {e}");
+                log_warn!("calls ice-servers: {e}", e = e);
                 Acts { worker: self.offer(number, Vec::new(), mic).into_iter().collect(), ..Default::default() }
             }
             Relays::Failed(e) => fail(self, Some((NoticeKind::Warning, tr!("Call: {message}", message = e)))),
@@ -395,7 +397,7 @@ impl CallsRuntime {
                     *offered = servers;
                 }
             }
-            Relays::Failed(e) => eprintln!("calls ice-servers: {e}"),
+            Relays::Failed(e) => log_warn!("calls ice-servers: {e}", e = e),
         }
         self.answer(mic, now)
     }
@@ -649,17 +651,17 @@ fn old_server_leaves(api: Api, token: String, closing: Option<(String, bool)>, a
     if closing.is_none() && !available {
         return;
     }
-    let _ = std::thread::Builder::new().name("calls-leave-old".into()).spawn(move || {
+    std::thread::Builder::new().name("calls-leave-old".into()).spawn(move || {
         let agent = orbiters_core::http_agent(Some(Duration::from_secs(5)), Some(Duration::from_secs(10)));
         let auth = format!("Bearer {token}"); // i18n: not shown
         if let Some((id, decline)) = closing {
             let path = format!("n4n0/calls/{id}/{}", if decline { "decline" } else { "end" });
-            let _ = agent.post(&api.url(&path)).header("Authorization", &auth).send_json(json!({}));
+            agent.post(&api.url(&path)).header("Authorization", &auth).send_json(json!({})).or_log("Orbiters could not be told");
         }
         if available {
-            let _ = agent.delete(&api.url("n4n0/calls/presence")).header("Authorization", &auth).call();
+            agent.delete(&api.url("n4n0/calls/presence")).header("Authorization", &auth).call().or_log("Orbiters could not be told");
         }
-    });
+    }).or_log("a thread could not be started");
 }
 
 /// A level in twentieths.
@@ -745,13 +747,13 @@ impl super::Controller {
     pub(super) fn start_calls(self: &Shared) {
         let ctl = self.clone();
         let rest = self.rest("calls", |s| (Part::of(&s.settings), Part::of(&s.account), s.vrchat.running, s.n4n0.prop_sync.is_some()));
-        let _ = std::thread::Builder::new().name("calls".into()).spawn(move || loop {
-            if ctl.calls.lock().unwrap().stop {
+        std::thread::Builder::new().name("calls".into()).spawn(move || loop {
+            if ctl.calls.locked().stop {
                 break;
             }
             ctl.calls_tick();
             rest.wait(ctl.calls_rests());
-        });
+        }).or_log("a thread could not be started");
     }
 
     /// Signing out of Orbiters (PRIV-7): with the identity that leaves, while it is still there, the call under way is
@@ -771,7 +773,7 @@ impl super::Controller {
             self.calls.lock().unwrap().left_with = Some(installed);
         }
         let (stamp, closing, was_on, worker, shown) = {
-            let mut rt = self.calls.lock().unwrap();
+            let mut rt = self.calls.locked();
             let shown = std::mem::take(&mut rt.notices_shown);
             let stamp = rt.identity.take().or(fallback);
             let call = rt.call.take();
@@ -800,7 +802,7 @@ impl super::Controller {
     /// computer leaves the callable list.
     pub(super) fn calls_stop(self: &Shared) {
         let (api, was_on, worker, call_id) = {
-            let mut rt = self.calls.lock().unwrap();
+            let mut rt = self.calls.locked();
             rt.stop = true;
             rt.streaming = None;
             rt.signals = None;
@@ -812,17 +814,17 @@ impl super::Controller {
         let Some((api, token)) = api else { return };
         // Quitting never waits long on the network: Orbiters drops a presence that stopped coming anyway.
         let (done, wait) = mpsc::channel();
-        let _ = std::thread::Builder::new().name("calls-leave".into()).spawn(move || {
+        std::thread::Builder::new().name("calls-leave".into()).spawn(move || {
             let agent = orbiters_core::http_agent(Some(Duration::from_secs(2)), Some(Duration::from_secs(3)));
             let auth = format!("Bearer {token}"); // i18n: not shown
             if let Some(id) = call_id {
-                let _ = agent.post(&api.url(&format!("n4n0/calls/{id}/end"))).header("Authorization", &auth).send_json(json!({}));
+                agent.post(&api.url(&format!("n4n0/calls/{id}/end"))).header("Authorization", &auth).send_json(json!({})).or_log("Orbiters could not be told");
             }
             if was_on {
-                let _ = agent.delete(&api.url("n4n0/calls/presence")).header("Authorization", &auth).call();
+                agent.delete(&api.url("n4n0/calls/presence")).header("Authorization", &auth).call().or_log("Orbiters could not be told");
             }
             let _ = done.send(());
-        });
+        }).or_log("a thread could not be started");
         let _ = wait.recv_timeout(Duration::from_secs(4));
     }
 
@@ -831,7 +833,7 @@ impl super::Controller {
     /// forgotten, so that no contact of one environment or account can be called in the other (audit F25).
     fn calls_follow_identity(self: &Shared, api: &Api, token: &str) {
         let now = (api.url(""), token.to_string());
-        let held = self.calls.lock().unwrap().identity.clone();
+        let held = self.calls.locked().identity.clone();
         match held {
             Some(held) if held == now => return,
             // Another account: the one before leaves first (its call ends here at once and on the server it was made on,
@@ -839,19 +841,19 @@ impl super::Controller {
             Some(_) => self.calls_leave(None),
             // From nobody (after a sign-out, or at start): nothing to tell any server, but nothing read before stays.
             None => {
-                let call = self.calls.lock().unwrap().call.take();
+                let call = self.calls.locked().call.take();
                 drop(call);
                 self.calls_forget_account();
             }
         }
-        self.calls.lock().unwrap().identity = Some(now);
+        self.calls.locked().identity = Some(now);
     }
 
     /// What was read and shown for an account goes with it (another account, or none): this computer's VRChat account
     /// and friends are read again before anything is reported for the next one, the friends to call and the link screen
     /// go, and N4N0's call menu closes. Published at once.
     pub(super) fn calls_forget_account(&self) {
-        let menu_was_open = std::mem::take(&mut self.calls.lock().unwrap().menu_open);
+        let menu_was_open = std::mem::take(&mut self.calls.locked().menu_open);
         if menu_was_open {
             self.n4n0.command(crate::ipc::N4n0Command::HidePanel);
         }
@@ -894,7 +896,7 @@ impl super::Controller {
     /// The API and credential for calls (signed in), through the client kept for the server.
     fn calls_api(self: &Shared) -> Option<(Api, String)> {
         let (fresh, token) = self.account_api()?;
-        let mut rt = self.calls.lock().unwrap();
+        let mut rt = self.calls.locked();
         if !rt.client.as_ref().is_some_and(|c| c.url("") == fresh.url("")) {
             rt.client = Some(fresh);
         }
@@ -907,7 +909,7 @@ impl super::Controller {
         const TURN: Duration = Duration::from_secs(2);
         let asked = self.calls_access_wait();
         let on = self.calls_open() && self.with_settings(|s| s.n4n0.enabled && s.n4n0.calls) && self.account_api().is_some();
-        let rt = self.calls.lock().unwrap();
+        let rt = self.calls.locked();
         if rt.stop || rt.call.is_some() || rt.available_sent.is_some() && !on {
             return Some(TURN);
         }
@@ -940,7 +942,7 @@ impl super::Controller {
         let on = open && settings.n4n0.enabled && settings.n4n0.calls;
         // A phase that lasted too long ends.
         {
-            let mut rt = self.calls.lock().unwrap();
+            let mut rt = self.calls.locked();
             let acts = rt.deadlines(Instant::now());
             self.calls_act(rt, acts);
         }
@@ -950,7 +952,7 @@ impl super::Controller {
         }
         let Some((api, token)) = account else {
             let was = {
-                let mut rt = self.calls.lock().unwrap();
+                let mut rt = self.calls.locked();
                 // No calls any more: the stream ends at its next line (unless the shared 3D view keeps it,
                 // `controller/shared_view.rs`), a call under way ends.
                 if !self.shared_view_wants_stream() {
@@ -966,7 +968,7 @@ impl super::Controller {
             if was {
                 if let Some((api, token)) = self.account_api() {
                     let agent = orbiters_core::http_agent(Some(Duration::from_secs(5)), Some(Duration::from_secs(10)));
-                    let _ = agent.delete(&api.url("n4n0/calls/presence")).header("Authorization", &format!("Bearer {token}")).call();
+                    agent.delete(&api.url("n4n0/calls/presence")).header("Authorization", &format!("Bearer {token}")).call().or_log("Orbiters could not be told");
                 }
             }
             let link = if !open {
@@ -983,10 +985,10 @@ impl super::Controller {
             return;
         };
         // This computer's VRChat account and friends.
-        let read_due = self.calls.lock().unwrap().local_read.is_none_or(|t| t.elapsed() >= FRIENDS_EVERY);
+        let read_due = self.calls.locked().local_read.is_none_or(|t| t.elapsed() >= FRIENDS_EVERY);
         if read_due {
             let log_account = {
-                let snap = self.snapshot.lock().unwrap();
+                let snap = self.snapshot.locked();
                 let w = &snap.vrchat.world;
                 w.local_player.as_ref().and_then(|me| w.players.iter().find(|(_, n)| *n == me).map(|(id, _)| id.clone()))
             };
@@ -994,13 +996,13 @@ impl super::Controller {
             // Hashed once per read, not at every tick (up to 5000 of them).
             let hashes: Vec<String> = local.friends.iter().take(FRIENDS_MOST).map(|f| vrchat_accounts::friend_hash(f)).collect();
             let digest = friends_digest(&hashes);
-            let mut rt = self.calls.lock().unwrap();
+            let mut rt = self.calls.locked();
             rt.local = local;
             rt.local_read = Some(Instant::now());
             rt.friend_hashes = hashes;
             rt.friends_digest = digest;
         }
-        let Some((account, source)) = self.calls.lock().unwrap().local.account.clone() else {
+        let Some((account, source)) = self.calls.locked().local.account.clone() else {
             self.calls_publish(|rt| {
                 rt.link = CallLink::NoAccount;
                 rt.streaming = None;
@@ -1008,11 +1010,11 @@ impl super::Controller {
             return;
         };
         let available = {
-            let snap = self.snapshot.lock().unwrap();
+            let snap = self.snapshot.locked();
             snap.vrchat.running && snap.n4n0.prop_sync.is_some()
         };
         let (due, friends) = {
-            let rt = self.calls.lock().unwrap();
+            let rt = self.calls.locked();
             let changed = rt.friends_sent != Some(rt.friends_digest);
             let due = rt.presence_sent.is_none_or(|t| t.elapsed() >= PRESENCE_EVERY) || rt.available_sent != Some(available) || changed;
             (due, changed.then(|| (rt.friend_hashes.clone(), rt.friends_digest)))
@@ -1038,7 +1040,7 @@ impl super::Controller {
             }
             match answer.map_err(anyhow::Error::from).and_then(Api::json::<Value>) {
                 Ok(v) => {
-                    let mut rt = self.calls.lock().unwrap();
+                    let mut rt = self.calls.locked();
                     if rt.identity.as_ref() != Some(&stamp) {
                         return;
                     }
@@ -1054,13 +1056,13 @@ impl super::Controller {
                 }
                 // The account has not N4N0 calls (switched off since): closed here at once, the next look says so.
                 Err(e) if super::calls_access::not_enabled(&e) => {
-                    self.calls.lock().unwrap().presence_sent = Some(Instant::now());
+                    self.calls.locked().presence_sent = Some(Instant::now());
                     self.calls_access_denied(&token);
                     return;
                 }
                 Err(e) => {
                     let refused = not_linked(&e);
-                    let mut rt = self.calls.lock().unwrap();
+                    let mut rt = self.calls.locked();
                     if rt.identity.as_ref() != Some(&stamp) {
                         return;
                     }
@@ -1068,18 +1070,18 @@ impl super::Controller {
                     if refused {
                         rt.link = CallLink::NotLinked { account: account.clone(), source: source.name().to_string() };
                     } else {
-                        eprintln!("calls presence: {e:#}");
+                        log_warn!("calls presence: {e:#}", e = e);
                     }
                 }
             }
         }
-        let linked = matches!(self.calls.lock().unwrap().link, CallLink::Linked { .. });
+        let linked = matches!(self.calls.locked().link, CallLink::Linked { .. });
         if !linked {
             self.calls_publish(|rt| rt.streaming = None);
             return;
         }
         self.calls_stream(&api, &token);
-        let contacts_due = self.calls.lock().unwrap().contacts_read.is_none_or(|t| t.elapsed() >= CONTACTS_EVERY);
+        let contacts_due = self.calls.locked().contacts_read.is_none_or(|t| t.elapsed() >= CONTACTS_EVERY);
         if contacts_due && available {
             let answer = api
                 .agent()
@@ -1101,12 +1103,12 @@ impl super::Controller {
                 }
                 Err(e) => {
                     // Asked again after the usual wait, not at every tick (verify A, contacts refused).
-                    self.calls.lock().unwrap().contacts_read = Some(Instant::now());
+                    self.calls.locked().contacts_read = Some(Instant::now());
                     if super::calls_access::not_enabled(&e) {
                         self.calls_access_denied(&token);
                         return;
                     }
-                    eprintln!("calls contacts: {e:#}");
+                    log_warn!("calls contacts: {e:#}", e = e);
                 }
             }
         }
@@ -1117,7 +1119,7 @@ impl super::Controller {
     /// failed or went silent, after a pause that grows while it keeps failing.
     pub(super) fn calls_stream(self: &Shared, api: &Api, token: &str) {
         let number = {
-            let mut rt = self.calls.lock().unwrap();
+            let mut rt = self.calls.locked();
             if rt.streaming.as_ref().is_some_and(|(_, t)| t != token) {
                 // Another account: that stream ends at its next line.
                 rt.streaming = None;
@@ -1132,9 +1134,9 @@ impl super::Controller {
         };
         let ctl = self.clone();
         let (api, token) = (api.clone(), token.to_string());
-        let _ = std::thread::Builder::new().name("calls-events".into()).spawn(move || {
+        std::thread::Builder::new().name("calls-events".into()).spawn(move || {
             let result = ctl.calls_events(&api, &token, number);
-            let mut rt = ctl.calls.lock().unwrap();
+            let mut rt = ctl.calls.locked();
             if rt.streaming.as_ref().is_some_and(|(n, _)| *n == number) {
                 rt.streaming = None;
             }
@@ -1146,7 +1148,7 @@ impl super::Controller {
                 }
                 Ok(false) | Err(_) => {
                     if let Err(e) = &result {
-                        eprintln!("calls events: {e:#}");
+                        log_warn!("calls events: {e:#}", e = e);
                     }
                     rt.stream_failures += 1;
                     let pause = STREAM_RETRY.saturating_mul(1 << (rt.stream_failures - 1).min(5)).min(STREAM_RETRY_MOST);
@@ -1163,7 +1165,7 @@ impl super::Controller {
     /// when it delivered something.
     fn calls_events(self: &Shared, api: &Api, token: &str, number: u64) -> anyhow::Result<bool> {
         let still = || {
-            let rt = self.calls.lock().unwrap();
+            let rt = self.calls.locked();
             !rt.stop && rt.streaming.as_ref().is_some_and(|(n, _)| *n == number)
         };
         super::event_stream::follow(&api.url("n4n0/calls/events"), token, STREAM_IDLE, EVENT_MOST, still, |event, data| {
@@ -1199,21 +1201,21 @@ impl super::Controller {
         if !self.calls_open() {
             return;
         }
-        let mut rt = self.calls.lock().unwrap();
+        let mut rt = self.calls.locked();
         let acts = rt.server_event(event, &v, Instant::now());
         self.calls_act(rt, acts);
     }
 
     /// One event of the call worker.
     fn on_call_worker(self: &Shared, e: CallEvent) {
-        let mut rt = self.calls.lock().unwrap();
+        let mut rt = self.calls.locked();
         let acts = rt.worker_event(e, Instant::now());
         self.calls_act(rt, acts);
     }
 
     /// Worker `number`'s output ended: it is gone, and so is the call it carried.
     fn on_call_worker_exit(self: &Shared, number: u64) {
-        let mut rt = self.calls.lock().unwrap();
+        let mut rt = self.calls.locked();
         let gone = if rt.worker.as_ref().is_some_and(|w| w.number == number) { rt.worker.take() } else { None };
         let acts = rt.worker_exit(number);
         self.calls_act(rt, acts);
@@ -1261,7 +1263,7 @@ impl super::Controller {
         }
         for (kind, message) in notices {
             {
-                let mut rt = self.calls.lock().unwrap();
+                let mut rt = self.calls.locked();
                 rt.notices_shown.push(message.clone());
                 let excess = rt.notices_shown.len().saturating_sub(8);
                 rt.notices_shown.drain(..excess);
@@ -1302,7 +1304,7 @@ impl super::Controller {
                     return Ok(());
                 }
                 Err(e) => {
-                    eprintln!("call worker: {e}");
+                    log_warn!("call worker: {e}", e = e);
                     gone.extend(rt.worker.take());
                     if !starts {
                         return Ok(());
@@ -1366,7 +1368,7 @@ impl super::Controller {
                         }
                     }
                     if let Err(e) = post(&api, &token, &format!("n4n0/calls/{id}/candidates"), &json!({ "candidates": candidates })) {
-                        eprintln!("calls candidates: {e:#}");
+                        log_warn!("calls candidates: {e:#}", e = e);
                         if super::calls_access::not_enabled(&e) {
                             self.calls_access_denied(&token);
                         }
@@ -1383,18 +1385,18 @@ impl super::Controller {
                             Err(Ending::Failed)
                         }
                         Err(e) => {
-                            eprintln!("calls n4n0/calls: {e:#}");
+                            log_warn!("calls n4n0/calls: {e:#}", e = e);
                             self.notify(NoticeKind::Warning, tr!("Call: {message}", message = e));
                             Err(Ending::Failed)
                         }
                     };
-                    let mut rt = self.calls.lock().unwrap();
+                    let mut rt = self.calls.locked();
                     let acts = rt.created(number, answer);
                     self.calls_act(rt, acts);
                 }
                 Signal::Answer { number, id, sdp } => {
                     if let Err(e) = post(&api, &token, &format!("n4n0/calls/{id}/answer"), &json!({ "answer": sdp })) {
-                        eprintln!("calls answer: {e:#}");
+                        log_warn!("calls answer: {e:#}", e = e);
                         if super::calls_access::not_enabled(&e) {
                             if self.calls_access_denied(&token) {
                                 self.notify(NoticeKind::Info, tr(super::calls_access::CALLS_SOON_TOLD));
@@ -1402,7 +1404,7 @@ impl super::Controller {
                         } else {
                             self.notify(NoticeKind::Warning, tr!("Call: {message}", message = e));
                         }
-                        let mut rt = self.calls.lock().unwrap();
+                        let mut rt = self.calls.locked();
                         let acts = rt.signal_failed(number);
                         self.calls_act(rt, acts);
                     }
@@ -1410,7 +1412,7 @@ impl super::Controller {
                 Signal::Close { id, decline } => {
                     let path = format!("n4n0/calls/{id}/{}", if decline { "decline" } else { "end" });
                     if let Err(e) = post(&api, &token, &path, &json!({})) {
-                        eprintln!("calls {path}: {e:#}");
+                        log_warn!("calls {path}: {e:#}", path = path, e = e);
                     }
                 }
             }
@@ -1433,7 +1435,7 @@ impl super::Controller {
             return;
         }
         let (number, name) = {
-            let mut rt = self.calls.lock().unwrap();
+            let mut rt = self.calls.locked();
             let Some(name) = rt.contacts.iter().find(|c| c.id == contact).map(|c| c.name.clone()) else {
                 drop(rt);
                 self.notify(NoticeKind::Warning, tr("This friend cannot be called right now."));
@@ -1454,7 +1456,7 @@ impl super::Controller {
             let signed_in = ctl.account_api().is_some();
             let (mic, direct) = ctl.with_settings(|s| (s.n4n0.mic_device.clone(), s.n4n0.direct_calls));
             let mic = (!mic.is_empty()).then_some(mic);
-            let mut rt = ctl.calls.lock().unwrap();
+            let mut rt = ctl.calls.locked();
             rt.direct = direct;
             let acts = rt.dial_with_relays(number, relays, open, signed_in, mic);
             ctl.calls_act(rt, acts);
@@ -1469,7 +1471,7 @@ impl super::Controller {
         }
         let (mic, direct) = self.with_settings(|s| (s.n4n0.mic_device.clone(), s.n4n0.direct_calls));
         let mic = (!mic.is_empty()).then_some(mic);
-        let mut rt = self.calls.lock().unwrap();
+        let mut rt = self.calls.locked();
         if !rt.call.as_ref().is_some_and(|c| c.number == number && c.ringing_in()) {
             return;
         }
@@ -1484,7 +1486,7 @@ impl super::Controller {
             std::thread::spawn(move || {
                 let relays = ctl.relays();
                 let open = ctl.calls_still_open_to(&whose);
-                let mut rt = ctl.calls.lock().unwrap();
+                let mut rt = ctl.calls.locked();
                 let acts = rt.answer_with_relays(number, relays, open, mic, Instant::now());
                 ctl.calls_act(rt, acts);
             });
@@ -1496,7 +1498,7 @@ impl super::Controller {
 
     /// Declines the ringing call `number`, or hangs it up; another one goes on.
     pub fn call_end(self: &Shared, number: u64) {
-        let mut rt = self.calls.lock().unwrap();
+        let mut rt = self.calls.locked();
         if !rt.call.as_ref().is_some_and(|c| c.number == number) {
             return;
         }
@@ -1505,7 +1507,7 @@ impl super::Controller {
     }
 
     pub fn call_mute(self: &Shared, number: u64, on: bool) {
-        let mut rt = self.calls.lock().unwrap();
+        let mut rt = self.calls.locked();
         if !rt.call.as_ref().is_some_and(|c| c.number == number) {
             return;
         }
@@ -1519,13 +1521,13 @@ impl super::Controller {
     pub(super) fn calls_menu(self: &Shared) {
         // Not open to this account: N4N0's panel says so, and no list opens.
         if !self.calls_open() {
-            self.calls.lock().unwrap().menu_open = false;
+            self.calls.locked().menu_open = false;
             // The panel's letters (no Japanese) and its width: the short words.
             self.n4n0_say_quick(tr_latin(orbiters_n4n0_core::menu::CALLS_SOON_WHY));
             return;
         }
         let (open, text) = {
-            let mut rt = self.calls.lock().unwrap();
+            let mut rt = self.calls.locked();
             rt.menu_open = !rt.menu_open;
             (rt.menu_open, menu_text(&rt.contacts, rt.picked))
         };
@@ -1544,7 +1546,7 @@ impl super::Controller {
             return;
         }
         let text = {
-            let mut rt = self.calls.lock().unwrap();
+            let mut rt = self.calls.locked();
             let picked = pick(value, rt.contacts.len());
             if picked == rt.picked || !rt.menu_open {
                 rt.picked = picked;
@@ -1567,7 +1569,7 @@ impl super::Controller {
             return false;
         }
         let (ringing, chosen) = {
-            let rt = self.calls.lock().unwrap();
+            let rt = self.calls.locked();
             let ringing = rt.call.as_ref().filter(|c| c.ringing_in()).map(|c| c.number);
             let chosen = (rt.menu_open && rt.call.is_none()).then(|| rt.contacts.get(rt.picked).map(|c| c.id.clone())).flatten();
             (ringing, chosen)
@@ -1585,7 +1587,7 @@ impl super::Controller {
 
     /// Whether a call rings for this member (touching N4N0 answers it).
     pub(super) fn call_ringing_in(&self) -> bool {
-        self.calls.lock().unwrap().call.as_ref().is_some_and(Call::ringing_in)
+        self.calls.locked().call.as_ref().is_some_and(Call::ringing_in)
     }
 
     /// Calls were closed for this account (`calls_access_denied`): a call under way ends (the other side is told), the
@@ -1595,7 +1597,7 @@ impl super::Controller {
     /// another account's (switched since the refusal was received), nothing of it is touched.
     pub(super) fn calls_closed_here(self: &Shared, token: &str) {
         let menu_was_open = {
-            let mut rt = self.calls.lock().unwrap();
+            let mut rt = self.calls.locked();
             if rt.identity.as_ref().is_some_and(|(_, held)| held != token) {
                 return;
             }
@@ -1621,7 +1623,7 @@ impl super::Controller {
         if !self.calls_current(stamp) {
             return false;
         }
-        let mut rt = self.calls.lock().unwrap();
+        let mut rt = self.calls.locked();
         if rt.identity.as_ref() != Some(stamp) {
             return false;
         }
@@ -1632,7 +1634,7 @@ impl super::Controller {
 
     fn calls_publish(&self, change: impl FnOnce(&mut CallsRuntime)) {
         let status = {
-            let mut rt = self.calls.lock().unwrap();
+            let mut rt = self.calls.locked();
             change(&mut rt);
             crate::state::CallsStatus {
                 link: rt.link.clone(),

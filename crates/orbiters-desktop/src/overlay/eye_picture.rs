@@ -3,6 +3,7 @@
 //! Needs SteamVR running; nothing else starts.
 
 use anyhow::Context;
+use orbiters_core::app_log::OrLog as _;
 use orbiters_openvr::compositor::Eye;
 use orbiters_openvr::mirror::EyeReader;
 use std::path::Path;
@@ -68,9 +69,9 @@ impl Moments {
         // Written away from the headset's own loop: a large picture takes a while.
         std::thread::spawn(move || {
             if let Some(dir) = file.parent() {
-                let _ = std::fs::create_dir_all(dir);
+                std::fs::create_dir_all(dir).or_log("a folder could not be made");
             }
-            let _ = super::menu_pages::write_png(&file, picture.width, picture.height, &picture.rgba);
+            super::menu_pages::write_png(&file, picture.width, picture.height, &picture.rgba).or_log("a file could not be written");
         });
     }
 }

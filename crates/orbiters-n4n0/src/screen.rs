@@ -1394,7 +1394,7 @@ impl N4n0 {
     /// avatar's screen when there is one, else in the overlay; N4N0 listens either way. Opening it again closes it.
     pub(crate) fn menu_open(self: &Shared, toggle: bool) {
         let settings = self.settings();
-        let opened = self.open_menu(&mut self.n4n0.lock().unwrap(), toggle, &settings);
+        let opened = self.open_menu(&mut self.n4n0.locked(), toggle, &settings);
         self.menu_opened(opened);
     }
 
@@ -1452,7 +1452,7 @@ impl N4n0 {
     /// menu apart, and send the toggle back as it was.
     pub(crate) fn menu_toggled(self: &Shared, on: bool) {
         let settings = self.settings();
-        let mut rt = self.n4n0.lock().unwrap();
+        let mut rt = self.n4n0.locked();
         match rt.screen.menu_toggled(on, Instant::now()) {
             Some(true) => {
                 let opened = self.open_menu(&mut rt, false, &settings);
@@ -1481,7 +1481,7 @@ impl N4n0 {
             other => other,
         };
         let effects = {
-            let mut rt = self.n4n0.lock().unwrap();
+            let mut rt = self.n4n0.locked();
             if rt.screen.available && rt.screen.menu.shows_keyboard() {
                 rt.screen.last_activity = Instant::now();
                 let effects = rt.screen.menu.key(input, || None);
@@ -1510,7 +1510,7 @@ impl N4n0 {
             return;
         }
         {
-            let rt = self.n4n0.lock().unwrap();
+            let rt = self.n4n0.locked();
             if rt.listening.is_some() || !rt.voice.installed {
                 return;
             }
@@ -1521,7 +1521,7 @@ impl N4n0 {
     /// The overlay's menu opened, closed, or moved to or from its search page.
     pub(crate) fn menu_overlay_state(self: &Shared, open: bool, dictation: bool) {
         let listen = {
-            let mut rt = self.n4n0.lock().unwrap();
+            let mut rt = self.n4n0.locked();
             let s = &mut rt.screen;
             let opened = open && !s.overlay_open;
             s.overlay_open = open;
@@ -1548,7 +1548,7 @@ impl N4n0 {
 
     /// A sentence N4N0 heard while a menu is open: the screen's search page takes it, or the overlay's (`true`: taken).
     pub(crate) fn menu_heard(self: &Shared, text: &str) -> bool {
-        let mut rt = self.n4n0.lock().unwrap();
+        let mut rt = self.n4n0.locked();
         if rt.screen.menu.open {
             rt.screen.last_activity = Instant::now();
             if let Some(effects) = rt.screen.menu.heard(text) {
@@ -1601,7 +1601,7 @@ impl N4n0 {
     }
 
     fn photo_line(self: &Shared, text: &str) {
-        let mut rt = self.n4n0.lock().unwrap();
+        let mut rt = self.n4n0.locked();
         if rt.screen.menu.open && rt.screen.menu.page == orbiters_n4n0_core::menu::Page::Photo {
             rt.screen.menu.notice = Some(text.to_string());
         }
@@ -1621,7 +1621,7 @@ impl N4n0 {
             if n.host.camera_open() == Some(false) {
                 return n.photo_stopped(crate::platform::CAMERA_CLOSED.to_string());
             }
-            n.n4n0.lock().unwrap().screen.photo_at = Some(Instant::now() + Duration::from_secs(seconds as u64));
+            n.n4n0.locked().screen.photo_at = Some(Instant::now() + Duration::from_secs(seconds as u64));
             n.publish();
         });
     }
@@ -1630,7 +1630,7 @@ impl N4n0 {
     pub(crate) fn photo_3d_when_camera(self: &Shared, seconds: u32) {
         use crate::status::PhotoWait;
         let id = {
-            let mut rt = self.n4n0.lock().unwrap();
+            let mut rt = self.n4n0.locked();
             let s = &mut rt.screen;
             s.photo_wait_id = s.photo_wait_id.wrapping_add(1);
             if s.photo_wait.take().is_some() {
@@ -1661,7 +1661,7 @@ impl N4n0 {
                 };
                 let late = Instant::now() >= until;
                 let changed = {
-                    let mut rt = n.n4n0.lock().unwrap();
+                    let mut rt = n.n4n0.locked();
                     let s = &mut rt.screen;
                     // Called off, or asked anew.
                     if s.photo_wait_id != id || s.photo_wait.is_none() {
@@ -1691,7 +1691,7 @@ impl N4n0 {
     /// `N4N0/Card/Out` goes off at the next step.
     pub(crate) fn card_take_back(self: &Shared) {
         let taken = {
-            let mut rt = self.n4n0.lock().unwrap();
+            let mut rt = self.n4n0.locked();
             let taken = rt.screen.card.is_some();
             rt.screen.end_card();
             rt.screen.menu.card_out = false;
@@ -1708,7 +1708,7 @@ impl N4n0 {
     /// A hand on a dropped card (on the OSC action queue): the owner's own card's link is copied; with none out, someone
     /// else's card was grabbed, and Orbiters gives the newest dropped in this instance.
     pub(crate) fn card_grab(self: &Shared) {
-        let own = self.n4n0.lock().unwrap().screen.card_view().map(|c| (c.link, c.title));
+        let own = self.n4n0.locked().screen.card_view().map(|c| (c.link, c.title));
         if let Some((link, title)) = own {
             self.card_copied(&link, &title);
             return;
@@ -1741,7 +1741,7 @@ impl N4n0 {
     /// Runs `fetch` on a thread of its own; what it brings back goes to the screen's next step, which it wakes.
     fn screen_fetch(self: &Shared, fetch: impl FnOnce() -> Done + Send + 'static) {
         let n = self.clone();
-        let tx = self.n4n0.lock().unwrap().screen.done_tx.clone();
+        let tx = self.n4n0.locked().screen.done_tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(fetch());
             n.wake();
@@ -1752,7 +1752,7 @@ impl N4n0 {
     /// failed is tried again a little later, a few times.
     fn screen_thumbnails(self: &Shared, ids: Vec<String>) {
         let wanted: Vec<(String, u8)> = {
-            let mut rt = self.n4n0.lock().unwrap();
+            let mut rt = self.n4n0.locked();
             let s = &mut rt.screen;
             // Keep the pictures of the last few pages only.
             if s.pictures.len() > 60 {
@@ -1811,7 +1811,7 @@ impl N4n0 {
             match effect {
                 Effect::Suggest { id, text } => {
                     // Asked for once typing pauses, one request at a time: the screen's step sends it.
-                    let mut rt = self.n4n0.lock().unwrap();
+                    let mut rt = self.n4n0.locked();
                     rt.screen.suggest.want(id, text, Instant::now());
                     rt.wake();
                 }
@@ -1842,7 +1842,7 @@ impl N4n0 {
                 }
                 Effect::Answer => {
                     let later = self.later();
-                    let call = self.n4n0.lock().unwrap().screen.menu.call_number;
+                    let call = self.n4n0.locked().screen.menu.call_number;
                     std::thread::spawn(move || {
                         if let Some(fence) = later.fence() {
                             if let Some(call) = call {
@@ -1853,7 +1853,7 @@ impl N4n0 {
                 }
                 Effect::HangUp => {
                     let later = self.later();
-                    let call = self.n4n0.lock().unwrap().screen.menu.call_number;
+                    let call = self.n4n0.locked().screen.menu.call_number;
                     std::thread::spawn(move || {
                         if let (Some(fence), Some(call)) = (later.fence(), call) {
                             fence.host.call(CallRequest::End(call));
@@ -1899,7 +1899,7 @@ impl N4n0 {
                     let n = self.clone();
                     std::thread::spawn(move || {
                         let rows = orbiters_n4n0_core::invites::read_rows();
-                        n.n4n0.lock().unwrap().screen.menu.set_instances(rows, true, "");
+                        n.n4n0.locked().screen.menu.set_instances(rows, true, "");
                         n.publish();
                     });
                 }
@@ -1913,7 +1913,7 @@ impl N4n0 {
                 Effect::ShareCapture(ask) => self.as_now(Surface::Avatar, |fence| fence.share_capture(ask)),
                 Effect::Feedback(ask) => self.as_now(Surface::Avatar, |fence| fence.feedback_ask(ask)),
                 Effect::Mirror(ask) => {
-                    let mut rt = self.n4n0.lock().unwrap();
+                    let mut rt = self.n4n0.locked();
                     rt.mirror.ask(ask, Instant::now());
                     rt.wake();
                 }
@@ -1928,7 +1928,7 @@ impl N4n0 {
                     }
                 }
                 Effect::Close => {
-                    let mut rt = self.n4n0.lock().unwrap();
+                    let mut rt = self.n4n0.locked();
                     rt.screen.hover = None;
                     rt.screen.pressed = None;
                 }
@@ -1944,22 +1944,22 @@ impl N4n0 {
         }
         let finger = [screen::local::TOUCH_PREFIX, screen::local::AIM_PREFIX, screen::local::OTHERS_PREFIX].iter().any(|p| name.starts_with(p));
         if let (true, OscValue::Float(v)) = (finger, value) {
-            let mut rt = self.n4n0.lock().unwrap();
+            let mut rt = self.n4n0.locked();
             let s = &mut rt.screen;
             let _ = s.touch_point(name, *v) || s.aim_point(name, *v) || s.others_point(name, *v);
             if rt.screen.menu.open {
                 rt.wake();
             }
         } else if name == params::SCREEN_PINNED {
-            self.n4n0.lock().unwrap().screen.menu.pinned = value.truthy();
+            self.n4n0.locked().screen.menu.pinned = value.truthy();
         } else if name == params::SCREEN_PLACED {
-            self.n4n0.lock().unwrap().screen.placed_value(Some(value.truthy()), None, Instant::now());
+            self.n4n0.locked().screen.placed_value(Some(value.truthy()), None, Instant::now());
         } else if name == params::SCREEN_HELD_LEFT || name == params::SCREEN_HELD_RIGHT {
             let hand = (name == params::SCREEN_HELD_RIGHT) as usize;
-            self.n4n0.lock().unwrap().screen.placed_value(None, Some((hand, value.truthy())), Instant::now());
+            self.n4n0.locked().screen.placed_value(None, Some((hand, value.truthy())), Instant::now());
         } else if let (true, OscValue::Float(v)) = (name.starts_with(screen::local::EYE_PREFIX) || name.starts_with(screen::local::GAZE_PREFIX), value) {
             // Read at the N4N0 thread's next step, a few milliseconds away while looking points: no wake for each.
-            self.n4n0.lock().unwrap().screen.gaze_value(name, *v);
+            self.n4n0.locked().screen.gaze_value(name, *v);
         }
         true
     }
@@ -1974,7 +1974,7 @@ impl N4n0 {
         }
         sorted.sort_by(f32::total_cmp);
         let slow = sorted[sorted.len() * 9 / 10];
-        self.n4n0.lock().unwrap().screen.frame_ms = Some(slow.min(200.0));
+        self.n4n0.locked().screen.frame_ms = Some(slow.min(200.0));
     }
 }
 
@@ -2344,12 +2344,12 @@ impl Fence<'_> {
         let _ = std::thread::Builder::new().name("n4n0-suggestion".into()).spawn(move || {
             // As the member who sent it or not at all; and how it went is told to them only.
             let Some(fence) = later.fence() else { return };
-            let about = orbiters_n4n0_core::suggestions::About {
-                source: "menu",
-                app_version: fence.host.app_version(),
-                n4n0_version: fence.n4n0.lock().unwrap().n4n0_version.clone(),
-                voice,
+            let (n4n0_version, client_id) = {
+                let mut rt = fence.n4n0.locked();
+                let id = rt.suggestions_unconfirmed.id(fence.epoch(), &text);
+                (rt.n4n0_version.clone(), id)
             };
+            let about = orbiters_n4n0_core::suggestions::About { source: "menu", app_version: fence.host.app_version(), n4n0_version, voice, client_id };
             // The fence is held until it is sent: as the member who sent it, or not at all.
             let result = match fence.account() {
                 Some((api, token)) => orbiters_n4n0_core::suggestions::send(&api, &token, &text, &about).map_err(|e| format!("{e:#}")),
@@ -2357,7 +2357,10 @@ impl Fence<'_> {
             };
             let n = fence;
             {
-                let mut rt = n.n4n0.lock().unwrap();
+                let mut rt = n.n4n0.locked();
+                if result.is_ok() {
+                    rt.suggestions_unconfirmed.sent(&about.client_id);
+                }
                 if screen {
                     rt.screen.menu.suggestion_sent(result.clone());
                     rt.screen.last_activity = Instant::now();
@@ -2388,7 +2391,7 @@ impl Fence<'_> {
             let Some(n) = later.fence() else { return };
             let answer = invite_route(n.host.as_ref(), n.epoch(), account.as_deref(), &location);
             {
-                let mut rt = n.n4n0.lock().unwrap();
+                let mut rt = n.n4n0.locked();
                 if screen {
                     rt.screen.menu.invite_answered(answer.clone());
                     rt.screen.last_activity = Instant::now();
@@ -2418,7 +2421,7 @@ impl Fence<'_> {
             return;
         }
         let fetch = {
-            let mut rt = self.n4n0.lock().unwrap();
+            let mut rt = self.n4n0.locked();
             if !rt.screen.card_ready() {
                 drop(rt);
                 self.notify(NoticeKind::Info, tr("This avatar's N4N0 cannot drop cards: update N4N0 in My Avatar, then upload the avatar again."));

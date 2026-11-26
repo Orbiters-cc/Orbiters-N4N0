@@ -3,6 +3,8 @@
 //! overlay over the IPC link. It never creates a GPU device: the window process does, and exits when closed; the
 //! overlay process runs while SteamVR does.
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use crate::controller::{self, Controller, NoticeKind};
 use crate::ipc::{self, Endpoint, N4n0Command, Role, ToClient, ToService};
 use crate::mailbox::Mailbox;
@@ -167,27 +169,27 @@ impl Service {
     fn keeper_rests(&self) -> Duration {
         let snap = self.ctl.view();
         let game = snap.vrchat.running || snap.steamvr.running || snap.launcher.desktop_game.is_some();
-        let linked = self.links.lock().unwrap().iter().any(|l| l.role != Role::Window);
-        let overlay = self.overlay.lock().unwrap().as_mut().is_some_and(|(child, ..)| matches!(child.try_wait(), Ok(None)));
-        let orbit = self.orbit.lock().unwrap().as_mut().is_some_and(|(child, _)| matches!(child.try_wait(), Ok(None)));
+        let linked = self.links.locked().iter().any(|l| l.role != Role::Window);
+        let overlay = self.overlay.locked().as_mut().is_some_and(|(child, ..)| matches!(child.try_wait(), Ok(None)));
+        let orbit = self.orbit.locked().as_mut().is_some_and(|(child, _)| matches!(child.try_wait(), Ok(None)));
         if game || linked || overlay || orbit { Duration::from_secs(2) } else { Duration::from_secs(60) }
     }
 
     /// How many clients of `role` are linked now.
     pub(crate) fn linked(&self, role: Role) -> usize {
-        self.links.lock().unwrap().iter().filter(|l| l.role == role).count()
+        self.links.locked().iter().filter(|l| l.role == role).count()
     }
 
     /// The window to the front on `page` (started when it is closed): the overlay's Open in app, the assistant's pages.
     pub fn show_page(&self, page: String) {
-        let linked = self.links.lock().unwrap().iter().find(|l| l.role == Role::Window).map(|l| (l.pid, l.mailbox.clone()));
+        let linked = self.links.locked().iter().find(|l| l.role == Role::Window).map(|l| (l.pid, l.mailbox.clone()));
         match linked {
             Some((pid, mailbox)) => {
                 allow_foreground(pid);
                 mailbox.post(ToClient::ShowPage { page });
             }
             None => {
-                *self.page_for_window.lock().unwrap() = Some(page);
+                *self.page_for_window.locked() = Some(page);
                 self.show_window(false);
             }
         }
@@ -208,12 +210,12 @@ impl Service {
         if self.quitting.load(Ordering::Relaxed) {
             return;
         }
-        if let Some(link) = self.links.lock().unwrap().iter().find(|l| l.role == Role::Window) {
+        if let Some(link) = self.links.locked().iter().find(|l| l.role == Role::Window) {
             allow_foreground(link.pid);
             link.mailbox.post(ToClient::Show);
             return;
         }
-        let mut window = self.window.lock().unwrap();
+        let mut window = self.window.locked();
         if let Some((child, started)) = window.as_mut() {
             if matches!(child.try_wait(), Ok(None)) && started.elapsed() < Duration::from_secs(15) {
                 return; // Still starting.
@@ -233,10 +235,10 @@ impl Service {
             Ok(child) => {
                 crate::worker::keep_with_service(&child);
                 allow_foreground(child.id());
-                crate::perf::keeper().lock().unwrap_or_else(|e| e.into_inner()).role(child.id(), "window");
+                crate::perf::keeper().locked().role(child.id(), "window");
                 *window = Some((child, Instant::now()));
             }
-            Err(e) => eprintln!("could not start the window: {e}"),
+            Err(e) => log_warn!("could not start the window: {e}", e = e),
         }
     }
 
@@ -254,18 +256,18 @@ impl Service {
             return;
         }
         let Some(session) = crate::steamvr_start::ready_session() else { return };
-        if (*self.steamvr_start_seen.lock().unwrap() == Some(session) && !snap.settings.startup.steamvr_pending)
+        if (*self.steamvr_start_seen.locked() == Some(session) && !snap.settings.startup.steamvr_pending)
             || Some(session.0) != snap.steamvr.pid {
             return;
         }
         // Closing an overlay is asynchronous: do not overlap its connection.
-        if self.links.lock().unwrap().iter().any(|l| l.role == Role::Overlay)
-            || self.overlay.lock().unwrap().as_mut().is_some_and(|(child, _, _, _, _)| child_exited(child.try_wait()).is_none()) { return; }
+        if self.links.locked().iter().any(|l| l.role == Role::Overlay)
+            || self.overlay.locked().as_mut().is_some_and(|(child, _, _, _, _)| child_exited(child.try_wait()).is_none()) { return; }
         // Not yet answering (it is starting, or going): asked again next turn.
         let Ok(client) = orbiters_openvr::Client::connect(orbiters_openvr::AppType::Background) else { return };
         if crate::steamvr_start::current_session() != Some(session) { return; }
-        *self.steamvr_start_seen.lock().unwrap() = Some(session);
-        self.smoothing.lock().unwrap().set_kinds((0..64).map(|i| crate::tracking::DeviceKind::of(client.device_class(i))).collect());
+        *self.steamvr_start_seen.locked() = Some(session);
+        self.smoothing.locked().set_kinds((0..64).map(|i| crate::tracking::DeviceKind::of(client.device_class(i))).collect());
         if let Some(startup) = crate::startup::reconcile(&client, &snap.settings.startup) {
             self.ctl.update_settings(|s| s.startup = startup);
         }
@@ -286,7 +288,7 @@ impl Service {
             steamvr_pid: snap.steamvr.pid,
             overlay: snap.steamvr.overlay,
         };
-        let note = self.smoothing.lock().unwrap().keep(&world);
+        let note = self.smoothing.locked().keep(&world);
         self.ctl.set_tracking_note(note);
     }
 
@@ -319,7 +321,7 @@ impl Service {
         }
         let snap = self.ctl.view();
         let wanted = snap.steamvr.running && snap.settings.steamvr_overlay;
-        let links = self.links.lock().unwrap();
+        let links = self.links.locked();
         let connected = links.iter().find(|l| l.role == Role::Overlay);
         if !wanted {
             if let Some(link) = connected {
@@ -330,9 +332,9 @@ impl Service {
             return;
         }
         if connected.is_some() {
-            if let Some((_, started, _, failures, errors)) = self.overlay.lock().unwrap().as_mut() {
+            if let Some((_, started, _, failures, errors)) = self.overlay.locked().as_mut() {
                 *failures = 0;
-                self.overlay_after_quit.lock().unwrap().reset();
+                self.overlay_after_quit.locked().reset();
                 // Connected is not started: one that ends with an error after connecting counts until it lived a while.
                 if started.elapsed() >= OVERLAY_LIVED {
                     *errors = 0;
@@ -342,14 +344,14 @@ impl Service {
         }
         let Some(session) = crate::steamvr_start::ready_session().filter(|s| Some(s.0) == snap.steamvr.pid) else { return };
         drop(links);
-        let mut overlay = self.overlay.lock().unwrap();
+        let mut overlay = self.overlay.locked();
         let mut errors = 0;
         if let Some((child, started, steamvr, failures, prior_errors)) = overlay.as_mut() {
             let exited = child_exited(child.try_wait());
-            let lived = lived_at_exit(&mut self.overlay_lived.lock().unwrap(), exited.is_some(), started.elapsed());
+            let lived = lived_at_exit(&mut self.overlay_lived.locked(), exited.is_some(), started.elapsed());
             errors = if *steamvr == Some(session) { short_errors(*prior_errors, exited, lived) } else { 0 };
             let after_quit = {
-                let mut after_quit = self.overlay_after_quit.lock().unwrap();
+                let mut after_quit = self.overlay_after_quit.locked();
                 if let Some(code) = exited {
                     after_quit.exited(code, *steamvr, Instant::now());
                 }
@@ -374,11 +376,11 @@ impl Service {
         match cmd.spawn() {
             Ok(child) => {
                 crate::worker::keep_with_service(&child);
-                crate::perf::keeper().lock().unwrap_or_else(|e| e.into_inner()).role(child.id(), "overlay");
-                self.overlay_after_quit.lock().unwrap().started(Some(session));
+                crate::perf::keeper().locked().role(child.id(), "overlay");
+                self.overlay_after_quit.locked().started(Some(session));
                 *overlay = Some((child, Instant::now(), Some(session), failures, errors));
             }
-            Err(e) => eprintln!("could not start the SteamVR overlay: {e}"),
+            Err(e) => log_warn!("could not start the SteamVR overlay: {e}", e = e),
         }
     }
 
@@ -394,7 +396,7 @@ impl Service {
         if !crate::overlay::orbit::wanted_on_desktop(&snap) {
             return;
         }
-        let mut orbit = self.orbit.lock().unwrap();
+        let mut orbit = self.orbit.locked();
         if let Some((child, started)) = orbit.as_mut() {
             let running = matches!(child.try_wait(), Ok(None));
             // One that ended on its own may start again, not at once: whatever made it end must not spin.
@@ -412,10 +414,10 @@ impl Service {
         match cmd.spawn() {
             Ok(child) => {
                 crate::worker::keep_with_service(&child);
-                crate::perf::keeper().lock().unwrap_or_else(|e| e.into_inner()).role(child.id(), "orbit-desktop");
+                crate::perf::keeper().locked().role(child.id(), "orbit-desktop");
                 *orbit = Some((child, Instant::now()));
             }
-            Err(e) => eprintln!("could not start the panels around VRChat's menus: {e}"),
+            Err(e) => log_warn!("could not start the panels around VRChat's menus: {e}", e = e),
         }
     }
 
@@ -424,20 +426,20 @@ impl Service {
         if self.quitting.swap(true, Ordering::Relaxed) {
             return;
         }
-        for link in self.links.lock().unwrap().iter() {
+        for link in self.links.locked().iter() {
             link.mailbox.post(ToClient::Close);
         }
         // A file operation under way (an export, a Trash) ends before the teardown, for a while at most; no other
         // starts (the work threads see `quitting`).
         let until = Instant::now() + FILE_WORK_AT_QUIT;
-        let mut running = self.file_work.lock().unwrap();
+        let mut running = self.file_work.locked();
         while *running > 0 {
             let left = until.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                eprintln!("quitting: {} file operation(s) still under way after {:?}", *running, FILE_WORK_AT_QUIT);
+                log_info!("quitting: {} file operation(s) still under way after {:?}", *running, FILE_WORK_AT_QUIT);
                 break;
             }
-            running = self.file_work_done.wait_timeout(running, left).unwrap().0;
+            running = self.file_work_done.wait_timeout_locked(running, left).0;
         }
         drop(running);
         self.ctl.booster_quit();
@@ -449,7 +451,7 @@ impl Service {
             let _ = PostThreadMessageW(self.main_thread, WM_QUIT, WPARAM(0), LPARAM(0));
         }
         #[cfg(not(windows))]
-        if let Some(tx) = self.quit_tx.lock().unwrap().take() {
+        if let Some(tx) = self.quit_tx.locked().take() {
             let _ = tx.send(());
         }
     }
@@ -466,7 +468,7 @@ impl Service {
     /// Restarts into an update's setup (controller/update.rs): starts it, then quits; the setup replaces the files
     /// once the app has gone and starts it again, with its window if one is open now, in the tray otherwise.
     fn restart_into(&self, setup: &std::path::Path, dir: &std::path::Path) {
-        let window_open = self.links.lock().unwrap().iter().any(|l| l.role == Role::Window);
+        let window_open = self.links.locked().iter().any(|l| l.role == Role::Window);
         match controller::update::start_setup(setup, dir, !window_open) {
             Ok(()) => self.quit(),
             Err(e) => self.ctl.notify(NoticeKind::Error, tr!("The update could not start: {error}", error = e)),
@@ -492,7 +494,7 @@ impl Service {
     /// work thread is judged against it, not against a folder the settings switched to meanwhile).
     fn settle_edit(&self, link: u64, edit: Option<u64>) {
         if let Some(id) = edit {
-            if let Some(link) = self.links.lock().unwrap().iter().find(|l| l.id == link) {
+            if let Some(link) = self.links.locked().iter().find(|l| l.id == link) {
                 link.mailbox.post(ToClient::EditSettled { id });
             }
         }
@@ -537,7 +539,7 @@ impl Service {
                 ctl.patch_settings(&patch);
                 ctl.update(|s| s.smoothing_revision += 1);
                 let revision = ctl.view().smoothing_revision;
-                if let Some(l) = self.links.lock().unwrap().iter().find(|l| l.id == link) {
+                if let Some(l) = self.links.locked().iter().find(|l| l.id == link) {
                     l.mailbox.post(ToClient::SmoothingAck { id, revision });
                 }
             }
@@ -564,7 +566,7 @@ impl Service {
             ToService::SignIn { edit } => {
                 // Asking Orbiters for the link is a network call: not on the link's reading thread.
                 let c = ctl.clone();
-                let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
+                let mailbox = self.links.locked().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
                 std::thread::spawn(move || {
                     if let Err(e) = c.sign_in() {
                         c.notify(NoticeKind::Error, tr!("Could not start the sign-in: {error}", error = e));
@@ -581,7 +583,7 @@ impl Service {
             ToService::VrchatLogin { command, .. } => ctl.vrchat_command(command),
             ToService::Launcher { action } => ctl.launcher_action(action),
             ToService::VrchatData { id, scope, request } => {
-                let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
+                let mailbox = self.links.locked().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
                 if let Some(mailbox) = mailbox {
                     let ctl = ctl.clone();
                     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
@@ -593,7 +595,7 @@ impl Service {
             }
             // VRChat groups: the window's alone (M10), answered to its link alone (M9).
             ToService::Groups { id, scope, request } => {
-                let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
+                let mailbox = self.links.locked().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
                 if let Some(mailbox) = mailbox {
                     use crate::controller::groups::{Failure, Reply};
                     if !crate::controller::groups::allowed_from(role) {
@@ -617,7 +619,7 @@ impl Service {
                 }
             }
             ToService::Member { id, epoch, request } => {
-                let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
+                let mailbox = self.links.locked().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
                 if let Some(mailbox) = mailbox {
                     let ctl = ctl.clone();
                     std::thread::spawn(move || {
@@ -643,7 +645,7 @@ impl Service {
             ToService::Typed { .. } => {}
             ToService::TranslateStatus { status } => self.ctl.set_translate_status(status),
             ToService::Translate { id, batch } => {
-                let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
+                let mailbox = self.links.locked().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
                 if let Some(mailbox) = mailbox {
                     let ctl = ctl.clone();
                     std::thread::spawn(move || {
@@ -661,7 +663,7 @@ impl Service {
             ToService::Unqueue { dir } => ctl.unqueue_reconstruction(&dir),
             ToService::WorkerLog => {
                 let lines = ctl.worker_log();
-                if let Some(l) = self.links.lock().unwrap().iter().find(|l| l.id == link) {
+                if let Some(l) = self.links.locked().iter().find(|l| l.id == link) {
                     l.mailbox.post(ToClient::WorkerLog { lines });
                 }
             }
@@ -674,12 +676,12 @@ impl Service {
             ToService::Frames { chunk } => ctl.frames(chunk),
             ToService::Headset { in_use } => ctl.set_headset(Some(in_use)),
             ToService::SteamVrDevices { kinds } => {
-                self.smoothing.lock().unwrap().set_kinds(kinds);
+                self.smoothing.locked().set_kinds(kinds);
                 self.keep_tracking();
             }
             ToService::WalkBoost { strength } => ctl.set_walk_boost(strength, false),
             ToService::BoosterReport { report } => ctl.booster_report(*report),
-            ToService::PerfTurns { turns } => crate::perf::keeper().lock().unwrap_or_else(|e| e.into_inner()).turns(*turns),
+            ToService::PerfTurns { turns } => crate::perf::keeper().locked().turns(*turns),
             ToService::PerfReport { command } => ctl.perf(command),
             ToService::Booster { command } => ctl.booster_command(command),
             ToService::WalkPath { path } => ctl.set_walk_path(crate::tracking::walk_path_said(path)),
@@ -690,7 +692,7 @@ impl Service {
                 } else {
                     // Held through the runtime's transition, as a link's close holds it: a press, a release and a close
                     // are taken one at a time (verify-controller, AD-1).
-                    let mut talk = self.talk.lock().unwrap();
+                    let mut talk = self.talk.locked();
                     if talk.talk(link, down) {
                         if down {
                             talk.press = stamp.map(|s| s.seq);
@@ -702,7 +704,7 @@ impl Service {
             ToService::N4n0 { command: N4n0Command::AskPage { open } } => {
                 // Whose Ask N4N0 page is open: only that link's going away closes it (verify-vr: the panels closing ended a
                 // sentence the window was saying, though they never opened Ask).
-                self.ask.lock().unwrap().ask(link, open);
+                self.ask.locked().ask(link, open);
                 ctl.n4n0_command(N4n0Command::AskPage { open })
             }
             ToService::N4n0 { command } => ctl.n4n0_command(command),
@@ -772,14 +774,14 @@ impl Service {
         self.ctl.subscribe(mailbox.clone());
         let id = self.next_link.fetch_add(1, Ordering::Relaxed);
         self.usage.linked(id, role);
-        self.links.lock().unwrap().push(Link { id, role, pid, mailbox: mailbox.clone(),
+        self.links.locked().push(Link { id, role, pid, mailbox: mailbox.clone(),
             #[cfg(test)]
             writes,
         });
         match role {
             Role::Window => {
-                *self.window.lock().unwrap() = None;
-                if let Some(page) = self.page_for_window.lock().unwrap().take() {
+                *self.window.locked() = None;
+                if let Some(page) = self.page_for_window.locked().take() {
                     mailbox.post(ToClient::ShowPage { page });
                 }
             }
@@ -799,7 +801,7 @@ impl Service {
                     // The app quits: what waits is not started under the teardown's feet. Checked under the lock Quit
                     // counts the work in progress under: either Quit sees this one, or this one sees Quit.
                     {
-                        let mut running = svc.file_work.lock().unwrap();
+                        let mut running = svc.file_work.locked();
                         if svc.quitting.load(Ordering::SeqCst) {
                             drop(running);
                             svc.settle_edit(id, msg.0.edit_id());
@@ -809,7 +811,7 @@ impl Service {
                     }
                     let (msg, library) = msg;
                     svc.handle_in(id, role, msg, Some(&library));
-                    *svc.file_work.lock().unwrap() -= 1;
+                    *svc.file_work.locked() -= 1;
                     svc.file_work_done.notify_all();
                 }
             }).ok().map(|_| tx)
@@ -844,11 +846,11 @@ impl Service {
         mailbox.close();
         self.usage.collecting(self.ctl.usage_stamp());
         self.usage.unlinked(id, self.ctl.view().settings.usage.enabled);
-        self.links.lock().unwrap().retain(|l| l.id != id);
+        self.links.locked().retain(|l| l.id != id);
         if role == Role::Window {
             self.ctl.groups_link_closed(id);
         }
-        let still_there = self.links.lock().unwrap().iter().any(|l| l.role == role);
+        let still_there = self.links.locked().iter().any(|l| l.role == role);
         if role == Role::Window && !still_there {
             // Its offer to close went with it.
             self.ctl.window_rest(None);
@@ -862,9 +864,9 @@ impl Service {
         // The app's Talk (the window's or the panels') is let go only by the link that holds it down: the panels
         // closing must not end, nor send, a sentence the window is saying (AD-1).
         // The Ask N4N0 page this link opened (taken before Talk's lock, never inside it).
-        let held_ask = self.ask.lock().unwrap().closed(id);
+        let held_ask = self.ask.locked().closed(id);
         // Held until what the closed link let go is done: a press of another link waits for it (verify-controller).
-        let mut talk = self.talk.lock().unwrap();
+        let mut talk = self.talk.locked();
         let held_talk = role != Role::Overlay && talk.closed(id);
         let press = talk.press;
         if role == Role::Overlay && !still_there {
@@ -1144,7 +1146,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
     let slot: Arc<Mutex<Option<Arc<Service>>>> = Arc::default();
     let requests = slot.clone();
     let _instance = match single::acquire(!hidden, move |request| {
-        let Some(svc) = requests.lock().unwrap().clone() else { return };
+        let Some(svc) = requests.locked().clone() else { return };
         match request {
             single::Request::Show => svc.show_window(false),
             single::Request::Quit => svc.quit(),
@@ -1159,7 +1161,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
     if let Some((setup, dir)) = controller::update::pending_setup() {
         match controller::update::start_setup(&setup, &dir, hidden) {
             Ok(()) => return Ok(()),
-            Err(e) => eprintln!("the update could not start: {e}"),
+            Err(e) => log_warn!("the update could not start: {e}", e = e),
         }
     }
 
@@ -1167,16 +1169,16 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
     crate::startup::mac::follow_this_program();
 
     let settings = Settings::load();
-    let _ = std::fs::create_dir_all(&settings.sessions_dir);
-    let _ = std::fs::create_dir_all(&settings.raw_captures_dir);
+    std::fs::create_dir_all(&settings.sessions_dir).or_log("a folder could not be made");
+    std::fs::create_dir_all(&settings.raw_captures_dir).or_log("a folder could not be made");
     let ctl = Controller::new(settings);
     // What an earlier run of the FPS booster left comes back before anything else starts.
     ctl.start_booster();
     // What writes killed between their temporary file and its rename left beside the settings (REL-14 c).
     if let Some(dir) = orbiters_core::paths::settings_file().parent().map(std::path::Path::to_path_buf) {
-        let _ = std::thread::Builder::new().name("tmp-sweep".into()).spawn(move || {
+        std::thread::Builder::new().name("tmp-sweep".into()).spawn(move || {
             remove_stale_temporaries(&dir, Duration::from_secs(24 * 3600));
-        });
+        }).or_log("a thread could not be started");
     }
     ctl.start();
     ctl.start_bridge();
@@ -1188,9 +1190,9 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
     let service = Service::around(ctl, endpoint, std::env::current_exe()?);
     #[cfg(not(windows))]
     {
-        *service.quit_tx.lock().unwrap() = Some(quit_tx);
+        *service.quit_tx.locked() = Some(quit_tx);
     }
-    *slot.lock().unwrap() = Some(service.clone());
+    *slot.locked() = Some(service.clone());
     let weak = Arc::downgrade(&service);
     service.ctl.set_restarter(Box::new(move |setup, dir| {
         if let Some(svc) = weak.upgrade() {
@@ -1251,7 +1253,7 @@ fn tray_loop(service: &Arc<Service>) -> anyhow::Result<()> {
     let mut tray = match crate::tray::Tray::new(service.clone()) {
         Ok(t) => Some(t),
         Err(e) => {
-            eprintln!("tray icon: {e}");
+            log_warn!("tray icon: {e}", e = e);
             None
         }
     };
@@ -1667,25 +1669,25 @@ pub(crate) mod tests {
         let ctl = service.ctl.clone();
         let (first, between) = linked_through(&service, Role::Overlay);
         ctl.update(|s| s.projects_changed = 42);
+        assert!(until(|| ctl.view().steamvr.overlay && service.linked(Role::Overlay) == 1));
         assert!(in_step(&service, &first));
-        assert!(ctl.view().steamvr.overlay && service.linked(Role::Overlay) == 1);
         // The connection drops: the client says the service is gone, the service lets the link go and no longer counts
         // an overlay as linked.
         between.hang_up();
         assert!(until(|| first.should_close()));
         assert!(until(|| service.linked(Role::Overlay) == 0 && !ctl.view().steamvr.overlay));
         let held = first.snapshot();
-        // The service goes on, with nobody linked.
-        ctl.update(|s| s.n4n0.lines.push(said("said while nobody was linked")));
+        // Change settings while nobody is linked. The old link can still publish N4N0's status as it finishes closing.
         ctl.update(|s| s.settings.walk_boost.strength = 0.5);
         // It comes back: handed everything, and then what changes.
         let again = linked(&service, Role::Overlay);
         assert!(in_step(&service, &again));
-        assert_eq!(again.snapshot().n4n0.lines.len(), 1);
+        assert_eq!(again.snapshot().settings.walk_boost.strength, 0.5);
         assert_eq!(again.snapshot().projects_changed, 42);
         assert!(until(|| ctl.view().steamvr.overlay));
-        ctl.update(|s| s.n4n0.afk = true);
+        ctl.update(|s| s.projects_changed = 43);
         assert!(in_step(&service, &again));
+        assert_eq!(again.snapshot().projects_changed, 43);
         assert!(Arc::ptr_eq(&held, &first.snapshot()), "nothing of the new link reaches the client that went");
         // Coming and going again and again leaves no link behind.
         for _ in 0..3 {

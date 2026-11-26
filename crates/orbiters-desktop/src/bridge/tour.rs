@@ -2,6 +2,7 @@
 //! session's 3D picture to it the way Photos & captures' Share publicly does, the pictures the bridge took (kept across
 //! restarts, journal.rs) and where each stands, and freeing their files on this computer once they are safe on Orbiters.
 
+use orbiters_core::locks::*;
 use super::game::{EnvironmentSeen, Failure, Publish, PublishSeen};
 use super::journal;
 use super::person::Paused;
@@ -101,7 +102,7 @@ fn megabytes(bytes: u64) -> f64 {
 
 impl Bridge {
     fn publish_seam(&self) -> Result<Arc<dyn Publish>, Failure> {
-        self.publish.lock().unwrap().clone().ok_or_else(|| Failure::new("publishing_unavailable", "Publishing cannot be reached from this bridge.", "Go on without it and tell the person."))
+        self.publish.locked().clone().ok_or_else(|| Failure::new("publishing_unavailable", "Publishing cannot be reached from this bridge.", "Go on without it and tell the person."))
     }
 
     pub(super) fn tour_call(&self, name: &str, args: &Value, call: &Call) -> Result<Answer, Failure> {
@@ -161,7 +162,7 @@ impl Bridge {
             )
             .retry_after(30));
         }
-        let journal: Vec<String> = self.journal.lock().unwrap().pictures.iter().rev().take(200).map(|p| p.session.clone()).collect();
+        let journal: Vec<String> = self.journal.locked().pictures.iter().rev().take(200).map(|p| p.session.clone()).collect();
         let dir = publish.sessions_dir();
         if journal.iter().any(|s| matches!(publish.published(&dir.join(s)), PublishSeen::Running { .. } | PublishSeen::RateLimited { .. })) {
             return Err(Failure::new("publish_under_way", "A picture is being published to the active environment.", "Wait for it (pictures), then switch.").retry_after(30));
@@ -194,16 +195,16 @@ impl Bridge {
         if dir.as_os_str().is_empty() {
             return 0;
         }
-        self.journal.lock().unwrap().adopt(&dir, persons.as_deref())
+        self.journal.locked().adopt(&dir, persons.as_deref())
     }
 
     /// The picture a call names: one this bridge took, its folder, and its journal entry.
     fn picture_named(&self, publish: &dyn Publish, args: &Value) -> Result<(PathBuf, journal::Picture), Failure> {
         let name = args["picture"].as_str().unwrap_or_default();
-        if self.journal.lock().unwrap().picture(name).is_none() {
+        if self.journal.locked().picture(name).is_none() {
             self.adopt(publish);
         }
-        let Some(picture) = self.journal.lock().unwrap().picture(name).cloned() else {
+        let Some(picture) = self.journal.locked().picture(name).cloned() else {
             return Err(Failure::new(
                 "unknown_picture",
                 format!("{name:?} is not a picture this bridge took."),
@@ -239,7 +240,7 @@ impl Bridge {
         let adopted = self.adopt(&*publish);
         let limit = args["limit"].as_u64().unwrap_or(30).clamp(1, 200) as usize;
         let unpublished = args["unpublished"].as_bool().unwrap_or(false);
-        let all: Vec<journal::Picture> = self.journal.lock().unwrap().pictures.iter().rev().cloned().collect();
+        let all: Vec<journal::Picture> = self.journal.locked().pictures.iter().rev().cloned().collect();
         let dir = publish.sessions_dir();
         let listed: Vec<Value> = all
             .iter()
@@ -370,7 +371,7 @@ impl Bridge {
         }
         let freed = publish.delete(&dir, everything)?;
         let what = if everything { "everything" } else { "capture_files" };
-        self.journal.lock().unwrap().freed(&picture.session, what);
+        self.journal.locked().freed(&picture.session, what);
         Ok(Answer::Data(json!({
             "picture": picture.session,
             "freed": what,

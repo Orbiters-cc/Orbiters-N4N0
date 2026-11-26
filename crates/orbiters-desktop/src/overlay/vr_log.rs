@@ -7,6 +7,8 @@
 //! does what a line did before (create the folder, look at the size, rotate, open, append, close), for each batch of
 //! lines it finds queued. Every other process (the service, the app) writes at once, as before.
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use std::path::Path;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::sync::Mutex;
@@ -33,7 +35,7 @@ pub fn line(text: &str) {
 /// when this process has one, else at once. Above `rotate_at` the file becomes `<stem>.old.log` first.
 pub fn append(file: &'static str, rotate_at: Option<u64>, text: String) {
     let item = Item { file, rotate_at, text };
-    let sender = WRITER.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let sender = WRITER.locked().clone();
     if let Some(sender) = sender {
         match sender.try_send(Msg::Line(item)) {
             Ok(()) => return,
@@ -58,7 +60,7 @@ type Lost = Mutex<Vec<(&'static str, Option<u64>, u64)>>;
 static LOST: Lost = Mutex::new(Vec::new());
 
 fn lose(lost: &Lost, file: &'static str, rotate_at: Option<u64>) {
-    let mut lost = lost.lock().unwrap_or_else(|e| e.into_inner());
+    let mut lost = lost.locked();
     match lost.iter_mut().find(|(f, _, _)| *f == file) {
         Some((_, _, n)) => *n += 1,
         None => lost.push((file, rotate_at, 1)),
@@ -94,7 +96,7 @@ impl Queued {
     pub fn start() -> Queued {
         let mut queued = Queued::start_in(orbiters_core::paths::logs_dir(), &LOST);
         queued.installed = true;
-        *WRITER.lock().unwrap_or_else(|e| e.into_inner()) = Some(queued.sender.clone());
+        *WRITER.locked() = Some(queued.sender.clone());
         queued
     }
 
@@ -128,7 +130,7 @@ impl Drop for Queued {
     fn drop(&mut self) {
         if self.installed {
             // Lines said from now on are written at once.
-            *WRITER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            *WRITER.locked() = None;
         }
         self.flush();
         drop(self.thread.take());
@@ -147,7 +149,7 @@ fn writer(dir: &Path, receiver: &Receiver<Msg>, lost: &Lost) {
             }
             next = receiver.try_recv().ok();
         }
-        let dropped = std::mem::take(&mut *lost.lock().unwrap_or_else(|e| e.into_inner()));
+        let dropped = std::mem::take(&mut *lost.locked());
         for (file, rotate_at, n) in dropped {
             let text = format!("{} {n} lines lost: the log's queue was full\n", orbiters_core::now_utc_iso()); // i18n: not shown (a log's line)
             batch.push(Item { file, rotate_at, text });
@@ -183,7 +185,7 @@ fn write_batch(dir: &Path, items: &[Item]) {
     if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
         use std::io::Write;
         let text: String = items.iter().map(|i| i.text.as_str()).collect();
-        let _ = file.write_all(text.as_bytes());
+        file.write_all(text.as_bytes()).or_log("a file could not be written");
     }
 }
 

@@ -1,5 +1,6 @@
 //! User settings, stored as JSON in the config folder. Unknown fields are kept out, missing ones defaulted.
 
+use crate::locks::*;
 use crate::contracts::manifest::{CaptureMode, StorageQuality};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -1214,7 +1215,7 @@ const LEGACY_N4N0_KEY: &str = "orb";
 static LOADED_UNREADABLE: std::sync::Mutex<std::collections::BTreeMap<PathBuf, bool>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 fn loaded_unreadable(path: &Path) {
-    LOADED_UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(path.to_path_buf()).or_insert(false);
+    LOADED_UNREADABLE.locked().entry(path.to_path_buf()).or_insert(false);
 }
 
 /// What this process last knew each settings file to hold: what it read while the file could still be read, then what
@@ -1232,23 +1233,23 @@ fn known_until_unreadable(path: &Path, settings: &Settings) {
 }
 
 fn saved(path: &Path, settings: &Settings) {
-    KNOWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(path.to_path_buf(), settings.clone());
+    KNOWN.locked().insert(path.to_path_buf(), settings.clone());
 }
 
 /// What a save onto the file as it reads puts what changed from: what this process last knew it to hold, else the
 /// defaults it started from.
 fn baseline(path: &Path) -> serde_json::Value {
-    let known = KNOWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(path).cloned();
+    let known = KNOWN.locked().get(path).cloned();
     serde_json::to_value(known.unwrap_or_else(Settings::unread)).unwrap_or_default()
 }
 
 fn set_kept_aside(path: &Path) {
-    LOADED_UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(path.to_path_buf(), true);
+    LOADED_UNREADABLE.locked().insert(path.to_path_buf(), true);
 }
 
 /// Whether this process loaded `path` unreadable, and if so whether the file was kept beside since.
 fn was_loaded_unreadable(path: &Path) -> Option<bool> {
-    LOADED_UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(path).copied()
+    LOADED_UNREADABLE.locked().get(path).copied()
 }
 
 fn migrate_fields(value: &mut serde_json::Value) -> bool {

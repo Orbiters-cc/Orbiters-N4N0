@@ -5,6 +5,7 @@
 //! A file goes only once it was read and is another member's, or when the conversation ends (New conversation, a sign-out, another
 //! member). One that cannot be read now (N4N-1) stays, is tried again, and is kept aside (`.bad-…`) by what is written in its place.
 
+use orbiters_core::locks::*;
 use crate::fence::Fence;
 use crate::runtime::{N4n0, N4n0Runtime};
 use crate::status::{N4n0Line, N4n0Who, SignedAs};
@@ -129,16 +130,16 @@ impl Fence<'_> {
         // What the last run kept could not be read: it may be by now, and goes before what was said since.
         let mut found = false;
         if orbiters_core::was_unreadable(file) {
-            if self.n4n0.lock().unwrap().thinking() {
+            if self.n4n0.locked().thinking() {
                 // Its end keeps it all.
                 return;
             }
             if let Ok(Some(kept)) = Kept::read(file).map(|kept| kept.filter(|k| k.epoch == self.epoch())) {
-                kept.restore(&mut self.n4n0.lock().unwrap());
+                kept.restore(&mut self.n4n0.locked());
                 found = true;
             }
         }
-        Kept::of(&self.n4n0.lock().unwrap(), self.epoch()).write(file);
+        Kept::of(&self.n4n0.locked(), self.epoch()).write(file);
         if found {
             self.publish();
         }
@@ -172,7 +173,7 @@ impl N4n0 {
             Err(_) => return self.add_line(N4n0Who::Note, tr(NOT_READ)),
         };
         {
-            let mut rt = self.n4n0.lock().unwrap();
+            let mut rt = self.n4n0.locked();
             rt.account_epoch = epoch;
             if !rt.conversation.is_empty() || rt.lines.iter().any(|l| l.who == N4n0Who::You) {
                 return;
@@ -186,7 +187,7 @@ impl N4n0 {
     pub(crate) fn park_account(&self, epoch: u64, member: Option<&str>) {
         if let Some(member) = member {
             let said = {
-                let rt = self.n4n0.lock().unwrap();
+                let rt = self.n4n0.locked();
                 Kept::of(&rt, rt.account_epoch)
             };
             let theirs = said.epoch;
@@ -196,10 +197,10 @@ impl N4n0 {
                 kept = Kept::read(&self.files.conversation).unwrap_or(None).filter(|k| k.epoch == theirs);
             }
             let unread = orbiters_core::was_unreadable(&self.files.conversation).then_some(theirs);
-            *self.parked.lock().unwrap() = Some(Parked { member: member.to_string(), kept, unread });
+            *self.parked.locked() = Some(Parked { member: member.to_string(), kept, unread });
         }
         // What waits, in memory or unread, is not for the next one to see; it goes when it is not theirs.
-        if self.parked.lock().unwrap().as_ref().is_none_or(|p| p.unread.is_none()) {
+        if self.parked.locked().as_ref().is_none_or(|p| p.unread.is_none()) {
             self.drop_conversation_file();
         }
         self.forget_said(epoch);
@@ -207,7 +208,7 @@ impl N4n0 {
 
     /// [`crate::Paused::establish_account`].
     pub(crate) fn establish_account(&self, epoch: u64, member: &str) {
-        let Some(Parked { mut kept, unread, .. }) = self.parked.lock().unwrap().take().filter(|p| p.member == member) else {
+        let Some(Parked { mut kept, unread, .. }) = self.parked.locked().take().filter(|p| p.member == member) else {
             return self.forget_account(epoch);
         };
         self.forget_said(epoch);
@@ -231,13 +232,13 @@ impl N4n0 {
         if let Some(mut kept) = kept {
             kept.epoch = epoch;
             kept.write(file);
-            kept.restore(&mut self.n4n0.lock().unwrap());
+            kept.restore(&mut self.n4n0.locked());
         }
         self.publish();
     }
 
     pub(crate) fn drop_parked(&self) {
-        *self.parked.lock().unwrap() = None;
+        *self.parked.locked() = None;
     }
 }
 

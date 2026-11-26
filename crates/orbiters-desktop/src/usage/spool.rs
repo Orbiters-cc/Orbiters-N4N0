@@ -14,6 +14,8 @@
 //! session ends and starts again when the stamp changes: neither an install nor a session ties what was counted under the old
 //! notice ("never your account") to an account. The stamp itself stays on this computer.
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use super::{clean, now_ms, Kind, Step};
 use crate::ipc::Role;
 use serde::{Deserialize, Serialize};
@@ -174,7 +176,7 @@ impl Spool {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.0.locked()
     }
 
     /// A link of `role` came: its session starts at its first step.
@@ -370,8 +372,8 @@ impl Spool {
         let id = read.unwrap_or_else(|| {
             let id = uuid::Uuid::new_v4().simple().to_string();
             if let Some(dir) = &inner.dir {
-                let _ = std::fs::create_dir_all(dir);
-                let _ = std::fs::write(dir.join(file), &id);
+                std::fs::create_dir_all(dir).or_log("a folder could not be made");
+                std::fs::write(dir.join(file), &id).or_log("a file could not be written");
             }
             id
         });
@@ -423,7 +425,7 @@ impl Spool {
         let status = match answer {
             Ok(response) => response.status().as_u16(),
             Err(e) => {
-                eprintln!("usage statistics: Orbiters not reached ({e}), {} and {} performance windows kept", batch.len(), perf.len());
+                log_warn!("usage statistics: Orbiters not reached ({e}), {} and {} performance windows kept", batch.len(), perf.len(), e = e);
                 return Sent::Kept;
             }
         };
@@ -449,7 +451,7 @@ impl Spool {
             Self::drop_old_install(&mut inner);
         }
         if let Sent::Dropped(n) = done {
-            eprintln!("usage statistics: Orbiters refused {n} ({status}), dropped");
+            log_warn!("usage statistics: Orbiters refused {n} ({status}), dropped", n = n, status = status);
         }
         done
     }
@@ -459,7 +461,7 @@ impl Spool {
     /// stamped with it), `None` while the account is still being read: a send takes it just before it goes, and the first one waits
     /// for it (at most [`Spool::ORIGIN_WAIT`]), so that the start of a run is not counted as a tester's for want of an answer (PRIV-4).
     pub fn run(self: std::sync::Arc<Self>, enabled: impl Fn() -> bool + Send + 'static, origin: impl Fn() -> Option<(bool, Option<Signed>)> + Send + 'static) {
-        let _ = std::thread::Builder::new().name("usage-upload".into()).spawn(move || {
+        std::thread::Builder::new().name("usage-upload".into()).spawn(move || {
             let started = std::time::Instant::now();
             std::thread::sleep(Duration::from_secs(20));
             while origin().is_none() && started.elapsed() < Self::ORIGIN_WAIT {
@@ -489,7 +491,7 @@ impl Spool {
                 }
                 std::thread::sleep(Duration::from_secs(60));
             }
-        });
+        }).or_log("a thread could not be started");
     }
 }
 
@@ -554,16 +556,16 @@ fn keep_perf(inner: &mut Inner, window: super::perf::Window) {
         return;
     }
     let Some(dir) = &inner.dir else { return };
-    let _ = std::fs::create_dir_all(dir);
+    std::fs::create_dir_all(dir).or_log("a folder could not be made");
     if let (Ok(mut file), Ok(mut line)) = (std::fs::OpenOptions::new().create(true).append(true).open(dir.join(PERF_WAITING)), serde_json::to_string(&window)) {
         line.push('\n');
-        let _ = file.write_all(line.as_bytes());
+        file.write_all(line.as_bytes()).or_log("a file could not be written");
     }
 }
 
 fn rewrite_perf(inner: &Inner) {
     let Some(dir) = &inner.dir else { return };
-    let _ = std::fs::create_dir_all(dir);
+    std::fs::create_dir_all(dir).or_log("a folder could not be made");
     let mut lines = String::new();
     for w in &inner.perf {
         if let Ok(line) = serde_json::to_string(w) {
@@ -573,7 +575,7 @@ fn rewrite_perf(inner: &Inner) {
     }
     let tmp = dir.join("perf-waiting.jsonl.tmp");
     if std::fs::write(&tmp, lines).is_ok() {
-        let _ = std::fs::rename(&tmp, dir.join(PERF_WAITING));
+        std::fs::rename(&tmp, dir.join(PERF_WAITING)).or_log("a file could not be moved or copied");
     }
 }
 
@@ -589,7 +591,7 @@ fn keep(inner: &mut Inner, events: Vec<Event>) {
         return;
     }
     let Some(dir) = &inner.dir else { return };
-    let _ = std::fs::create_dir_all(dir);
+    std::fs::create_dir_all(dir).or_log("a folder could not be made");
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(WAITING)) {
         let mut lines = String::new();
         for e in &events {
@@ -598,13 +600,13 @@ fn keep(inner: &mut Inner, events: Vec<Event>) {
                 lines.push('\n');
             }
         }
-        let _ = file.write_all(lines.as_bytes());
+        file.write_all(lines.as_bytes()).or_log("a file could not be written");
     }
 }
 
 fn rewrite(inner: &Inner) {
     let Some(dir) = &inner.dir else { return };
-    let _ = std::fs::create_dir_all(dir);
+    std::fs::create_dir_all(dir).or_log("a folder could not be made");
     let mut lines = String::new();
     for e in &inner.waiting {
         if let Ok(line) = serde_json::to_string(e) {
@@ -614,6 +616,6 @@ fn rewrite(inner: &Inner) {
     }
     let tmp = dir.join("waiting.jsonl.tmp");
     if std::fs::write(&tmp, lines).is_ok() {
-        let _ = std::fs::rename(&tmp, dir.join(WAITING));
+        std::fs::rename(&tmp, dir.join(WAITING)).or_log("a file could not be moved or copied");
     }
 }

@@ -261,7 +261,7 @@ impl crate::N4n0 {
     /// What the app can do now, for the intents' needs: the app's own ([`crate::Host::assistant_facts`]) and N4N0's.
     pub(crate) fn assistant_facts(&self) -> Facts {
         let mut facts = self.host.assistant_facts();
-        let rt = self.n4n0.lock().unwrap();
+        let rt = self.n4n0.locked();
         facts.n4n0_prop |= rt.sender.is_some() || rt.screen_present;
         facts.can_drop |= rt.screen.card_ready();
         facts
@@ -270,7 +270,7 @@ impl crate::N4n0 {
     /// A newer capture is ready: the share asked for "the next one" goes now (once), while the member who asked it is
     /// signed in.
     pub(crate) fn share_next_check(self: &Shared) {
-        let Some(epoch) = self.n4n0.lock().unwrap().assistant.share_next.as_ref().map(|n| n.epoch) else { return };
+        let Some(epoch) = self.n4n0.locked().assistant.share_next.as_ref().map(|n| n.epoch) else { return };
         let Some(fence) = self.fence(&Ticket::input(epoch)) else { return };
         // The switch, and the assistant, as they are now (verify4-r21 P11): off, it never goes.
         let share = Action::App(Intent::ShareCapture { which: Which::Next, public: true, friends: Vec::new() });
@@ -279,7 +279,7 @@ impl crate::N4n0 {
             return;
         }
         let ask = {
-            let mut rt = fence.n4n0.lock().unwrap();
+            let mut rt = fence.n4n0.locked();
             let Some(next) = rt.assistant.share_next.as_ref().filter(|n| n.epoch == epoch) else { return };
             if next.asked.elapsed() > std::time::Duration::from_secs(30 * 60) {
                 rt.assistant.share_next = None;
@@ -301,7 +301,7 @@ impl crate::N4n0 {
 
     /// A share asked for the next capture is not made any more.
     pub(crate) fn cancel_share_next(&self) {
-        if self.n4n0.lock().unwrap().assistant.share_next.take().is_some() {
+        if self.n4n0.locked().assistant.share_next.take().is_some() {
             self.add_line(N4n0Who::Note, tr("The next 3D capture is not shared after all: what N4N0 does from your account is off."));
             self.publish();
         }
@@ -315,7 +315,7 @@ impl crate::N4n0 {
         }
         self.cancel_share_next();
         let dropped = {
-            let mut rt = self.n4n0.lock().unwrap();
+            let mut rt = self.n4n0.locked();
             rt.drop_account_question()
         };
         if dropped {
@@ -332,7 +332,7 @@ impl Fence<'_> {
     }
 
     pub(crate) fn log_line(&self, name: &str, said: String, risk: Risk, outcome: Outcome, why: Option<String>, via: Via) {
-        let mut rt = self.n4n0.lock().unwrap();
+        let mut rt = self.n4n0.locked();
         let view = &mut *rt.assistant.view;
         view.log.push(LogEntry { at_ms: crate::unix_ms(), intent: name.to_string(), said, risk, outcome, why, via });
         let excess = view.log.len().saturating_sub(intents::LOG_KEPT);
@@ -341,7 +341,7 @@ impl Fence<'_> {
 
     /// What is being done now (the Ask page's line under the conversation), or nothing.
     pub(crate) fn intent_doing(&self, doing: Option<String>) {
-        let mut rt = self.n4n0.lock().unwrap();
+        let mut rt = self.n4n0.locked();
         if rt.assistant.view.doing != doing {
             rt.assistant.view.doing = doing;
         }
@@ -357,7 +357,7 @@ impl Fence<'_> {
     /// [`Fence::intent_run`] for `target`, as it was asked about.
     pub(crate) fn intent_run_for(&self, permit: &Permit, intent: Intent, via: Via, target: &Target) -> Result<Value, String> {
         let risk = intent.risk();
-        let limited = self.n4n0.lock().unwrap().assistant.limiter.take(if risk == Risk::Confirm { Risk::Confirm } else { Risk::Act }, Instant::now());
+        let limited = self.n4n0.locked().assistant.limiter.take(if risk == Risk::Confirm { Risk::Confirm } else { Risk::Act }, Instant::now());
         if let Err(why) = limited {
             self.intent_log(&intent, Outcome::Refused, Some(tr("Too many actions in a short time: wait a moment.").into()), via);
             self.publish();
@@ -390,7 +390,7 @@ impl Fence<'_> {
     }
 
     fn keep_undo(&self, what: String, step: UndoStep) {
-        let mut rt = self.n4n0.lock().unwrap();
+        let mut rt = self.n4n0.locked();
         rt.assistant.undo.push((what, step));
         let excess = rt.assistant.undo.len().saturating_sub(UNDO_KEPT);
         rt.assistant.undo.drain(..excess);
@@ -412,13 +412,13 @@ impl Fence<'_> {
         let call = || self.host.calls().call.ok_or_else(|| "No call now.".to_string()); // i18n: not shown
         match intent {
             Intent::YoutubeWatch { index } | Intent::YoutubeCopy { index } | Intent::YoutubeDrop { index } => {
-                let video = self.n4n0.lock().unwrap().assistant.youtube.get(index - 1).cloned().ok_or("No such result: search again.")?; // i18n: not shown
+                let video = self.n4n0.locked().assistant.youtube.get(index - 1).cloned().ok_or("No such result: search again.")?; // i18n: not shown
                 t.says = name(&video.title);
                 t.video = Some(video);
             }
             Intent::ShareCapture { which, friends, .. } => {
                 t.recipients = if friends.is_empty() { Vec::new() } else { self.recipients(friends)? };
-                let view = (*self.n4n0.lock().unwrap().captures).clone();
+                let view = (*self.n4n0.locked().captures).clone();
                 match which {
                     Which::Next => {}
                     Which::Latest => {
@@ -449,7 +449,7 @@ impl Fence<'_> {
                 (t.call, t.says) = (Some(call.number), name(&call.name));
             }
             Intent::ApplyState { name: said } => {
-                let rt = self.n4n0.lock().unwrap();
+                let rt = self.n4n0.locked();
                 let view = rt.states.view(rt.avatar_id.as_deref(), None);
                 let names: Vec<String> = view.states.iter().map(|s| s.name.clone()).collect();
                 let state = pick_person(said, view.states.iter().map(|s| (s.id.as_str(), s.name.as_str())))
@@ -470,7 +470,7 @@ impl Fence<'_> {
     /// The item an index names in its list, as the last answer gave it.
     fn item(&self, intent: &Intent) -> Result<Option<Value>, String> {
         let (Some(kind), Some(i)) = (list_of(intent), index_of(intent)) else { return Ok(None) };
-        let rt = self.n4n0.lock().unwrap();
+        let rt = self.n4n0.locked();
         let list = rt.assistant.lists.get(kind).ok_or_else(|| format!("No {kind} list yet: read it first (its query intent), then use its numbers."))?; // i18n: not shown
         list.get(i - 1).cloned().map(Some).ok_or_else(|| format!("The last {kind} list has {} items: ask the owner which one.", list.len())) // i18n: not shown
     }
@@ -484,7 +484,7 @@ impl Fence<'_> {
             v
         }).collect();
         if let Some(kind) = list_of(intent) {
-            self.n4n0.lock().unwrap().assistant.lists.insert(kind, items.clone());
+            self.n4n0.locked().assistant.lists.insert(kind, items.clone());
         }
         items
     }
@@ -498,7 +498,7 @@ impl Fence<'_> {
             Intent::FastWalk { on } => {
                 let was = settings.walk_boost.enabled;
                 self.screen_effects(vec![Effect::FastWalk(*on)]);
-                let desktop = self.n4n0.lock().unwrap().screen.menu.desktop_mode;
+                let desktop = self.n4n0.locked().screen.menu.desktop_mode;
                 let note = (desktop && *on).then_some("VRChat runs in desktop mode: Fast walk carries the owner in VR only."); // i18n: not shown
                 (json!({ "done": true, "fast_walk": on, "note": note }), (was != *on).then(|| UndoStep::Effects(vec![Effect::FastWalk(was)])))
             }
@@ -526,7 +526,7 @@ impl Fence<'_> {
                 }
             }
             Intent::Captures => {
-                let view = (*self.n4n0.lock().unwrap().captures).clone();
+                let view = (*self.n4n0.locked().captures).clone();
                 if !view.listed {
                     self.captures_list();
                 }
@@ -542,7 +542,7 @@ impl Fence<'_> {
             Intent::ShareCapture { which, public, .. } => {
                 let recipients = target.recipients.clone();
                 if *which == Which::Next {
-                    let mut rt = self.n4n0.lock().unwrap();
+                    let mut rt = self.n4n0.locked();
                     let after = rt.captures.latest.as_ref().map(|l| l.key.clone());
                     rt.assistant.share_next = Some(ShareNext { after, public: *public, recipients, asked: Instant::now(), epoch: self.epoch() });
                     return Ok((json!({ "done": true, "note": "It is shared once the next 3D capture is ready (its 3D view made)." }), None)); // i18n: not shown
@@ -559,7 +559,7 @@ impl Fence<'_> {
                     .iter()
                     .map(|v| json!({ "title": context::data(&v.title, NAME_CHARS), "channel": context::data(&v.channel, NAME_CHARS), "duration": v.duration, "live": v.live }))
                     .collect();
-                self.n4n0.lock().unwrap().assistant.youtube = videos;
+                self.n4n0.locked().assistant.youtube = videos;
                 let items = self.keep_list(intent, items);
                 (intents::untrusted(json!({ "results": items })), None)
             }
@@ -655,7 +655,7 @@ impl Fence<'_> {
             Intent::WorldFeedback => {
                 let world = target.world.clone().ok_or("The owner is in no world now.")?; // i18n: not shown
                 self.feedback_ask(orbiters_n4n0_core::feedback::FeedbackAsk::Show { world: world.clone() });
-                let rt = self.n4n0.lock().unwrap();
+                let rt = self.n4n0.locked();
                 let f = rt.feedback.world(&world);
                 let value = match f {
                     Some(f) if !f.loading => json!({
@@ -694,7 +694,7 @@ impl Fence<'_> {
             }
             Intent::ShowN4n0 { on } => {
                 let (was, avatar) = {
-                    let rt = self.n4n0.lock().unwrap();
+                    let rt = self.n4n0.locked();
                     (rt.bot, rt.avatar_id.clone())
                 };
                 if was.is_none() {
@@ -705,7 +705,7 @@ impl Fence<'_> {
             }
             Intent::N4n0Menu { open } => {
                 let is_open = {
-                    let rt = self.n4n0.lock().unwrap();
+                    let rt = self.n4n0.locked();
                     rt.screen.menu.open
                 };
                 // Opened as touching N4N0 opens it; closed as its own toggle closes it.
@@ -734,7 +734,7 @@ impl Fence<'_> {
                 (json!({ "done": true, "on": on, "ms": ms }), Some(UndoStep::Effects(vec![Effect::Tracking { on: was_on, ms: was_ms }])))
             }
             Intent::StayHere { on } => {
-                let was = self.n4n0.lock().unwrap().screen.menu.pinned;
+                let was = self.n4n0.locked().screen.menu.pinned;
                 self.screen_effects(vec![Effect::StayHere(*on)]);
                 (done(), (was != *on).then(|| UndoStep::Effects(vec![Effect::StayHere(was)])))
             }
@@ -770,7 +770,7 @@ impl Fence<'_> {
             }
             Intent::State { about } => (intents::untrusted(self.state_answer(about)), None),
             Intent::Undo => {
-                let last = self.n4n0.lock().unwrap().assistant.undo.pop();
+                let last = self.n4n0.locked().assistant.undo.pop();
                 let (undone, step) = last.ok_or("Nothing to undo.")?; // i18n: not shown
                 match step {
                     UndoStep::Effects(effects) => self.screen_effects(effects),
@@ -856,7 +856,7 @@ impl Fence<'_> {
 
     /// Asks the interfaces to open `page` (each opens a request once); the window's pages through the app as well.
     pub(crate) fn open_page(&self, page: Page, world: Option<(String, String)>) {
-        let mut rt = self.n4n0.lock().unwrap();
+        let mut rt = self.n4n0.locked();
         let id = rt.assistant.view.open.as_ref().map_or(1, |o| o.id.wrapping_add(1));
         rt.assistant.view.open = Some(OpenAsk { id, page, world });
         drop(rt);
@@ -883,7 +883,7 @@ impl Fence<'_> {
             out.insert("pictures".into(), json!({ "timer_seconds": s.photo_3d_timer, "length_seconds": crate::screen::photo_length(s.photo_3d).seconds(), "of": if s.photo_3d_mode == orbiters_core::settings::PictureMode::World { "world" } else { "people" } }));
         }
         {
-            let rt = self.n4n0.lock().unwrap();
+            let rt = self.n4n0.locked();
             if wants(About::Light) {
                 out.insert("light".into(), rt.light.map_or(json!({ "available": false }), |l| json!({ "on": l.on, "color": orbiters_contracts::n4n0::LIGHT_COLORS.get(l.color as usize).map(|c| c.0.to_lowercase()), "brightness": l.level })));
             }
@@ -988,7 +988,7 @@ impl Fence<'_> {
                 }
             }
         }
-        let mut rt = self.n4n0.lock().unwrap();
+        let mut rt = self.n4n0.locked();
         if !said.is_empty() {
             rt.line(N4n0Who::N4n0, said.join(" · "));
         }

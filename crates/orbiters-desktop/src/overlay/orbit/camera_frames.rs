@@ -5,6 +5,8 @@
 //! `Tune` says the share of. Closing signals the reader without waiting or logging on the overlay turn. OrbitVr retains it until it finishes, and joins any remainder at teardown before
 //! the borrowed SteamVR client dies. The picture goes no further than the reading of it.
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use super::camera_track::{self, Found};
 use orbiters_i18n::mark;
 use orbiters_openvr::compositor::MirrorSource;
@@ -111,14 +113,14 @@ impl CameraWatch {
         let began = Instant::now();
         let thread = std::thread::Builder::new().name("camera panel".into()).spawn(move || { // i18n: not shown (thread name)
             run(&s, &st, &h, &hints, from);
-            let health = *h.lock().unwrap_or_else(|e| e.into_inner());
+            let health = *h.locked();
             note(&format!("{:?}: {} looks, {} found the panel, over {} s", health.source, health.looks, health.finds, began.elapsed().as_secs())); // i18n: not shown (diagnostics)
         }).ok();
         Self { health, began, seen, stop, hint,thread }
     }
 
     /// A current pose can guide pixel search; it is never published as a look.
-    pub fn guide(&self,hint:Option<Found>,record:Option<([f32;2],f32)>) { *self.hint.lock().unwrap_or_else(|e|e.into_inner())=hint.map(|h|(Instant::now(),h,record)); }
+    pub fn guide(&self,hint:Option<Found>,record:Option<([f32;2],f32)>) { *self.hint.locked()=hint.map(|h|(Instant::now(),h,record)); }
 
     pub fn stop(&self) { self.stop.store(true, Ordering::Relaxed); }
     pub fn finished(&self) -> bool { self.thread.as_ref().is_none_or(|t| t.is_finished()) }
@@ -130,13 +132,13 @@ impl CameraWatch {
 
     /// Why no tile can show, as far as reading goes: for Settings, which translates it.
     pub fn problem(&self) -> Option<&'static str> {
-        let health = *self.health.lock().unwrap_or_else(|e| e.into_inner());
+        let health = *self.health.locked();
         trouble(&health, self.began, Instant::now())
     }
 
     /// The last look's result, once.
     pub fn take(&self) -> Option<Seen> {
-        self.seen.lock().unwrap_or_else(|e| e.into_inner()).take()
+        self.seen.locked().take()
     }
 }
 
@@ -222,14 +224,14 @@ fn told(found: Option<Found>, whole: [usize; 2], seen: &Mutex<Looks>, health: &M
             }
         }
     }
-    let mut h = health.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = health.locked();
     h.framed = Some(at);
     h.looks = h.looks.saturating_add(1);
     if let Some(found) = found {
         h.found = Some(at);
         h.finds = h.finds.saturating_add(1);
         drop(h);
-        seen.lock().unwrap_or_else(|e| e.into_inner()).publish(Seen { found, size: [whole[0] as f32, whole[1] as f32], source, at, right, record:None });
+        seen.locked().publish(Seen { found, size: [whole[0] as f32, whole[1] as f32], source, at, right, record:None });
     }
 }
 
@@ -268,7 +270,7 @@ fn keep(pixels: &[u8], width: usize, height: usize, stride: usize, source: Sourc
     }
     rgba.chunks_exact_mut(4).for_each(|p| p[3] = 255);
     let dir = orbiters_core::paths::logs_dir().join("camera-frames");
-    let _ = std::fs::create_dir_all(&dir);
+    std::fs::create_dir_all(&dir).or_log("a folder could not be made");
     if let Some(image) = image::RgbaImage::from_raw(width as u32, height as u32, rgba) {
         let _ = image.save(dir.join(format!("{source:?}-{}.png", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis()))));
     }
@@ -301,7 +303,7 @@ fn run(seen:&Mutex<Looks>,stop:&AtomicBool,health:&Mutex<Health>,hints:&Mutex<Op
     if let Some(source)=from.mirror {
         match EyeReader::new(from.adapter) {
             Ok(reader) => {
-                health.lock().unwrap_or_else(|e|e.into_inner()).source=Some(Source::Eye);
+                health.locked().source=Some(Source::Eye);
                 // One persistent pair of mirror streams. Only CPU-owned pixels
                 // cross threads; slow geometry never blocks the frame producer.
                 let (tx,rx)=std::sync::mpsc::sync_channel::<Refinement>(0);
@@ -326,7 +328,7 @@ fn run(seen:&Mutex<Looks>,stop:&AtomicBool,health:&Mutex<Health>,hints:&Mutex<Op
                                     if let Some(image)=image::RgbaImage::from_raw(picture.width,picture.height,rgba) {
                                         debug_kept=image.save(root.join("camera-reader.png")).is_ok();
                                         let info=serde_json::json!({"from":picture.from,"whole":picture.whole,"record_hint":job.record_hint,"record_found":job.record});
-                                        let _=std::fs::write(root.join("camera-reader.json"),info.to_string());
+                                        std::fs::write(root.join("camera-reader.json"),info.to_string()).or_log("a file could not be written");
                                     }
                                 }
                             }
@@ -334,14 +336,14 @@ fn run(seen:&Mutex<Looks>,stop:&AtomicBool,health:&Mutex<Health>,hints:&Mutex<Op
                             let began=Instant::now();
                             let found=found_on(&picture);
                             let left_ms=began.elapsed().as_secs_f32()*1000.;
-                            fitted_ref.lock().unwrap_or_else(|e|e.into_inner())[0]=found.map(|f|(f,whole));
+                            fitted_ref.locked()[0]=found.map(|f|(f,whole));
                             // The right eye only where the left has it, and not on every look while it keeps missing.
                             let search_right=found.is_some() && job.right.width>1 && (right_misses<RIGHT_MISSES || jobs%RIGHT_RETRY_EVERY==0);
                             let began=Instant::now();
                             let right_found=search_right.then(||found_on(&job.right)).flatten();
                             let right_ms=search_right.then(||began.elapsed().as_secs_f32()*1000.);
                             if search_right { right_misses=if right_found.is_some() {0} else {right_misses.saturating_add(1)}; }
-                            fitted_ref.lock().unwrap_or_else(|e|e.into_inner())[1]=right_found.map(|f|(f,job.right.whole));
+                            fitted_ref.locked()[1]=right_found.map(|f|(f,job.right.whole));
                             let right=right_found.zip(job.paired).map(|(found,frame_index)|RightSeen{found,size:[job.right.whole[0] as f32,job.right.whole[1] as f32],at:job.at,frame_index});
                             pace.job(left_ms,right_ms,found.is_some(),right_found.is_some(),job.paired.is_some());
                             told(found,[whole[0] as usize,whole[1] as usize],seen,health,Source::Eye,job.at,right,&mut logged);
@@ -352,8 +354,8 @@ fn run(seen:&Mutex<Looks>,stop:&AtomicBool,health:&Mutex<Health>,hints:&Mutex<Op
                     let mut requested=Instant::now().checked_sub(LOOK_WHOLE_EVERY).unwrap_or_else(Instant::now);
                     while !stop.load(Ordering::Relaxed) && errors<EYE_TRIES {
                         let began=Instant::now();
-                        let guide=hints.lock().unwrap_or_else(|e|e.into_inner()).filter(|(at,_,_)|at.elapsed()<Duration::from_millis(100));
-                        let fitted=*fitted.lock().unwrap_or_else(|e|e.into_inner());
+                        let guide=hints.locked().filter(|(at,_,_)|at.elapsed()<Duration::from_millis(100));
+                        let fitted=*fitted.locked();
                         let hint=guide.map(|(_,f,_)|f);let record_hint=guide.and_then(|(_,_,r)|r);
                         let predicted=hint.zip(last.or(fitted[0]).map(|(_,size)|size));
                         let area=predicted.or(last).or(fitted[0]).map(|(f,size)|camera_track::around(&f,size[0] as usize,size[1] as usize).map(|v|v as u32));
@@ -376,8 +378,8 @@ fn run(seen:&Mutex<Looks>,stop:&AtomicBool,health:&Mutex<Health>,hints:&Mutex<Op
                                 let record=record_hint.and_then(|(center,radius)|camera_track::record_near(&left.rgba,left.width as usize,left.height as usize,left.width as usize*4,offset,center,radius));
                                 let guided=hint.and_then(|hint|camera_track::glyphs_near(&left.rgba,left.width as usize,left.height as usize,left.width as usize*4,offset,hint));
                                 if let Some(found)=guided {
-                                    seen.lock().unwrap_or_else(|e|e.into_inner()).publish(Seen{found,size:[left.whole[0] as f32,left.whole[1] as f32],source:Source::Eye,at:began,right:None,record});
-                                    let mut h=health.lock().unwrap_or_else(|e|e.into_inner());h.framed=Some(began);h.found=Some(began);h.looks=h.looks.saturating_add(1);h.finds=h.finds.saturating_add(1);
+                                    seen.locked().publish(Seen{found,size:[left.whole[0] as f32,left.whole[1] as f32],source:Source::Eye,at:began,right:None,record});
+                                    let mut h=health.locked();h.framed=Some(began);h.found=Some(began);h.looks=h.looks.saturating_add(1);h.finds=h.finds.saturating_add(1);
                                     last=Some((found,left.whole));
                                 }
                                 if let Some((right,paired))=pair {
@@ -409,7 +411,7 @@ fn run_on_window(_: &Mutex<Looks>, _: &AtomicBool, _: &Mutex<Health>, _: bool, _
 
 #[cfg(windows)]
 fn run_on_window(seen: &Mutex<Looks>, stop: &AtomicBool, health: &Mutex<Health>, keep_frames: bool, kept: &mut Option<Instant>) {
-    let told = |what: &dyn Fn(&mut Health)| what(&mut health.lock().unwrap_or_else(|e| e.into_inner()));
+    let told = |what: &dyn Fn(&mut Health)| what(&mut health.locked());
     told(&|h| h.source = Some(Source::Window));
     let mut said = false;
     let mut logged = None;
@@ -489,7 +491,7 @@ mod tests {
     fn retired_readers_are_joined_before_the_owner_finishes() {
         use super::*;
         let (release,wait)=std::sync::mpsc::channel();
-        let thread=std::thread::spawn(move || { let _=wait.recv_timeout(Duration::from_secs(1)); });
+        let thread=std::thread::spawn(move || { let _=wait.recv(); });
         let mut watch=CameraWatch { health:Arc::new(Mutex::new(Health::default())),began:Instant::now(),seen:Arc::new(Mutex::new(Looks::default())),stop:Arc::new(AtomicBool::new(false)),hint:Arc::new(Mutex::new(None)),thread:Some(thread) };
         watch.stop();
         assert!(!watch.finished());
@@ -501,12 +503,20 @@ mod tests {
     fn closing_does_not_wait_for_a_reader() {
         use super::*;
         let (release, wait) = std::sync::mpsc::channel();
-        let thread = std::thread::spawn(move || { let _ = wait.recv_timeout(Duration::from_secs(1)); });
-        let watch = CameraWatch { health: Arc::new(Mutex::new(Health::default())), began: Instant::now(), seen: Arc::new(Mutex::new(Looks::default())), stop: Arc::new(AtomicBool::new(false)), hint:Arc::new(Mutex::new(None)),thread: Some(thread) };
-        let began = Instant::now();
-        drop(watch);
-        assert!(began.elapsed() < Duration::from_millis(150));
+        let thread = std::thread::spawn(move || { let _ = wait.recv(); });
+        let stop = Arc::new(AtomicBool::new(false));
+        let watch = CameraWatch { health: Arc::new(Mutex::new(Health::default())), began: Instant::now(), seen: Arc::new(Mutex::new(Looks::default())), stop: stop.clone(), hint: Arc::new(Mutex::new(None)), thread: Some(thread) };
+        let (closed, wait_for_close) = std::sync::mpsc::channel();
+        let closer = std::thread::spawn(move || {
+            drop(watch);
+            let _ = closed.send(());
+        });
+        // Successful close must precede the reader's release. This deadline only bounds a failed test.
+        let close = wait_for_close.recv_timeout(Duration::from_secs(30));
         release.send(()).unwrap();
+        closer.join().unwrap();
+        close.expect("closing waited for the blocked reader");
+        assert!(stop.load(Ordering::Relaxed));
     }
     use super::*;
     use std::time::Duration;

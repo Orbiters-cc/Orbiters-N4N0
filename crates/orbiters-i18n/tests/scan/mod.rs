@@ -17,7 +17,7 @@ mod source;
 /// Calls whose text no person using the app reads. A macro by its `!`, as widgets may be called `error` or `info`; a call by its name, or the path it ends in.
 pub const NOT_SHOWN: &[&str] = &[
     // Logs and panics, for developers.
-    "println!", "eprintln!", "print!", "eprint!", "dbg!", "panic!", "unreachable!", "todo!", "unimplemented!", "assert!", "assert_eq!", "assert_ne!", "debug_assert!", "debug_assert_eq!", "debug_assert_ne!", "trace!", "debug!", "info!", "warn!", "error!", "log!", "write!", "writeln!", "expect", "expect_err",
+    "println!", "eprintln!", "log_error!", "log_warn!", "log_info!", "or_log", "print!", "eprint!", "dbg!", "panic!", "unreachable!", "todo!", "unimplemented!", "assert!", "assert_eq!", "assert_ne!", "debug_assert!", "debug_assert_eq!", "debug_assert_ne!", "trace!", "debug!", "info!", "warn!", "error!", "log!", "write!", "writeln!", "expect", "expect_err",
     // The program and its surroundings.
     "env!", "option_env!", "include_str!", "include_bytes!", "include!", "concat!", "stringify!", "cfg!", "var", "var_os", "set_var", "remove_var", "Command::new", "arg", "args", "current_dir", "Builder::new",
     // Paths and files.

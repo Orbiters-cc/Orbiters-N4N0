@@ -6,6 +6,7 @@
 //! keyboard and mouse are read, and the voice workers started and told, under N4N0's locks, so they answer at once
 //! and never call N4N0 back from within.
 
+use orbiters_core::locks::*;
 use crate::status::{CallsStatus, NoticeKind, N4n0Status};
 use orbiters_core::account::Api;
 use orbiters_i18n::tr;
@@ -437,7 +438,7 @@ impl Actions {
 
     /// Runs `action` after the ones before it; false when it was dropped.
     pub fn run(&self, action: Action) -> bool {
-        let mut sender = self.sender.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sender = self.sender.locked();
         if sender.is_none() {
             let (tx, rx) = mpsc::sync_channel::<Action>(Self::MOST);
             let spawned = std::thread::Builder::new().name("osc-actions".into()).spawn(move || {

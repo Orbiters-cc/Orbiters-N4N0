@@ -3,6 +3,7 @@
 //! shows; here its pictures are egui textures (in the retro look's green), and what it asks goes to the service
 //! over the backend.
 
+use orbiters_core::locks::*;
 use crate::backend::Ctl;
 use crate::ipc::N4n0Command;
 use crate::overlay::menu_retro;
@@ -78,9 +79,7 @@ impl Textures {
     /// One copy of its pixels, whoever keeps it: the copies for other canvases, the texture and what paints it share it.
     fn of(&self, name: &str, image: ColorImage) -> Thumbnail {
         let image = Arc::new(image);
-        if let Ok(mut images) = self.images.lock() {
-            images.insert(name, image.clone());
-        }
+        self.images.locked().insert(name, image.clone());
         let photo = self.textures.load_texture(name, image.clone(), TextureOptions::LINEAR);
         Thumbnail { name: name.to_string(), image, photo, dots: Default::default(), textures: self.textures.clone() }
     }
@@ -174,7 +173,7 @@ impl MenuHost {
 
     /// A fetched picture's pixels by its name, for a canvas of another context.
     pub fn image(&self, key: &str) -> Option<Arc<ColorImage>> {
-        self.0.pictures().images.lock().ok()?.get(key).cloned()
+        self.0.pictures().images.locked().get(key).cloned()
     }
 
     /// A thumbnail by its key once loaded, as the look draws it (`retro`: in its green).

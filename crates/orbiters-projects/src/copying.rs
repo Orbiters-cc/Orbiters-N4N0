@@ -1,6 +1,7 @@
 //! Filling a copy of a project (a trial, a duplicate, a new project) through the proof of its folder
 //! ([`crate::unity6::gate`]), and taking back exactly what was put in it.
 
+use orbiters_core::locks::*;
 use crate::owned::FileId;
 use crate::templates::{Marker, SharedProgress, INCOMPLETE};
 use crate::unity6::gate::{HeldDir, NewFolder, WriteRoot};
@@ -67,7 +68,7 @@ pub(crate) fn fill(payload: &Payload, root: &WriteRoot, marker: &Marker, made: &
     file.write_all(&serde_json::to_vec(marker)?)?;
     drop(file);
     let total = payload.files();
-    progress.lock().unwrap().total = total;
+    progress.locked().total = total;
     put(payload, root, made, cancel, progress)
 }
 
@@ -118,7 +119,7 @@ fn put(payload: &Payload, root: &WriteRoot, made: &mut Made, cancel: &AtomicBool
             }
         }
         copied += 1;
-        let mut now = progress.lock().unwrap();
+        let mut now = progress.locked();
         (now.copied, now.total, now.file, now.phase) = (copied, total, at.display().to_string(), mark("Copying project").into());
     }
     Ok(())

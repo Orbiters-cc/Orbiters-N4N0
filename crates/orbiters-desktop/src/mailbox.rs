@@ -4,6 +4,7 @@
 //! than a queue of full copies growing in the service. What it asked for (an answer, an acknowledgement) and what it must
 //! do (Close) is never what goes: a link that owes too much of it ends instead, and whoever waits is told.
 
+use orbiters_core::locks::*;
 use crate::ipc::ToClient;
 use crate::state::Snapshot;
 use std::collections::VecDeque;
@@ -62,7 +63,7 @@ impl Mailbox {
 
     /// The newest state, replacing one not read yet. False once the reader is gone.
     pub fn post_snapshot(&self, snapshot: Arc<Snapshot>) -> bool {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         if state.closed {
             return false;
         }
@@ -76,7 +77,7 @@ impl Mailbox {
 
     /// Another message, after the ones waiting. False once the reader is gone.
     pub fn post(&self, message: ToClient) -> bool {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         if state.closed {
             return false;
         }
@@ -104,9 +105,9 @@ impl Mailbox {
 
     /// Waits for mail: the messages waiting, then the newest snapshot. `None` once closed and empty.
     pub fn take(&self) -> Option<(Vec<ToClient>, Option<Arc<Snapshot>>)> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         while state.snapshot.is_none() && state.messages.is_empty() && !state.closed {
-            state = self.ready.wait(state).unwrap();
+            state = self.ready.wait_locked(state);
         }
         if state.closed && state.snapshot.is_none() && state.messages.is_empty() {
             return None;
@@ -118,12 +119,12 @@ impl Mailbox {
     /// itself. Returns false on a timeout.
     pub fn wait(&self, most: Option<std::time::Duration>) -> bool {
         let until = most.map(|most| std::time::Instant::now() + most);
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         while state.snapshot.is_none() && state.messages.is_empty() && !state.nudged && !state.closed {
             state = match until.map(|until| until.saturating_duration_since(std::time::Instant::now())) {
                 Some(std::time::Duration::ZERO) => return false,
-                Some(left) => self.ready.wait_timeout(state, left).unwrap().0,
-                None => self.ready.wait(state).unwrap(),
+                Some(left) => self.ready.wait_timeout_locked(state, left).0,
+                None => self.ready.wait_locked(state),
             };
         }
         state.nudged = false;
@@ -134,12 +135,12 @@ impl Mailbox {
 
     /// Ends the [`Mailbox::wait`] under way, or the next one.
     pub fn nudge(&self) {
-        self.state.lock().unwrap().nudged = true;
+        self.state.locked().nudged = true;
         self.ready.notify_all();
     }
 
     pub fn closed(&self) -> bool {
-        self.state.lock().unwrap().closed
+        self.state.locked().closed
     }
 
     /// How much waits for the reader: states (one at most) and other messages.
@@ -151,7 +152,7 @@ impl Mailbox {
 
     /// The reader is gone: what waits is dropped and nothing more is kept.
     pub fn close(&self) {
-        self.state.lock().unwrap().close();
+        self.state.locked().close();
         self.ready.notify_all();
     }
 }

@@ -138,7 +138,7 @@ impl Epochs {
             Ok(())
         });
         if let Err(e) = written {
-            eprintln!("identity epoch: {e:#}");
+            log_warn!("identity epoch: {e:#}", e = e);
         }
     }
 }
@@ -152,7 +152,7 @@ impl Controller {
         // Before the account's lock: what acts holds this and asks for the account (orbiters_n4n0's `fence`).
         let paused = self.n4n0.pause_effects();
         let (out, moved, epoch, known, left, now) = {
-            let mut rt = self.account_runtime.lock().unwrap();
+            let mut rt = self.account_runtime.locked();
             let before = rt.signed_as();
             let left = rt.epochs.identity.clone();
             let out = install(&mut rt);
@@ -186,14 +186,14 @@ impl Controller {
 
     /// The identity's epoch goes on from where the service last left it (`file`): before anything shows it.
     pub(super) fn load_identity(&self, file: &Path) {
-        let mut rt = self.account_runtime.lock().unwrap();
+        let mut rt = self.account_runtime.locked();
         rt.epochs = Epochs::load(file);
         self.identity_epoch.store(rt.epochs.epoch(), Ordering::SeqCst);
     }
 
     /// Who is signed in, as far as it is known now.
     pub(super) fn signed_as(&self) -> SignedAs {
-        self.account_runtime.lock().unwrap().signed_as()
+        self.account_runtime.locked().signed_as()
     }
 
     /// [`Controller::account_api`] of the member of `epoch`, read in the same step as the epoch is checked; `None` for
@@ -204,7 +204,7 @@ impl Controller {
 
     /// The server and the account of the member of `epoch`, read in the same step as the epoch is checked.
     pub(super) fn member_of(&self, epoch: u64) -> Option<(Server, Account)> {
-        let rt = self.account_runtime.lock().unwrap();
+        let rt = self.account_runtime.locked();
         if rt.epochs.epoch() != epoch || rt.identity().is_none_or(|i| i.signed_as() != SignedAs::Member) {
             return None;
         }

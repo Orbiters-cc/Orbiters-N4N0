@@ -558,7 +558,7 @@ impl Client {
         loop {
             self.permitted().map_err(|e| Failure::of(e, false))?;
             let wait = {
-                let limiter = self.limiter.lock().unwrap();
+                let limiter = self.limiter.locked();
                 let now = Instant::now();
                 if let Some(wait) = limiter.blocked.map(|b| b.saturating_duration_since(now)).filter(|w| !w.is_zero()) {
                     return Err(Failure::RateLimited(wait.as_secs().max(1)));

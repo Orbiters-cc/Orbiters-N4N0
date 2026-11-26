@@ -8,6 +8,8 @@ pub mod at_once;
 mod picture_cache;
 pub mod profile_pictures;
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use egui::{ColorImage, TextureHandle, TextureOptions};
 use orbiters_contracts::qoi;
 use orbiters_core::account::{Api, Server};
@@ -33,7 +35,7 @@ pub fn sessions(root: &Path) -> Vec<SessionSummary> {
 /// a time, so neither saves over what the other just added.
 fn shot_index_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
-    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    LOCK.locked()
 }
 
 /// A world with what this computer has of it.
@@ -269,7 +271,7 @@ static PICTURE_WAKE: Mutex<Vec<egui::Context>> = Mutex::new(Vec::new());
 /// Has the folder scan ask `ctx` for a frame whenever [`picture_revision`] changes. Nothing told a page that the scan
 /// had found pictures, so Photos & captures drew itself ten times a second to look.
 pub fn wake_on_pictures(ctx: &egui::Context) {
-    let mut woken = PICTURE_WAKE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut woken = PICTURE_WAKE.locked();
     if !woken.contains(ctx) {
         woken.push(ctx.clone());
     }
@@ -277,20 +279,20 @@ pub fn wake_on_pictures(ctx: &egui::Context) {
 
 /// What the scan found so far, for the pages: the index, a new revision, and a frame to show it.
 fn publish_pictures(index: &visited::ShotIndex) {
-    *LIVE_PICTURES.lock().unwrap_or_else(|e| e.into_inner()) = Some(index.clone());
+    *LIVE_PICTURES.locked() = Some(index.clone());
     pictures_changed();
 }
 
 /// A new revision of the pictures, and a frame for the pages that show them.
 fn pictures_changed() {
     PICTURE_REVISION.fetch_add(1, std::sync::atomic::Ordering::Release);
-    for ctx in &*PICTURE_WAKE.lock().unwrap_or_else(|e| e.into_inner()) {
+    for ctx in &*PICTURE_WAKE.locked() {
         orbiters_ui::anim::wake(ctx);
     }
 }
 
 fn picture_index(file: &Path, dirs: Vec<PathBuf>) -> visited::ShotIndex {
-    let index = LIVE_PICTURES.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    let index = LIVE_PICTURES.locked().clone()
         .unwrap_or_else(|| visited::ShotIndex::load(file));
     picture_cache::set_index(&index);
     scan_pictures(file, dirs);
@@ -391,7 +393,7 @@ fn cache_dir() -> PathBuf {
             for part in ["worlds", "thumbs", "screenshots.json"] {
                 let (from, to) = (old.join(part), dir.join(part));
                 if from.exists() && !to.exists() && std::fs::create_dir_all(&dir).is_ok() {
-                    let _ = std::fs::rename(&from, &to);
+                    std::fs::rename(&from, &to).or_log("a file could not be moved or copied");
                 }
             }
         });
@@ -493,11 +495,11 @@ impl Infos {
                         match api.world(&id) {
                             Ok(page) => {
                                 if keep {
-                                    let _ = std::fs::create_dir_all(&dir);
-                                    let _ = orbiters_core::write_atomic(
+                                    std::fs::create_dir_all(&dir).or_log("a folder could not be made");
+                                    orbiters_core::write_atomic(
                                         &file,
                                         &serde_json::to_vec(&CachedInfo { fetched: visited::now(), page: page.clone() }).unwrap_or_default(),
-                                    );
+                                    ).or_log("a file could not be written");
                                 }
                                 page.map_or(Info::Unlisted, |p| Info::Listed(Arc::new(p)))
                             }
@@ -505,7 +507,7 @@ impl Infos {
                             Err(_) => cached.and_then(|c| c.page).map_or(Info::Unknown, |p| Info::Listed(Arc::new(p))),
                         }
                     };
-                    k.lock().unwrap()[env_index(server)].insert(id, info);
+                    k.locked()[env_index(server)].insert(id, info);
                     orbiters_ui::anim::wake(&ctx);
                     if !fresh {
                         // Gentle on Orbiters (and on VRChat behind it).
@@ -531,17 +533,17 @@ impl Infos {
                 keep.then(|| std::fs::read(file).ok().and_then(|b| serde_json::from_slice::<CachedInfo>(&b).ok())).flatten()?.page
             });
             if let Some(Some(page)) = kept {
-                self.known.lock().unwrap()[e].entry(id.to_string()).or_insert_with(|| Info::Listed(Arc::new(page)));
+                self.known.locked()[e].entry(id.to_string()).or_insert_with(|| Info::Listed(Arc::new(page)));
             }
             note_outbound(id);
-            let _ = self.tx.send((server, id.to_string()));
+            self.tx.send((server, id.to_string())).or_log("what a worker was asked did not reach it");
         }
-        self.known.lock().unwrap()[e].get(id).cloned()
+        self.known.locked()[e].get(id).cloned()
     }
 
     /// The world's page when it was fetched already; asks for nothing.
     pub fn known(&self, id: &str) -> Option<Info> {
-        self.known.lock().unwrap()[env_index(Server::current())].get(id).cloned()
+        self.known.locked()[env_index(Server::current())].get(id).cloned()
     }
 
     /// Fetches it again (after sharing something there).
@@ -729,12 +731,12 @@ impl Pictures {
                     loop {
                         let next = {
                             let (lock, ready) = &*queue;
-                            let mut q = lock.lock().unwrap();
+                            let mut q = lock.locked();
                             while q.is_empty() {
                                 if stopped.load(std::sync::atomic::Ordering::Acquire) {
                                     return;
                                 }
-                                q = ready.wait(q).unwrap();
+                                q = ready.wait_locked(q);
                             }
                             if stopped.load(std::sync::atomic::Ordering::Acquire) {
                                 return;
@@ -748,13 +750,13 @@ impl Pictures {
                             if let Picture::Profile { scope, url, user } = &picture {
                                 // Kept, or VRCX's or VRCNext's copy: now. Else asked of VRChat; the answer comes later.
                                 let deliver = |image: Option<ColorImage>, interim: bool| {
-                                    done.lock().unwrap_or_else(|e| e.into_inner()).push((picture.clone(), Ok(image), interim));
+                                    done.locked().push((picture.clone(), Ok(image), interim));
                                     orbiters_ui::anim::wake(&ctx);
                                 };
                                 let reply: profile_pictures::Reply = {
                                     let (done, ctx, picture) = (done.clone(), ctx.clone(), picture.clone());
                                     Box::new(move |image| {
-                                        done.lock().unwrap_or_else(|e| e.into_inner()).push((picture, Ok(image), false));
+                                        done.locked().push((picture, Ok(image), false));
                                         orbiters_ui::anim::wake(&ctx);
                                     })
                                 };
@@ -781,7 +783,7 @@ impl Pictures {
                             Ok(None) => continue,
                             Err(()) => Err(()),
                         };
-                        done.lock().unwrap_or_else(|e| e.into_inner()).push((picture, image, false));
+                        done.locked().push((picture, image, false));
                         orbiters_ui::anim::wake(&ctx);
                     }
                 })
@@ -806,7 +808,7 @@ impl Pictures {
         if now != self.frame {
             (self.frame_before, self.frame) = (self.frame, now);
         }
-        for (p, image, interim) in std::mem::take(&mut *self.done.lock().unwrap_or_else(|e| e.into_inner())) {
+        for (p, image, interim) in std::mem::take(&mut *self.done.locked()) {
             // One no longer wanted (scrolled past while it was decoded) is dropped.
             let Some(kept) = self.slots.get_mut(&p) else { continue };
             if interim {
@@ -848,7 +850,7 @@ impl Pictures {
                         if now - since >= wait {
                             kept.slot = Slot::Loading { tries };
                             let (lock, ready) = &*self.queue;
-                            lock.lock().unwrap_or_else(|e| e.into_inner()).push(picture.clone());
+                            lock.locked().push(picture.clone());
                             ready.notify_one();
                         } else {
                             self.wake.request_repaint_after(std::time::Duration::from_secs_f64(since + wait - now));
@@ -858,7 +860,7 @@ impl Pictures {
                     Slot::Loading { .. } => {
                         // (Not in the queue: a loader has it, or VRChat is being asked for it.)
                         let (lock, _) = &*self.queue;
-                        let mut q = lock.lock().unwrap();
+                        let mut q = lock.locked();
                         if let Some(i) = q.iter().position(|p| p == picture) {
                             let p = q.remove(i);
                             q.push(p);
@@ -893,7 +895,7 @@ impl Pictures {
                 self.start();
                 self.slots.insert(picture.clone(), Kept { slot: Slot::Loading { tries: 0 }, used: now, interim: interim.clone() });
                 let (lock, ready) = &*self.queue;
-                lock.lock().unwrap().push(picture.clone());
+                lock.locked().push(picture.clone());
                 ready.notify_one();
                 interim
             }
@@ -956,7 +958,7 @@ impl Pictures {
         {
             let (lock, _) = &*self.queue;
             let slots = &self.slots;
-            lock.lock().unwrap().retain(|p| slots.get(p).is_some_and(|k| !stale(k)));
+            lock.locked().retain(|p| slots.get(p).is_some_and(|k| !stale(k)));
         }
         self.slots.retain(|_, k| !stale(k));
         let mut total = self.bytes();
@@ -985,7 +987,7 @@ impl Pictures {
 impl Drop for Pictures {
     fn drop(&mut self) {
         let (lock, ready) = &*self.queue;
-        let mut queue = lock.lock().unwrap();
+        let mut queue = lock.locked();
         queue.clear();
         self.stopped.store(true, std::sync::atomic::Ordering::Release);
         ready.notify_all();
@@ -1123,8 +1125,8 @@ fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
                     note_outbound(world_id);
                     let b = api.image(url).ok()?;
                     if keep {
-                        let _ = std::fs::create_dir_all(file.parent()?);
-                        let _ = orbiters_core::write_atomic(&file, &b);
+                        std::fs::create_dir_all(file.parent()?).or_log("a folder could not be made");
+                        orbiters_core::write_atomic(&file, &b).or_log("a file could not be written");
                     }
                     decode_image(&b)?
                 }
@@ -1163,7 +1165,7 @@ fn world_picture(backend: Option<&crate::backend::Ctl>, scope: &crate::controlle
     let (w, h, rgba) = decode_image(&bytes)?;
     let file = cache_dir().join("worlds").join(remote_file_name(world_id, url, false));
     if file.parent().is_some_and(|dir| std::fs::create_dir_all(dir).is_ok()) {
-        let _ = orbiters_core::write_atomic(&file, &bytes);
+        orbiters_core::write_atomic(&file, &bytes).or_log("a file could not be written");
     }
     Some(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
 }
@@ -1197,7 +1199,7 @@ fn avatar_picture(backend: Option<&crate::backend::Ctl>, scope: &crate::controll
     let (w, h, rgba) = decode_image(&bytes)?;
     let file = avatar_file(avatar_id, url);
     if file.parent().is_some_and(|dir| std::fs::create_dir_all(dir).is_ok()) {
-        let _ = orbiters_core::write_atomic(&file, &bytes);
+        orbiters_core::write_atomic(&file, &bytes).or_log("a file could not be written");
     }
     Some(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
 }
@@ -1230,7 +1232,7 @@ pub(crate) fn capture_view(api: &Api, token: Option<&str>, url: &str, large: boo
             let picture = image::load_from_memory(&bytes).ok()?;
             if let Some(f) = file {
                 if f.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) {
-                    let _ = orbiters_core::write_atomic(f, &bytes);
+                    orbiters_core::write_atomic(f, &bytes).or_log("a file could not be written");
                 }
             }
             picture

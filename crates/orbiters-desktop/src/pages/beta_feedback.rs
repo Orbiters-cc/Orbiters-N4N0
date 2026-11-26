@@ -2,6 +2,7 @@
 //! this computer: how many, Send reports (to Orbiters), Open folder, Delete all. The app has no feedback page of its own: this card is where a
 //! beta tester gives feedback, beside the beta's usage statistics.
 
+use orbiters_core::app_log::OrLog as _;
 use super::{section, Cx, Job};
 use egui::{vec2, Align2, Sense, Ui};
 use orbiters_core::settings::Settings;
@@ -88,7 +89,7 @@ pub fn card(ui: &mut Ui, cx: &Cx, id: usize, state: &mut State, draft: &mut Sett
             }
             if Button::new(tr("Open folder")).icon(icons::FOLDER_OPEN).variant(Variant::Secondary).size(Size::Sm).show(ui).clicked() {
                 let dir = crate::mismatch::folder();
-                let _ = std::fs::create_dir_all(&dir);
+                std::fs::create_dir_all(&dir).or_log("a folder could not be made");
                 if let Err(e) = crate::controller::open_path(&dir) {
                     state.said = Some((e.to_string(), theme::WARN));
                 }

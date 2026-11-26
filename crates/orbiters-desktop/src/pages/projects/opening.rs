@@ -7,6 +7,7 @@
 //! **Installing** ([`orbiters_projects::unity_install`]) is a Mac's, as Home sets VRChat's engine up: one button, what it is at, Cancel, and what only the person can do as a
 //! step of its own. Elsewhere the card has what there was: Unity Hub, on that very editor.
 
+use orbiters_core::locks::*;
 use super::state::{Outcome, State};
 use crate::pages::{Cx, Job};
 use egui::{pos2, vec2, Id, Rect, Sense, Ui, UiBuilder};
@@ -181,7 +182,7 @@ impl State {
             let (wanted, step, stop, anyway, ctx) = (wanted.clone(), step.clone(), stop.clone(), anyway.clone(), ctx.clone());
             Job::spawn(&ctx.clone(), move || {
                 let say = |s: Step| {
-                    let mut now = step.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut now = step.locked();
                     if *now != s {
                         *now = s;
                         ctx.request_repaint();
@@ -208,7 +209,7 @@ impl State {
         if self.selected.as_deref().is_some_and(|p| discovery::key(p) == discovery::key(&run.wanted.project)) {
             return None;
         }
-        let says = of_step(&run.step.lock().unwrap_or_else(|e| e.into_inner()), &run.wanted, run.stop.load(Ordering::Relaxed));
+        let says = of_step(&run.step.locked(), &run.wanted, run.stop.load(Ordering::Relaxed));
         Some((format!("{}: {}", run.wanted.name, says.title), says.bar.flatten()))
     }
 
@@ -434,7 +435,7 @@ pub(super) fn card(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Path, 
     let of = |p: &Path| discovery::key(p) == discovery::key(project);
     let o = &state.opening;
     let says = if let Some(run) = o.install.run.as_ref().filter(|r| of(&r.wanted.project)) {
-        let step = run.step.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let step = run.step.locked().clone();
         of_step(&step, &run.wanted, run.stop.load(Ordering::Relaxed))
     } else if let Some(note) = o.note.as_ref().filter(|n| of(&n.project)) {
         let mut says = of_note(note, o.offers());

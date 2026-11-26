@@ -5,6 +5,7 @@
 //! elsewhere would not do, since macOS kills a copy of a hardened program outside its application. The archive was checked
 //! against the signed release's size and SHA-256 before it got here.
 
+use orbiters_core::app_log::OrLog as _;
 use anyhow::Context as _;
 use orbiters_i18n::tr;
 use orbiters_update::{MAC_APP, MAC_BUNDLE_ID};
@@ -35,7 +36,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     wait_for(pid.parse().context("not a process id")?); // i18n: not shown (this helper is started with its arguments by the app, nobody types them)
     // Whatever happened, an app opens at the end: this version if it went wrong.
     if let Err(e) = apply(&archive, &bundle) {
-        eprintln!("the update did not install: {e:#}");
+        log_warn!("the update did not install: {e:#}", e = e);
         tell(&tr!("The update could not be installed: {error}\n\nThis version opens again. You can install the new one by hand from the disk image.", error = format!("{e:#}")));
     }
     let mut open = Command::new("/usr/bin/open");
@@ -106,7 +107,7 @@ fn run_tool(cmd: &mut Command) -> anyhow::Result<String> {
 /// A dialog, since no window of ours is open here.
 fn tell(message: &str) {
     let text = message.replace('\\', "\\\\").replace('"', "\\\"");
-    let _ = Command::new("/usr/bin/osascript").args(["-e", &format!("display alert \"Orbiters - N4N0\" message \"{text}\" as warning")]).status();
+    Command::new("/usr/bin/osascript").args(["-e", &format!("display alert \"Orbiters - N4N0\" message \"{text}\" as warning")]).status().or_log("a program could not be started");
 }
 
 #[cfg(test)]

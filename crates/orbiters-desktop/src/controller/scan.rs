@@ -5,6 +5,7 @@
 //! a little up. Heights and gazes that one walk at eye height never gives constrain floors and surfaces from more
 //! sides, so they hold together from more viewpoints. The reconstruction starts once the recording is saved.
 
+use orbiters_core::locks::*;
 use super::{NoticeKind, Shared};
 use crate::state::CaptureState;
 use orbiters_core::protocol::{coverage, CoverageMap};
@@ -187,10 +188,10 @@ pub struct ScanRuntime {
 impl super::Controller {
     /// Scans the place around VRChat's camera where it stands now.
     pub fn take_scan(self: &Shared) -> anyhow::Result<()> {
-        anyhow::ensure!(self.snapshot.lock().unwrap().vrchat.running, "{}", tr("Start VRChat and open its camera first."));
+        anyhow::ensure!(self.snapshot.locked().vrchat.running, "{}", tr("Start VRChat and open its camera first."));
         self.ensure_capture_idle()?;
         let (pose, smooth) = {
-            let osc = self.osc_values.lock().unwrap();
+            let osc = self.osc_values.locked();
             let pose = osc.latest.get(super::burst::POSE).map(|(v, _)| super::burst::floats(v)).filter(|v| v.len() == 6 && v.iter().any(|f| *f != 0.0));
             let smooth = osc.latest.get(super::burst::SMOOTH).and_then(|(v, _)| v.first().map(orbiters_core::osc::OscValue::truthy));
             (pose, smooth)
@@ -204,17 +205,17 @@ impl super::Controller {
         // Its flag taken back by the start itself if it fails once accepted (a refused request clears nothing).
         let owner = self.start_capture_owned(
             super::CapturePurpose::Short,
-            || self.scan.lock().unwrap().recording = true,
-            || self.scan.lock().unwrap().recording = false,
+            || self.scan.locked().recording = true,
+            || self.scan.locked().recording = false,
         )?;
         let ctl = self.clone();
         let flight = std::thread::Builder::new().name("scan".into()).spawn(move || {
             let started = Instant::now();
-            while ctl.snapshot.lock().unwrap().capture.state != CaptureState::Recording {
+            while ctl.snapshot.locked().capture.state != CaptureState::Recording {
                 if started.elapsed() > Duration::from_secs(8) || !ctl.owns_recording(owner) {
                     // Its flag, and a start still under way after 8 s (it would become a recording nobody flies or
                     // stops), only while no other recording began: that one may be a scan of its own.
-                    ctl.give_up_start_of(owner, || ctl.scan.lock().unwrap().recording = false);
+                    ctl.give_up_start_of(owner, || ctl.scan.locked().recording = false);
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -229,7 +230,7 @@ impl super::Controller {
                 for (i, p) in poses.into_iter().enumerate() {
                     {
                         // Checked and sent under the start gate: no other recording can begin in between.
-                        let _gate = ctl.capture_start_gate.lock().unwrap();
+                        let _gate = ctl.capture_start_gate.locked();
                         if !ctl.owns_recording(owner) {
                             return false;
                         }
@@ -244,7 +245,7 @@ impl super::Controller {
             };
             // Smoothing would trail the path behind.
             {
-                let _gate = ctl.capture_start_gate.lock().unwrap();
+                let _gate = ctl.capture_start_gate.locked();
                 if !ctl.owns_recording(owner) {
                     return;
                 }
@@ -254,13 +255,13 @@ impl super::Controller {
             if done {
                 // A coverage map with the look-around's depth in it (the worker sends one a second).
                 std::thread::sleep(Duration::from_millis(1200));
-                let map = ctl.snapshot.lock().unwrap().capture.coverage.clone();
+                let map = ctl.snapshot.locked().capture.coverage.clone();
                 done = fly(rings(pose, map.as_ref()));
             }
             {
                 // The camera goes back where it was, also after a scan stopped early, unless another recording
                 // began since: that one's camera is not the scan's to move.
-                let _gate = ctl.capture_start_gate.lock().unwrap();
+                let _gate = ctl.capture_start_gate.locked();
                 if ctl.capture_serial.load(std::sync::atomic::Ordering::Acquire) == owner {
                     send(super::burst::POSE, pose.iter().map(|v| rosc::OscType::Float(*v)).collect());
                     if let Some(smooth) = smooth.filter(|s| *s) {
@@ -276,7 +277,7 @@ impl super::Controller {
         if let Err(e) = flight {
             // The recording was accepted, but nothing would fly it or end it: it ends here, as an ordinary one (no
             // flight: nothing of it is a scan to reconstruct).
-            self.give_up_start_of(owner, || self.scan.lock().unwrap().recording = false);
+            self.give_up_start_of(owner, || self.scan.locked().recording = false);
             return Err(e.into());
         }
         Ok(())

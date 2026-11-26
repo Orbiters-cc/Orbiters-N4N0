@@ -6,6 +6,7 @@
 //! default bindings for each kind of controller (people change them in SteamVR's controller settings, under Orbiters).
 //! SteamVR gives the same inputs to VRChat as well. Every set is read once a frame, together.
 
+use orbiters_core::locks::*;
 use orbiters_i18n::tr;
 use orbiters_n4n0::input::{Pad, Pads};
 use orbiters_openvr::input::{ActionHandle, ActionSetHandle, ActiveSet, OVERLAY_GLOBAL_PRIORITY_MIN};
@@ -345,7 +346,7 @@ fn keep_saved_bindings_whole(steamvr: &vr::Client, dir: &Path) {
         let file = dir.join(format!("merged_bindings_{other}{controller}.json"));
         let Ok(()) = std::fs::write(&file, merged) else { continue };
         let url = format!("file:///{}", file.to_string_lossy().replace('\\', "/"));
-        eprintln!("SteamVR's saved binding for {controller} lacked some of this application's actions: they were added ({url})");
+        log_info!("SteamVR's saved binding for {controller} lacked some of this application's actions: they were added ({url})", controller = controller, url = url);
         if let Ok(url) = CString::new(url) {
             steamvr.set_setting_string(section, &key("CurrentURL"), &url);
             steamvr.set_setting_string(section, &key("AutosaveURL"), &url);
@@ -591,7 +592,7 @@ impl Actions {
                 laser_kinds: Default::default(),
             },
             Err(e) => {
-                eprintln!("SteamVR actions unavailable: {e}");
+                log_warn!("SteamVR actions unavailable: {e}", e = e);
                 Self { walk: None, menu: None, taps: Taps::default(), presses: None, press_down: [false; 2], trigger_known: Default::default(), pads: None, panel: None, orbit: None, grip: None, blocked: [false; 2], small_view: None, sticks_taken: [false; 2], sets: Vec::new(), failed: Some(e), menu_down: false, laser_kinds: Default::default() }
             }
         }
@@ -748,7 +749,7 @@ impl Actions {
 
     /// Whether this hand's controller (`device`) points with VRChat's Touch laser, read once per device.
     fn follows_vrchat(&self, steamvr: &vr::Client, hand: usize, device: u32) -> bool {
-        let Ok(mut kinds) = self.laser_kinds.lock() else { return false };
+        let mut kinds = self.laser_kinds.locked();
         match kinds[hand] {
             Some((known, follows)) if known == device => follows,
             _ => {

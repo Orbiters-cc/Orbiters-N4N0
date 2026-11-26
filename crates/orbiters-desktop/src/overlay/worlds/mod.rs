@@ -42,6 +42,8 @@ pub mod timing_lab;
 pub mod view;
 
 mod paint_snapshot;
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 pub(crate) use paint_snapshot::PaintSnapshot;
 
 use super::{Canvas, Presenter};
@@ -468,7 +470,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     match reader.read(&compositor, vr::compositor::Eye::Left) {
         Ok(picture) => {
             let dir = orbiters_core::paths::logs_dir().join("vr-test-frames");
-            let _ = std::fs::create_dir_all(&dir);
+            std::fs::create_dir_all(&dir).or_log("a folder could not be made");
             if let Some(image) = image::RgbaImage::from_raw(picture.width, picture.height, picture.rgba) {
                 let half = image::imageops::resize(&image, picture.width / 2, picture.height / 2, image::imageops::FilterType::Triangle);
                 let _ = half.save(dir.join(format!("small-in-its-hole-{n}.png")));
@@ -833,13 +835,13 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                 Action::OpenWeb(world) => {
                     let Some(link) = finder::web_link(&world) else { continue };
                     let tx = self.said.0.clone();
-                    let _ = std::thread::Builder::new().name("3d-worlds-web".into()).spawn(move || {
+                    std::thread::Builder::new().name("3d-worlds-web".into()).spawn(move || {
                         let said = match crate::controller::open_url(&link) {
                             Ok(()) => tr("Its page opened in the computer's browser").to_string(),
                             Err(e) => tr!("The browser did not open: {e}", e = e),
                         };
                         let _ = tx.send(said);
-                    });
+                    }).or_log("a thread could not be started");
                 }
                 Action::Feedback(ask) => {
                     self.apply(&ask);
@@ -1054,13 +1056,15 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     #[cfg(test)]
     pub fn draft_for_test(&self) -> &str { &self.panel.draft }
 
-    /// A test's world chosen: its page open on `id`, from `entries` as the listing.
+    /// Choose a world in a fixture listing. An earlier background refresh may still write to the old catalog.
     #[cfg(test)]
-    pub(crate) fn chosen_for_test(&mut self, entries: Vec<Entry>, id: u64) {
+    pub(crate) fn chosen_for_test(&mut self, entries: Vec<Entry>, id: u64) -> catalog::Catalog {
+        let earlier = std::mem::take(&mut self.catalog);
         self.listing_for_test(entries);
         self.open = true;
         self.panel.page = panel::Page::Detail;
         self.panel.selected = Some(id);
+        earlier
     }
 
     /// The world whose capture turns on the side panel now, and whether something reads one.
@@ -1511,7 +1515,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             match small_hint::SmallHint::new(overlay, &self.key) {
                 Ok(hint) => self.hint = Some(hint),
                 Err(e) => {
-                    eprintln!("{e:#}");
+                    log_warn!("{e:#}", e = e);
                     return;
                 }
             }
@@ -1537,7 +1541,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         });
         self.small_triggers_were = self.small_triggers;
         if wanted.is_some() && self.hide_chip.is_none() {
-            self.hide_chip = small_hint::HideChip::new(overlay, &self.key).map_err(|e| eprintln!("{e:#}")).ok();
+            self.hide_chip = small_hint::HideChip::new(overlay, &self.key).map_err(|e| log_warn!("{e:#}", e = e)).ok();
         }
         if let Some(chip) = self.hide_chip.as_mut() {
             chip.update(overlay, presenter, wanted.map(|(place, pointed, _)| (place, pointed)));
@@ -1667,7 +1671,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         }
         self.shared.triggers_were = self.small_triggers;
         if wanted.is_some() && self.shared.chip.is_none() {
-            self.shared.chip = small_hint::HideChip::share(overlay, &self.key).map_err(|e| eprintln!("{e:#}")).ok();
+            self.shared.chip = small_hint::HideChip::share(overlay, &self.key).map_err(|e| log_warn!("{e:#}", e = e)).ok();
         }
         if let Some(chip) = self.shared.chip.as_mut() {
             chip.set_lit(lit);
@@ -2197,12 +2201,12 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         let progress = Arc::new(Progress::default());
         let (tx, rx) = mpsc::channel();
         let (source, p, e) = (self.source.clone(), progress.clone(), entry.clone());
-        let _ = std::thread::Builder::new().name("3d-worlds-ahead".into()).spawn(move || {
+        std::thread::Builder::new().name("3d-worlds-ahead".into()).spawn(move || {
             let _ = tx.send(match &e.local {
                 Some(dir) => catalog::read_kept(&e, dir, &p),
                 None => source.download(&e, &p),
             });
-        });
+        }).or_log("a thread could not be started");
         self.preparing = Some(Download { id: entry.id, key: cache::Key::of(&entry), progress, answer: rx });
     }
 
@@ -2250,7 +2254,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                 None
             }
             Err(e) if current => {
-                eprintln!("3D worlds: {e:#}");
+                log_warn!("3D worlds: {e:#}", e = e);
                 self.error = Some(short_error(&e));
                 self.current = self.shown.clone();
                 None
@@ -2394,12 +2398,12 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                     let progress = Arc::new(Progress::default());
                     let (tx, rx) = mpsc::channel();
                     let (source, p, e) = (self.source.clone(), progress.clone(), entry.clone());
-                    let _ = std::thread::Builder::new().name("3d-worlds-download".into()).spawn(move || {
+                    std::thread::Builder::new().name("3d-worlds-download".into()).spawn(move || {
                         let _ = tx.send(match &e.local {
                             Some(dir) => catalog::read_kept(&e, dir, &p),
                             None => source.download(&e, &p),
                         });
-                    });
+                    }).or_log("a thread could not be started");
                     self.download = Some(Download { id, key, progress, answer: rx });
                     self.current = Some(entry);
                 }
@@ -2443,13 +2447,13 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                 Action::OpenWeb(world) => {
                     let Some(link) = finder::web_link(&world) else { continue };
                     let tx = self.said.0.clone();
-                    let _ = std::thread::Builder::new().name("3d-worlds-web".into()).spawn(move || {
+                    std::thread::Builder::new().name("3d-worlds-web".into()).spawn(move || {
                         let said = match crate::controller::open_url(&link) {
                             Ok(()) => tr("Its page opened in the computer's browser").to_string(),
                             Err(e) => tr!("The browser did not open: {e}", e = e),
                         };
                         let _ = tx.send(said);
-                    });
+                    }).or_log("a thread could not be started");
                 }
                 Action::Feedback(ask) => {
                     self.apply(&ask);
@@ -2486,7 +2490,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             return;
         };
         let tx = self.go_said.0.clone();
-        let _ = std::thread::Builder::new().name("3d-worlds-instances".into()).spawn(move || {
+        std::thread::Builder::new().name("3d-worlds-instances".into()).spawn(move || {
             let read = match backend.vrchat_data(scope.clone(), DataRequest::WorldInstances { world: world.clone() }) {
                 Ok(DataResponse::WorldInstances(list)) => Ok(list),
                 Ok(DataResponse::WorldError(e)) => Err(go_words(&e)),
@@ -2494,7 +2498,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                 Err(e) => Err(e),
             };
             let _ = tx.send(GoSaid::Listed { world, scope, read });
-        });
+        }).or_log("a thread could not be started");
     }
 
     /// The next batch of Go there's list, by the exact ids VRChat left for it, when the page shown nears the end of what was read.
@@ -2508,7 +2512,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         let (world, instances) = (self.go.world.clone(), list.remaining.clone());
         self.go.more_loading = true;
         let tx = self.go_said.0.clone();
-        let _ = std::thread::Builder::new().name("3d-worlds-instances".into()).spawn(move || {
+        std::thread::Builder::new().name("3d-worlds-instances".into()).spawn(move || {
             let read = match backend.vrchat_data(scope.clone(), DataRequest::WorldInstancesNext { world: world.clone(), instances }) {
                 Ok(DataResponse::WorldInstances(list)) => Ok(list),
                 Ok(DataResponse::WorldError(e)) => Err(go_words(&e)),
@@ -2516,7 +2520,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                 Err(e) => Err(e),
             };
             let _ = tx.send(GoSaid::More { world, scope, read });
-        });
+        }).or_log("a thread could not be started");
     }
 
     /// To an instance of `world` listed, or to a new one made for the press, directly where it can (L-go-direct), on a
@@ -2537,7 +2541,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             GoTarget::New(..) | GoTarget::Invite(_) => None,
         };
         let tx = self.go_said.0.clone();
-        let _ = std::thread::Builder::new().name("3d-worlds-invite".into()).spawn(move || {
+        std::thread::Builder::new().name("3d-worlds-invite".into()).spawn(move || {
             let ask = |request| match backend.vrchat_data(scope.clone(), request) {
                 Ok(DataResponse::WorldError(e)) => Err((go_words(&e), go_list_changed(&e))),
                 Ok(answer) => Ok(answer),
@@ -2572,7 +2576,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                 }
             };
             let _ = tx.send(GoSaid::Went { world, scope, sent });
-        });
+        }).or_log("a thread could not be started");
     }
 
     /// VRChat's log says the person is in the instance Go there took them to: its card says so.
@@ -2879,7 +2883,7 @@ static SIDE_LOADS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn one_load_at_a_time<T>(progress: &Progress, load: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
     progress.check()?;
-    let _turn = SIDE_LOADS.lock().unwrap_or_else(|e| e.into_inner());
+    let _turn = SIDE_LOADS.locked();
     progress.check()?;
     load()
 }

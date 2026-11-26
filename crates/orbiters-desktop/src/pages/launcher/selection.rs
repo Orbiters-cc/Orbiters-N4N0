@@ -12,6 +12,7 @@
 //! [`Verified::Open`] of the last minute, for the account and the profile chosen now. "Busy" is not kept anywhere: it is
 //! a check (or a new instance being made) of the current generation that Play waits for ([`Desk::busy`]).
 
+use orbiters_core::locks::*;
 use super::previous::Visit;
 use orbiters_core::launcher::LaunchMode;
 use std::sync::mpsc;
@@ -231,7 +232,7 @@ impl MakeTicket {
     /// which cannot change while it runs (another page may be shown by now: the press still counts).
     pub fn finish<T>(mut self, made: Result<T, String>, start: impl FnOnce(T) -> Result<(), String>) {
         let result = {
-            let current = self.fence.lock().unwrap_or_else(|e| e.into_inner());
+            let current = self.fence.locked();
             match made {
                 Err(e) => Err(e),
                 Ok(t) if *current == self.generation => start(t),
@@ -312,7 +313,7 @@ impl Desk {
     /// before (a press of Play, a check, an instance being made) counts for nothing from here on.
     fn replace(&mut self, destination: Destination, origin: Origin, verified: Verified) {
         let generation = self.selection.generation + 1;
-        *self.fence.lock().unwrap_or_else(|e| e.into_inner()) = generation;
+        *self.fence.locked() = generation;
         self.pending = None;
         self.creating = None;
         if let (Some(visit), Origin::Previous | Origin::Friend { .. }) = (destination.visit(), &origin) {

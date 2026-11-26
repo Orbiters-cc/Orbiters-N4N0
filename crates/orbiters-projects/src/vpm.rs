@@ -1,5 +1,6 @@
 //! Uses ALCOM's VPM resolver, in an environment of Orbiters' own ([`crate::repos`]): nothing of Creator Companion's or ALCOM's is
 //! ever written. Never hand-edit a VPM manifest.
+use orbiters_core::locks::*;
 use anyhow::{bail, Context};
 use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
@@ -152,7 +153,7 @@ static BROKEN_TRIED: std::sync::Mutex<Vec<(PathBuf, std::time::Instant)>> = std:
 const BROKEN_RETRY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 /// Whether some of `broken` was not tried lately; those are counted as tried now.
 fn retry_broken(broken: &[PathBuf]) -> bool {
-    let mut tried = BROKEN_TRIED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut tried = BROKEN_TRIED.locked();
     tried.retain(|(_, at)| at.elapsed() < BROKEN_RETRY);
     let due: Vec<&PathBuf> = broken.iter().filter(|p| !tried.iter().any(|(t, _)| t == *p)).collect();
     let any = !due.is_empty();

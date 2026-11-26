@@ -5,6 +5,7 @@
 //! more than [`FRESH`] ago: one whose sum is the same is only marked fresh again (its file touched), a different one
 //! replaces it (and its file). Read and written on workers only.
 
+use orbiters_core::app_log::OrLog as _;
 use egui::ColorImage;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -168,9 +169,9 @@ pub(super) fn load_in(dir: &Path) -> Vec<Cached> {
 /// Starts reading the pictures kept, on a worker (at the window's start: they are there by the page's first visit).
 pub(super) fn preload() -> std::sync::mpsc::Receiver<Vec<Cached>> {
     let (tx, rx) = std::sync::mpsc::channel();
-    let _ = std::thread::Builder::new().name("project-pictures".into()).spawn(move || {
+    std::thread::Builder::new().name("project-pictures".into()).spawn(move || {
         let _ = tx.send(load_in(&dir()));
-    });
+    }).or_log("a thread could not be started");
     rx
 }
 

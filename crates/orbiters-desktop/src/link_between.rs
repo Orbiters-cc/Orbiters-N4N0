@@ -3,6 +3,7 @@
 //! socket's buffers fill and the service's link has to wait), or drop the connection. The service and the client are
 //! the real ones, each with its own socket: nothing in them knows this is there. Never part of how the app runs.
 
+use orbiters_core::locks::*;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -59,7 +60,7 @@ impl Between {
                 let _ = (client.set_nodelay(true), service.set_nodelay(true));
                 let (Ok(client_in), Ok(service_in)) = (client.try_clone(), service.try_clone()) else { continue };
                 if let (Ok(a), Ok(b)) = (client.try_clone(), service.try_clone()) {
-                    all.sockets.lock().unwrap().extend([a, b]);
+                    all.sockets.locked().extend([a, b]);
                 }
                 // What the client says goes to the service as it is.
                 let mut to_service = service;
@@ -75,9 +76,9 @@ impl Between {
                     let mut line = Vec::new();
                     loop {
                         {
-                            let mut held = shared.held.lock().unwrap();
+                            let mut held = shared.held.locked();
                             while *held {
-                                held = shared.let_go.wait(held).unwrap();
+                                held = shared.let_go.wait_locked(held);
                             }
                         }
                         line.clear();
@@ -92,7 +93,7 @@ impl Between {
                             None
                         };
                         let damage = {
-                            let mut damage = shared.damage.lock().unwrap();
+                            let mut damage = shared.damage.locked();
                             let due = kind.is_some() && damage.front().copied() == kind;
                             if due {
                                 damage.pop_front();
@@ -101,7 +102,7 @@ impl Between {
                         };
                         // A line lost on the way (a reply the client never gets).
                         let lost = {
-                            let mut lose = shared.lose.lock().unwrap();
+                            let mut lose = shared.lose.locked();
                             let hit = lose.front().is_some_and(|p| line.starts_with(p));
                             if hit {
                                 lose.pop_front();
@@ -139,12 +140,12 @@ impl Between {
     /// The service's next lines of these kinds arrive cut short, in this order (each waits for a line of its kind at
     /// the front: `[Changes, Whole]` damages the next change, then the whole state asked for because of it).
     pub fn damage(&self, lines: &[Line]) {
-        self.shared.damage.lock().unwrap().extend(lines.iter().copied());
+        self.shared.damage.locked().extend(lines.iter().copied());
     }
 
     /// Stops reading what the service sends (`true`), as a client that stopped reading does, or reads again.
     pub fn hold(&self, on: bool) {
-        *self.shared.held.lock().unwrap() = on;
+        *self.shared.held.locked() = on;
         self.shared.let_go.notify_all();
     }
 
@@ -155,7 +156,7 @@ impl Between {
 
     /// The service's next line that starts with `prefix` is lost on its way to the client.
     pub fn lose(&self, prefix: &str) {
-        self.shared.lose.lock().unwrap().push_back(prefix.as_bytes().to_vec());
+        self.shared.lose.locked().push_back(prefix.as_bytes().to_vec());
     }
 
     /// Lines lost so far.
@@ -165,7 +166,7 @@ impl Between {
 
     /// Drops every connection, both ways.
     pub fn hang_up(&self) {
-        for socket in self.shared.sockets.lock().unwrap().drain(..) {
+        for socket in self.shared.sockets.locked().drain(..) {
             let _ = socket.shutdown(Shutdown::Both);
         }
     }

@@ -6,6 +6,8 @@
 //! back then. A service that itself is killed leaves programs in efficiency mode until its next start or until they exit, and that gap
 //! is real and is said in `docs/fps-booster.md`.
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use super::rest::{Part, Rest};
 use super::Shared;
 use crate::booster::{Command, OverlayReport};
@@ -57,7 +59,7 @@ struct Inner {
 impl Hub {
     pub(crate) fn cancel_work(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
-        if let Some(worker) = self.worker.lock().unwrap().as_ref() { worker.wake(); }
+        if let Some(worker) = self.worker.locked().as_ref() { worker.wake(); }
     }
 
     pub(crate) fn holds_reconstructions(&self) -> bool {
@@ -101,7 +103,7 @@ impl super::Controller {
 
     /// What the overlay said.
     pub fn booster_report(self: &Shared, report: OverlayReport) {
-        let mut inner = self.booster.inner.lock().unwrap();
+        let mut inner = self.booster.inner.locked();
         // Answered: the request leaves the snapshot, so a new overlay does not do it again.
         if inner.pending.is_some_and(|(n, _)| report.answered >= n) {
             inner.pending = None;
@@ -114,7 +116,7 @@ impl super::Controller {
 
     /// The overlay's link closed: nothing it wanted holds any more. The thread below acts on this within a second.
     pub fn booster_overlay_gone(self: &Shared) {
-        let mut inner = self.booster.inner.lock().unwrap();
+        let mut inner = self.booster.inner.locked();
         inner.report = OverlayReport::default();
         inner.report_at = None;
         // What it was asked and did not answer goes with it: a simulated crash asked of the next one too would never end.
@@ -129,7 +131,7 @@ impl super::Controller {
         let cancelling = matches!(command, Command::Overlay(Request::StopTest) | Command::PutBack);
         match command {
             Command::Overlay(request) => {
-                let mut inner = self.booster.inner.lock().unwrap();
+                let mut inner = self.booster.inner.locked();
                 inner.next_request += 1;
                 inner.pending = Some((inner.next_request, request));
             }
@@ -140,7 +142,7 @@ impl super::Controller {
             Command::OpenLogs => open_folder(&orbiters_core::paths::logs_dir()),
             Command::GuidedDone(item) => {
                 let was = current_of(item, &self.view());
-                let mut inner = self.booster.inner.lock().unwrap();
+                let mut inner = self.booster.inner.locked();
                 if !inner.to_put_back.iter().any(|t| t.item == item) {
                     inner.to_put_back.push(ToPutBack { item, was });
                     keep_to_put_back(&inner.to_put_back);
@@ -149,12 +151,12 @@ impl super::Controller {
                 inner.pending = Some((inner.next_request, Request::GuidedDone));
             }
             Command::PutBackDone => {
-                let mut inner = self.booster.inner.lock().unwrap();
+                let mut inner = self.booster.inner.locked();
                 inner.to_put_back.clear();
                 keep_to_put_back(&inner.to_put_back);
             }
             Command::TestLoad(on) => {
-                let mut inner = self.booster.inner.lock().unwrap();
+                let mut inner = self.booster.inner.locked();
                 inner.test_load = None;
                 if on && dev_build() {
                     inner.test_load = TestLoad::start();
@@ -162,7 +164,7 @@ impl super::Controller {
             }
             Command::WriteTestReport => {
                 let path = write_test_report(&self.view());
-                self.booster.inner.lock().unwrap().test_report = path;
+                self.booster.inner.locked().test_report = path;
             }
         }
         self.booster_publish();
@@ -170,7 +172,7 @@ impl super::Controller {
     }
 
     fn booster_publish(self: &Shared) {
-        let inner = self.booster.inner.lock().unwrap();
+        let inner = self.booster.inner.locked();
         let watching = inner.report_at.is_some_and(|at| at.elapsed() < REPORT_GONE_AFTER);
         let (overlay, request, to_put_back, test_load, test_report) = (
             if watching { inner.report.clone() } else { OverlayReport::default() },
@@ -212,13 +214,13 @@ impl super::Controller {
             });
         }
         let Some(store) = store else { return };
-        self.booster.inner.lock().unwrap().to_put_back = read_to_put_back();
-        let _ = std::thread::Builder::new().name("fps-booster".into()).spawn(move || ctl.booster_thread(store));
+        self.booster.inner.locked().to_put_back = read_to_put_back();
+        std::thread::Builder::new().name("fps-booster".into()).spawn(move || ctl.booster_thread(store)).or_log("a thread could not be started");
     }
 
     fn booster_thread(self: Shared, store: Store) {
         let rest = self.rest("fps-booster", |s| (s.vrchat.running, s.vrchat.remote, s.steamvr.running, s.settings.booster.clone(), Part::of(&s.booster)));
-        *self.booster.worker.lock().unwrap() = Some(rest.clone());
+        *self.booster.worker.locked() = Some(rest.clone());
         let mut turn = Some(Duration::from_secs(1));
         let mut os = RealOs;
         let mut last_seen: Option<(Instant, Vec<Seen>)> = None;
@@ -342,7 +344,7 @@ impl super::Controller {
                 let limits = vrchat_read::read(account.as_deref());
                 // VRChat may only write these as it exits: with it closed, what reads as it was is back.
                 if !snap.vrchat.running {
-                    let mut inner = self.booster.inner.lock().unwrap();
+                    let mut inner = self.booster.inner.locked();
                     let before = inner.to_put_back.len();
                     inner.to_put_back.retain(|t| !(t.was.is_some() && t.was == current_from(t.item, limits.max_shown, limits.hide_beyond)));
                     if inner.to_put_back.len() != before {
@@ -411,8 +413,8 @@ fn keep_to_put_back(list: &[ToPutBack]) {
     if list.is_empty() {
         let _ = std::fs::remove_file(path);
     } else if let (Some(dir), Ok(bytes)) = (path.parent(), serde_json::to_vec_pretty(list)) {
-        let _ = std::fs::create_dir_all(dir);
-        let _ = std::fs::write(path, bytes);
+        std::fs::create_dir_all(dir).or_log("a folder could not be made");
+        std::fs::write(path, bytes).or_log("a file could not be written");
     }
 }
 
@@ -426,11 +428,11 @@ pub(crate) fn dev_build() -> bool {
 }
 
 fn open_folder(path: &std::path::Path) {
-    let _ = std::fs::create_dir_all(path);
+    std::fs::create_dir_all(path).or_log("a folder could not be made");
     #[cfg(windows)]
-    let _ = std::process::Command::new("explorer").arg(path).spawn();
+    std::process::Command::new("explorer").arg(path).spawn().or_log("a program could not be started");
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(path).spawn();
+    std::process::Command::new("open").arg(path).spawn().or_log("a program could not be started");
     #[cfg(target_os = "linux")]
     let _ = crate::linux::open::path(path);
 }
@@ -466,7 +468,7 @@ impl Drop for TestLoad {
 /// What was measured, to the logs folder, in the language of the app: Enzo reads it after the test.
 fn write_test_report(snap: &crate::state::Snapshot) -> Option<std::path::PathBuf> {
     let path = orbiters_core::paths::logs_dir().join("fps-test-report.txt");
-    let _ = std::fs::create_dir_all(path.parent()?);
+    std::fs::create_dir_all(path.parent()?).or_log("a folder could not be made");
     let compositor = orbiters_booster::vrsettings::compositor_log_for_user()
         .and_then(|log| std::fs::read_to_string(log).ok())
         .and_then(|text| orbiters_booster::log::parse_compositor(&text).pop());

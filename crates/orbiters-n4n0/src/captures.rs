@@ -13,7 +13,7 @@ impl crate::N4n0 {
     /// lacks), the other menus through the status.
     pub fn set_captures(self: &Shared, captures: CapturesView) {
         let effects = {
-            let mut rt = self.n4n0.lock().unwrap();
+            let mut rt = self.n4n0.locked();
             if rt.captures == captures {
                 return;
             }
@@ -33,7 +33,7 @@ impl crate::N4n0 {
     /// Forgotten only once no menu (`holder`: the one asking) still shows Share to … (MENU-13).
     pub(crate) fn friends(self: &Shared, on: bool, holder: crate::MenuHolder) {
         let number = {
-            let mut rt = self.n4n0.lock().unwrap();
+            let mut rt = self.n4n0.locked();
             if on {
                 rt.friends_holders.insert(holder);
             } else if holder == crate::MenuHolder::Any {
@@ -67,7 +67,7 @@ impl crate::N4n0 {
                 Err(message) => Friends::Failed { message },
             };
             {
-                let mut rt = n.n4n0.lock().unwrap();
+                let mut rt = n.n4n0.locked();
                 // Closed or asked again meanwhile: this answer is not wanted.
                 if rt.friends_asked != number {
                     return;

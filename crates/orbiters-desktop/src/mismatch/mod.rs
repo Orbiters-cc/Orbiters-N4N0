@@ -19,6 +19,8 @@
 
 pub mod send;
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use orbiters_i18n::mark;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -158,7 +160,7 @@ static ON: AtomicBool = AtomicBool::new(false);
 static RING: Mutex<Ring> = Mutex::new(Ring { lines: VecDeque::new() });
 
 fn ring<R>(f: impl FnOnce(&mut Ring) -> R) -> R {
-    f(&mut RING.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    f(&mut RING.locked())
 }
 
 /// Milliseconds since 1970, UTC.
@@ -171,7 +173,7 @@ pub fn now_ms() -> u64 {
 pub fn switches(settings: &orbiters_core::settings::Settings) -> orbiters_core::settings::MismatchSettings {
     if cfg!(debug_assertions) && std::env::var_os("ORBITERS_VR_SANDBOX_ROOT").is_some() {
         static LOOKED: Mutex<Option<(std::time::Instant, bool)>> = Mutex::new(None);
-        let mut looked = LOOKED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut looked = LOOKED.locked();
         if looked.is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(1)) {
             let on = std::env::var_os("ORBITERS_SANDBOX_LOGS").is_some_and(|d| PathBuf::from(d).join("mismatch-on.txt").is_file());
             *looked = Some((std::time::Instant::now(), on));
@@ -330,15 +332,15 @@ pub fn press(kind: Kind, context: Context, settings: &orbiters_core::settings::S
     note("press", || format!("{} pressed", kind.key())); // i18n: not shown (a menu mismatch report's line)
     let settings = menu_settings(settings);
     let out = dir.clone();
-    let _ = std::thread::Builder::new().name("mismatch-report".into()).spawn(move || {
+    std::thread::Builder::new().name("mismatch-report".into()).spawn(move || {
         std::thread::sleep(AFTER);
         let lines = ring(|r| r.between(pressed.saturating_sub(BEFORE.as_millis() as u64), pressed + AFTER.as_millis() as u64));
         let log = vrchat_log.as_deref().map(|p| vrchat_lines(p, pressed)).unwrap_or_default();
         let report = build(kind, id, pressed, context, settings, lines, log, picture.is_some());
         if let Err(e) = write(&out, &report, picture.as_ref()) {
-            eprintln!("menu mismatch: the report could not be written in {}: {e}", out.display()); // i18n: not shown (a log's line)
+            log_warn!("menu mismatch: the report could not be written in {}: {e}", out.display(), e = e); // i18n: not shown (a log's line)
         }
-    });
+    }).or_log("a thread could not be started");
     dir
 }
 

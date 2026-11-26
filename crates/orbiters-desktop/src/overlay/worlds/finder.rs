@@ -7,6 +7,7 @@
 //! Pages are asked one at a time on a thread of their own and kept five minutes ([`Finder`]); the panel's typing is
 //! debounced by its host before a search is asked.
 
+use orbiters_core::locks::*;
 use super::catalog::{Aggregate, Entry};
 use orbiters_core::maps::{FoundBy, FoundWorld, FoundWorlds, World, WorldList};
 use orbiters_i18n::tr;
@@ -114,7 +115,7 @@ pub struct Finder {
 
 impl Finder {
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|p| p.into_inner())
+        self.state.locked()
     }
 
     /// Asks for page `page` of `list` with `fetch` (run on a thread), unless it was answered lately or is being read.
@@ -223,7 +224,7 @@ impl Finder {
 fn run(state: Arc<Mutex<State>>, mut key: Key, mut fetch: Fetch, generation: u64) {
     loop {
         let result = fetch();
-        let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
+        let mut s = state.locked();
         if s.generation != generation {
             return;
         }
@@ -263,7 +264,7 @@ const VISITED_MAX: usize = 240;
 
 impl Visited {
     pub fn refresh(&self) {
-        let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let mut s = self.state.locked();
         if s.2 || s.0.is_some_and(|at| at.elapsed() < Duration::from_secs(30)) {
             return;
         }
@@ -272,7 +273,7 @@ impl Visited {
         let started = std::thread::Builder::new().name("3d-worlds-visited".into()).spawn(move || {
             let history = orbiters_core::visited::History::load(&orbiters_core::visited::history_file());
             let worlds = visited_worlds(&history);
-            let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
+            let mut s = state.locked();
             *s = (Some(Instant::now()), worlds, false, s.3 + 1);
         });
         if started.is_err() {
@@ -282,13 +283,13 @@ impl Visited {
 
     /// The worlds visited, whether they are being read, and a number bumped with each read.
     pub fn worlds(&self) -> (Vec<VisitedWorld>, bool, u64) {
-        let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let s = self.state.locked();
         (s.1.clone(), s.2 || s.0.is_none(), s.3)
     }
 
     /// [`Visited::worlds`] without the worlds (asked every turn).
     pub fn state(&self) -> (bool, u64) {
-        let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let s = self.state.locked();
         (s.2 || s.0.is_none(), s.3)
     }
 }

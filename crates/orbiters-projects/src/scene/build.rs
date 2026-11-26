@@ -9,6 +9,7 @@
 //! avatars' renderers first, then the rest from the largest down; pictures at most 1024, 512 or 256 pixels on a side
 //! as the scene has more of them.
 
+use orbiters_core::locks::*;
 use super::assets::Assets;
 use super::material::{self, Look};
 use super::model::{ModelMesh, Skin};
@@ -1146,7 +1147,7 @@ fn in_parallel<T: Sync, R: Send>(jobs: &[T], limits: &Limits, f: impl Fn(&T) -> 
                 loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some(job) = jobs.get(i) else { break };
-                    *results[i].lock().unwrap() = Some(orbiters_i18n::in_language(language, || f(job)));
+                    *results[i].locked() = Some(orbiters_i18n::in_language(language, || f(job)));
                 }
             });
         }

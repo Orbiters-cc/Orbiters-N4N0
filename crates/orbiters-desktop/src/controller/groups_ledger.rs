@@ -18,6 +18,7 @@
 //! - One owner at a time: the folder's lock is held for as long as this lives. Another program on it sends nothing
 //!   (verify3 Major 2). An entry that cannot be written refuses the write it is for; a record that cannot be read refuses
 //!   the writes it may be of, until the person looked and goes on (verify3, deviation 7), for their own account (verify4 F5).
+use orbiters_core::locks::*;
 use super::vrchat_data::Scope;
 use orbiters_core::groups::{ArtSlot, Beside, FileTag, Part, RoleField, Said};
 use serde::{Deserialize, Serialize};
@@ -554,7 +555,7 @@ impl Ledger {
     }
     /// Only for the owner of the folder: another program's record is not read, and nothing is written over it.
     fn with<T>(&self, f: impl FnOnce(&mut Kept) -> T) -> Result<T, Not> {
-        let mut k = self.kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut k = self.kept.locked();
         if !self.own(&mut k) {
             return Err(Not::Owner);
         }

@@ -21,6 +21,8 @@
 //! lower resolution than the frame before them, for 1.8 s of everybody's patience (the desktop repository's
 //! docs/3d-picture-angles-2026-11-04.md).
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use super::{around, NoticeKind, Shared};
 use crate::state::CaptureState;
 use orbiters_contracts::rig;
@@ -371,7 +373,7 @@ impl super::Controller {
     pub fn camera_open(&self) -> Option<bool> {
         // VRChat's camera node alone (its tree), else what VRChat sent when it last changed.
         let mode = self.camera_values().into_iter().find(|(p, _)| p == super::CAMERA_MODE).map(|(_, v)| v);
-        let mode = mode.or_else(|| self.osc_values.lock().unwrap().latest.get(super::CAMERA_MODE).and_then(|(v, _)| v.first().cloned()));
+        let mode = mode.or_else(|| self.osc_values.locked().latest.get(super::CAMERA_MODE).and_then(|(v, _)| v.first().cloned()));
         match mode {
             Some(OscValue::Int(mode)) => Some(mode != 0),
             _ => None,
@@ -403,10 +405,10 @@ impl super::Controller {
     }
 
     fn start_3d_picture(self: &Shared, length: Photo3dLength, mode: PictureMode) -> anyhow::Result<u64> {
-        anyhow::ensure!(self.snapshot.lock().unwrap().vrchat.running, "{}", tr("Start VRChat and open its camera first."));
+        anyhow::ensure!(self.snapshot.locked().vrchat.running, "{}", tr("Start VRChat and open its camera first."));
         self.ensure_capture_idle()?;
         let (pose, focus, smooth, eye_height) = {
-            let osc = self.osc_values.lock().unwrap();
+            let osc = self.osc_values.locked();
             let pose = osc.latest.get(POSE).map(|(v, _)| floats(v)).filter(|v| v.len() == 6 && v.iter().any(|f| *f != 0.0));
             let focus = osc.latest.get(FOCAL_DISTANCE).and_then(|(v, _)| floats(v).first().copied()).unwrap_or(2.0).clamp(0.5, 8.0);
             let smooth = osc.latest.get(SMOOTH).and_then(|(v, _)| v.first().map(OscValue::truthy));
@@ -428,13 +430,13 @@ impl super::Controller {
         // A start that fails after it was accepted takes its flag back itself, under the gate; one refused took none.
         let owner = self.start_capture_owned(
             super::CapturePurpose::Short,
-            || *self.burst.lock().unwrap() = BurstRuntime { recording: true, mode, length },
-            || self.burst.lock().unwrap().recording = false,
+            || *self.burst.locked() = BurstRuntime { recording: true, mode, length },
+            || self.burst.locked().recording = false,
         )?;
         let ctl = self.clone();
         let flight = std::thread::Builder::new().name("3d-picture".into()).spawn(move || {
             let started = Instant::now();
-            while ctl.snapshot.lock().unwrap().capture.state != CaptureState::Recording {
+            while ctl.snapshot.locked().capture.state != CaptureState::Recording {
                 if started.elapsed() > Duration::from_secs(8) || !ctl.owns_recording(owner) {
                     ctl.give_up_picture_start(owner);
                     return;
@@ -442,7 +444,7 @@ impl super::Controller {
                 std::thread::sleep(Duration::from_millis(50));
             }
             // The frame the recording started on is read while the camera already looks around: the people wait less.
-            let session = ctl.snapshot.lock().unwrap().capture.session_dir.clone();
+            let session = ctl.snapshot.locked().capture.session_dir.clone();
             let picture = matches!(length, Photo3dLength::Standard | Photo3dLength::Full);
             // Nobody to go around in a picture of the world: its first frame says nothing the flight needs.
             let reading = session.clone().filter(|_| picture && mode == PictureMode::People).map(|dir| std::thread::spawn(move || read_start_frame(&dir)));
@@ -474,7 +476,7 @@ impl super::Controller {
                 for (i, p) in poses.iter().enumerate() {
                     {
                         // Checked and sent under the start gate: no other recording can begin in between.
-                        let _gate = ctl.capture_start_gate.lock().unwrap();
+                        let _gate = ctl.capture_start_gate.locked();
                         if !ctl.owns_recording(owner) {
                             return false;
                         }
@@ -578,7 +580,7 @@ impl super::Controller {
                 let tick = Duration::from_secs_f32(1.0 / RATE_HZ as f32);
                 for (i, p) in flight.into_iter().enumerate() {
                     {
-                        let _gate = ctl.capture_start_gate.lock().unwrap();
+                        let _gate = ctl.capture_start_gate.locked();
                         if !ctl.owns_recording(owner) {
                             break;
                         }
@@ -592,7 +594,7 @@ impl super::Controller {
                 }
                 if dolly {
                     // Its own dolly only: one a recording begun since plays is not this picture's to stop.
-                    let gate = ctl.capture_start_gate.lock().unwrap();
+                    let gate = ctl.capture_start_gate.locked();
                     let ours = ctl.no_recording_since(owner);
                     // Its Play(false) and what it reads of the dolly's streams under the gate too: a picture begun
                     // between the check and the send would have its dolly stopped and its counts told (verify2).
@@ -604,7 +606,7 @@ impl super::Controller {
             }
             // What the flight changed of the camera goes back, once, unless another recording began since: that one's camera
             // is not this picture's to move. Under the start gate, so none can begin in between.
-            let gate = ctl.capture_start_gate.lock().unwrap();
+            let gate = ctl.capture_start_gate.locked();
             let restore = ctl.no_recording_since(owner);
             if restore {
                 send(POSE, pose.iter().map(|v| rosc::OscType::Float(*v)).collect());
@@ -617,13 +619,13 @@ impl super::Controller {
                 told.push("the older flight: blind, or the 1 s sweep".into()); // i18n: not shown
             }
             for line in &told {
-                eprintln!("3d picture: {line}");
+                log_info!("3d picture: {line}", line = line);
             }
             if let Some(dir) = &session {
-                let _ = std::fs::write(dir.join(FLIGHT_FILE), told.join("\n") + "\n");
+                std::fs::write(dir.join(FLIGHT_FILE), told.join("\n") + "\n").or_log("a file could not be written");
             }
             if restore {
-                let _gate = ctl.capture_start_gate.lock().unwrap();
+                let _gate = ctl.capture_start_gate.locked();
                 if ctl.no_recording_since(owner) {
                     ctl.hold_rig(false);
                     if let Some(smooth) = smooth.filter(|s| *s) {
@@ -637,7 +639,7 @@ impl super::Controller {
         });
         if let Err(e) = flight {
             // Accepted, but nothing would fly it or end it: it ends here, as an ordinary recording.
-            self.give_up_start_of(owner, || self.burst.lock().unwrap().recording = false);
+            self.give_up_start_of(owner, || self.burst.locked().recording = false);
             return Err(e.into());
         }
         Ok(owner)
@@ -647,7 +649,7 @@ impl super::Controller {
     /// under way is stopped, or it would become a recording nobody flies or stops (CTL2-7). Neither when another recording
     /// began since: that one's flag and recording are not this picture's.
     pub(super) fn give_up_picture_start(self: &Shared, owner: u64) {
-        self.give_up_start_of(owner, || self.burst.lock().unwrap().recording = false);
+        self.give_up_start_of(owner, || self.burst.locked().recording = false);
     }
 
     /// Hands the flight to VRChat's camera dolly as four paths and plays them (`/dolly/Import`, `/dolly/Play`): false
@@ -678,7 +680,7 @@ impl super::Controller {
     /// Stops the dolly's animation and tells what its extra streams gave.
     fn stop_dolly(&self) {
         let _ = self.with_osc(|o| o.send(super::dolly::PLAY, vec![rosc::OscType::Bool(false)]));
-        let stats = self.snapshot.lock().unwrap().capture.stats.clone().unwrap_or_default();
+        let stats = self.snapshot.locked().capture.stats.clone().unwrap_or_default();
         let message = if stats.extra_frames == 0 {
             tr("The camera dolly's other cameras sent nothing: in VRChat set Camera › Dolly › Streaming to Multi (VRC+), then try again.").to_string()
         } else if stats.extra_keyframes == 0 {
@@ -696,8 +698,8 @@ impl super::Controller {
     /// be the next picture's): `None` when it was no picture.
     pub(super) fn take_picture_ended(&self) -> Option<PictureEnded> {
         // The snapshot first, then the picture's state: the order `update`'s closures take them in.
-        let left_out = self.snapshot.lock().unwrap().capture.left_out.clone();
-        let mut burst = self.burst.lock().unwrap();
+        let left_out = self.snapshot.locked().capture.left_out.clone();
+        let mut burst = self.burst.locked();
         std::mem::take(&mut burst.recording).then(|| PictureEnded { mode: burst.mode, length: burst.length, left_out })
     }
 

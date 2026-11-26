@@ -1,3 +1,4 @@
+use orbiters_core::locks::*;
 pub use crate::bundled_templates::builtins;
 use crate::copying::{self, between, Made, Step};
 use crate::unity6::gate::{self, AppRoot, Destination, Parents};
@@ -386,7 +387,7 @@ async fn make(
     // What its files and folders take on that disk, whose units count (PRJ-4), and some left free: of the very list that is copied.
     let required = payload.need.room(crate::size::unit(parent).unwrap_or(4096));
     anyhow::ensure!(free >= required, "{}", tr!("Not enough disk space: free at least {bytes} more bytes before duplicating.", bytes = required.saturating_sub(free)));
-    progress.lock().unwrap().left_out.clone_from(&payload.nowhere);
+    progress.locked().left_out.clone_from(&payload.nowhere);
     // Recorded before anything of it is made, until it is on the list: a copy that stays is never lost from sight.
     let mut record = crate::copies::Held::begin(&app, source, &destination)?;
     let filled = fill(&payload, place, &destination, cancel, progress, true, &mut |new| record.made(new.id));
@@ -409,7 +410,7 @@ async fn make(
         between(Step::Copied)?;
         copying::unmark(&held, marker)?;
         between(Step::MarkerGone)?;
-        progress.lock().unwrap().phase = mark("Registering project").into();
+        progress.locked().phase = mark("Registering project").into();
         crate::gallery::add(root, &path)
     }
     .await;
@@ -429,7 +430,7 @@ async fn make(
     // the copy from there through its proof.
     if copy.is_none() || !payload.packages_complete().unwrap_or(false) {
         let missing = || tr!("The copy is listed at {path}, but missing packages could not be restored", path = path.display());
-        progress.lock().unwrap().phase = mark("Restoring missing packages").into();
+        progress.locked().phase = mark("Restoring missing packages").into();
         let restored: anyhow::Result<()> = async {
             let stage = Stage::restore(root, &app, &path, &payload, &budget::Disks).await?;
             // The source is let go; the new folder is held to the end.

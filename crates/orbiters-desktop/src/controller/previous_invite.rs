@@ -7,16 +7,15 @@
 //! session nothing is sent here: N4N0 asks Orbiters' own account instead (`orbiters_n4n0::Host::invite_self`).
 
 use super::Controller;
-use orbiters_core::vrchat_api::{Client, Error};
+use orbiters_core::vrchat_api::{ClientLock, Error};
 use orbiters_i18n::tr;
 use orbiters_n4n0_core::menu::{InstanceRow, InviteAnswer};
-use std::sync::Mutex;
 
 impl Controller {
     /// The VRChat account Invite me would go from now (its user id), when one is connected.
     pub(super) fn previous_instance_account(&self) -> Option<String> {
         let client = self.vrchat_signed_client()?;
-        let id = client.lock().unwrap().signed_in_user_id().map(str::to_string);
+        let id = client.locked().signed_in_user_id().map(str::to_string);
         id
     }
 
@@ -24,7 +23,7 @@ impl Controller {
     /// no VRChat session, or another's by now (nothing sent). On a thread of N4N0's own: it waits for VRChat.
     pub(super) fn previous_instance_invite(&self, location: &str, account: &str) -> Option<InviteAnswer> {
         let client = self.vrchat_signed_client()?;
-        if client.lock().unwrap().signed_in_user_id() != Some(account) {
+        if client.locked().signed_in_user_id() != Some(account) {
             return None;
         }
         Some(invite_self(&client, account, &orbiters_n4n0_core::invites::read_rows(), location))
@@ -42,7 +41,7 @@ pub fn location_parts(location: &str) -> Option<(&str, &str)> {
 /// VRChat's invite to oneself to `location`, one of `known` (the instances VRChat's logs listed), through `client`: the
 /// instance looked at, then the invite, each step's refusal in words. Rate limited: said, nothing more is sent.
 /// Each request goes only while the session is `account`'s, checked on the same hold that sends it.
-pub fn invite_self(client: &Mutex<Client>, account: &str, known: &[InstanceRow], location: &str) -> InviteAnswer {
+pub fn invite_self(client: &ClientLock, account: &str, known: &[InstanceRow], location: &str) -> InviteAnswer {
     let failed = |message: String| InviteAnswer::Failed { message };
     let changed = || failed(tr("Your VRChat account changed meanwhile: nothing was sent.").into());
     let Some((world, instance)) = location_parts(location).filter(|_| known.iter().any(|row| row.location == location)) else {
@@ -50,7 +49,7 @@ pub fn invite_self(client: &Mutex<Client>, account: &str, known: &[InstanceRow],
     };
     // Each request on its own hold of the session: a sign-out meanwhile stops the next.
     let looked = {
-        let mut client = client.lock().unwrap();
+        let mut client = client.locked();
         if client.signed_in_user_id() != Some(account) {
             return changed();
         }
@@ -64,7 +63,7 @@ pub fn invite_self(client: &Mutex<Client>, account: &str, known: &[InstanceRow],
         Err(e) => return refusal(e),
     }
     let sent = {
-        let mut client = client.lock().unwrap();
+        let mut client = client.locked();
         if client.signed_in_user_id() != Some(account) {
             return changed();
         }

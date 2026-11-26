@@ -72,7 +72,7 @@ impl crate::N4n0 {
     pub(crate) fn qr_scan(self: &Shared, on: bool, holder: MenuHolder) {
         if !on {
             let scan = {
-                let mut rt = self.n4n0.lock().unwrap();
+                let mut rt = self.n4n0.locked();
                 if holder == MenuHolder::Any {
                     rt.qr.holders.clear();
                 } else {
@@ -90,7 +90,7 @@ impl crate::N4n0 {
             return;
         }
         let number = {
-            let mut rt = self.n4n0.lock().unwrap();
+            let mut rt = self.n4n0.locked();
             rt.qr.holders.insert(holder);
             if let Some(run) = rt.qr.run.as_mut() {
                 // Asked again while it runs: its time starts again.
@@ -111,7 +111,7 @@ impl crate::N4n0 {
             }
         }));
         let late = {
-            let mut rt = self.n4n0.lock().unwrap();
+            let mut rt = self.n4n0.locked();
             match started {
                 // Stopped (or started again, or it said it failed) while it started: this one goes.
                 Ok(scan) if rt.qr.number != number || !rt.qr.view.scanning() => Some(scan),
@@ -141,7 +141,7 @@ impl crate::N4n0 {
         };
         match seen {
             QrSeen::Camera(true) => {
-                let mut rt = self.n4n0.lock().unwrap();
+                let mut rt = self.n4n0.locked();
                 if !current(&rt) || rt.qr.view.phase == QrPhase::Looking {
                     return;
                 }
@@ -152,7 +152,7 @@ impl crate::N4n0 {
             QrSeen::Camera(false) => {
                 // Whether VRChat's camera is open says what to do (asked off the lock: it asks VRChat).
                 let note = qr::no_camera_note(self.host.camera_open());
-                let mut rt = self.n4n0.lock().unwrap();
+                let mut rt = self.n4n0.locked();
                 if !current(&rt) || (rt.qr.view.phase == QrPhase::NoCamera && rt.qr.view.note == note) {
                     return;
                 }
@@ -163,7 +163,7 @@ impl crate::N4n0 {
             QrSeen::Code(text) => {
                 let link = qr::web_link(&text);
                 let open = {
-                    let mut rt = self.n4n0.lock().unwrap();
+                    let mut rt = self.n4n0.locked();
                     let now = Instant::now();
                     let Some(run) = rt.qr.run.as_mut().filter(|r| r.number == number) else { return };
                     match &link {
@@ -202,7 +202,7 @@ impl crate::N4n0 {
                     match self.host.watch(&link) {
                         Ok(()) => {
                             // Opened: counted, and the scan's time starts again (when it is still this scan).
-                            let mut rt = self.n4n0.lock().unwrap();
+                            let mut rt = self.n4n0.locked();
                             let now = Instant::now();
                             let mut ended = None;
                             if let Some(run) = rt.qr.run.as_mut().filter(|r| r.number == number) {
@@ -236,7 +236,7 @@ impl crate::N4n0 {
                     Some(crate::platform::QrGlimpse::Unclear) => latin(|| tr("A QR code is in view: hold the camera still, a little closer").to_string()),
                     None => String::new(),
                 };
-                let mut rt = self.n4n0.lock().unwrap();
+                let mut rt = self.n4n0.locked();
                 if !current(&rt) || rt.qr.view.phase != QrPhase::Looking || rt.qr.view.note == note {
                     return;
                 }
@@ -245,7 +245,7 @@ impl crate::N4n0 {
             }
             QrSeen::Failed(why) => {
                 let scan = {
-                    let mut rt = self.n4n0.lock().unwrap();
+                    let mut rt = self.n4n0.locked();
                     if !current(&rt) {
                         return;
                     }

@@ -16,6 +16,7 @@
 //! last one goes they unload in about 2 s (16 to 18 s after a VRChat that never signed in). Only the first VRChat gets
 //! VRChat's link pipe (`VRCNP: Failed to create server: All pipe instances are busy` in the others).
 
+use orbiters_core::locks::*;
 use super::game::Failure;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -173,13 +174,13 @@ const LAUNCH_GRACE: Duration = Duration::from_secs(20);
 
 impl Sides {
     pub fn put(&self, mark: SideMark) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.locked();
         inner.marks.retain(|m| m.session != mark.session);
         inner.marks.push(mark);
     }
 
     pub fn remove(&self, session: &str) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.locked();
         inner.marks.retain(|m| m.session != session);
         if inner.lent.as_deref() == Some(session) {
             inner.lent = None;
@@ -187,28 +188,28 @@ impl Sides {
     }
 
     pub fn marks(&self) -> Vec<SideMark> {
-        self.inner.lock().unwrap().marks.clone()
+        self.inner.locked().marks.clone()
     }
 
     pub fn launching(&self, on: bool) {
-        self.inner.lock().unwrap().launching = on.then(Instant::now);
+        self.inner.locked().launching = on.then(Instant::now);
     }
 
     pub fn set_main(&self, pid: Option<u32>) {
-        self.inner.lock().unwrap().main = pid;
+        self.inner.locked().main = pid;
     }
 
     pub fn main_pid(&self) -> Option<u32> {
-        self.inner.lock().unwrap().main
+        self.inner.locked().main
     }
 
     pub fn side_pids(&self) -> Vec<u32> {
-        self.inner.lock().unwrap().marks.iter().filter_map(|m| m.pid).collect()
+        self.inner.locked().marks.iter().filter_map(|m| m.pid).collect()
     }
 
     /// Lends the app to `session` (`None`: gives it back). Refused when it is lent to another.
     pub fn lend(&self, session: Option<&str>) -> bool {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.locked();
         match (session, inner.lent.as_deref()) {
             (Some(s), Some(l)) if s != l => false,
             _ => {
@@ -219,7 +220,7 @@ impl Sides {
     }
 
     pub fn lent(&self) -> Option<SideMark> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.locked();
         let lent = inner.lent.as_deref()?;
         inner.marks.iter().find(|m| m.session == lent).cloned()
     }
@@ -231,7 +232,7 @@ impl Sides {
         if let Some(pid) = self.lent().and_then(|m| m.pid).filter(|p| running.contains(p)) {
             return Some(pid);
         }
-        if self.inner.lock().unwrap().roster.is_some() {
+        if self.inner.locked().roster.is_some() {
             return self.target().map(|t| t.pid).filter(|p| running.contains(p));
         }
         running.iter().copied().find(|p| !sides.contains(p))
@@ -239,7 +240,7 @@ impl Sides {
 
     /// Every VRChat running, as the watcher last saw them, with each one's driver brought up to date with the sessions.
     pub fn set_roster(&self, mut runs: Vec<VrchatRun>) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.locked();
         for run in &mut runs {
             if let Some(mark) = inner.marks.iter().find(|m| m.pid == Some(run.pid)) {
                 run.driver = Driver::Session(mark.session.clone());
@@ -256,27 +257,27 @@ impl Sides {
 
     /// Whether the watcher looked at the VRChats running yet.
     pub fn roster_known(&self) -> bool {
-        self.inner.lock().unwrap().roster.is_some()
+        self.inner.locked().roster.is_some()
     }
 
     pub fn roster(&self) -> Vec<VrchatRun> {
-        self.inner.lock().unwrap().roster.clone().unwrap_or_default()
+        self.inner.locked().roster.clone().unwrap_or_default()
     }
 
     /// The person chooses which VRChat their pictures are taken in (`None`: the default, their own).
     pub fn choose(&self, pid: Option<u32>) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.locked();
         inner.chosen = pid.filter(|p| inner.roster.as_ref().is_none_or(|r| r.iter().any(|x| x.pid == *p)));
     }
 
     pub fn chosen(&self) -> Option<u32> {
-        self.inner.lock().unwrap().chosen
+        self.inner.locked().chosen
     }
 
     /// The VRChat the person's capture follows: the one they chose, else [`default_target`]. A bridge picture's lend does not
     /// change it.
     pub fn person_target(&self) -> Option<VrchatRun> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.locked();
         let runs = inner.roster.as_ref()?;
         inner.chosen.and_then(|c| runs.iter().find(|r| r.pid == c)).or_else(|| default_target(runs)).cloned()
     }
@@ -284,7 +285,7 @@ impl Sides {
     /// The VRChat the app follows now: the side session it is lent to for a picture, else [`Sides::person_target`].
     pub fn target(&self) -> Option<VrchatRun> {
         let lent = self.lent();
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.locked();
         let runs = inner.roster.as_ref()?;
         if let Some(mark) = lent {
             let run = mark.pid.and_then(|p| runs.iter().find(|r| r.pid == p)).cloned();
@@ -314,16 +315,16 @@ impl Sides {
 
     /// What a VRChat the app does not follow said of its camera over OSC, while it was not followed.
     pub fn camera_heard(&self, pid: u32) -> Option<(bool, u64)> {
-        self.inner.lock().unwrap().camera_heard.get(&pid).copied()
+        self.inner.locked().camera_heard.get(&pid).copied()
     }
 
     pub fn hear_camera(&self, pid: u32, open: bool, at_ns: u64) {
-        self.inner.lock().unwrap().camera_heard.insert(pid, (open, at_ns));
+        self.inner.locked().camera_heard.insert(pid, (open, at_ns));
     }
 
     /// The processes of every VRChat known to run (the roster's and the sessions').
     pub fn known_pids(&self) -> Vec<u32> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.locked();
         let mut pids: Vec<u32> = inner.roster.iter().flatten().map(|r| r.pid).collect();
         pids.extend(inner.marks.iter().filter_map(|m| m.pid));
         pids.extend(inner.main);
@@ -342,7 +343,7 @@ impl Sides {
                 return log != path;
             }
         }
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.locked();
         if inner.roster.iter().flatten().any(|r| r.log.as_deref() == Some(path)) {
             // A log of a VRChat the app does not follow.
             return true;
@@ -395,7 +396,7 @@ pub fn datagram_filter(sides: std::sync::Arc<Sides>) -> orbiters_core::osc::Data
             return true;
         }
         let owner = {
-            let mut owners = owners.lock().unwrap();
+            let mut owners = owners.locked();
             if !owners.0.contains_key(&from.port()) && owners.1.is_none_or(|t| t.elapsed() > Duration::from_secs(1)) {
                 *owners = (super::win::udp_owners(), Some(Instant::now()));
             }

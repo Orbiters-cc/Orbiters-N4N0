@@ -19,6 +19,7 @@
 //! adds, each second, how many of the pages' watches look (`pages::watch`): with `still` (Settings, whose watch keeps
 //! the microphones open) and the window minimized then restored by hand, it shows that they end and start again.
 
+use orbiters_core::locks::*;
 use crate::app::App;
 use crate::backend::{Ctl, Local};
 use crate::controller::{self, Controller};
@@ -273,7 +274,7 @@ impl Bench {
             while start.elapsed().as_secs_f64() < seconds {
                 tick += Duration::from_secs(1);
                 std::thread::sleep(tick.saturating_duration_since(Instant::now()));
-                let n = std::mem::take(&mut frames.lock().unwrap().this_second);
+                let n = std::mem::take(&mut frames.locked().this_second);
                 let k = views() - views_last;
                 views_last += k;
                 if k > 0 {
@@ -287,7 +288,7 @@ impl Bench {
                 let _ = std::io::Write::flush(&mut std::io::stdout());
             }
             let (mut v, drawn) = {
-                let f = frames.lock().unwrap();
+                let f = frames.locked();
                 (f.intervals.clone(), f.intervals.len() + f.last.is_some() as usize)
             };
             v.sort_by(f64::total_cmp);
@@ -409,7 +410,7 @@ impl eframe::App for Bench {
                     println!("measuring {:.0} s, {:.0}x{:.0} pixels", self.seconds, size.x, size.y);
                     let _ = std::io::Write::flush(&mut std::io::stdout());
                     self.stage = Stage::Measure(now);
-                    *self.frames.lock().unwrap() = Frames::default();
+                    *self.frames.locked() = Frames::default();
                     self.next_page = now;
                     self.watch(ctx);
                     ctx.request_repaint();
@@ -440,7 +441,7 @@ impl eframe::App for Bench {
         eframe::App::ui(&mut self.app, ui, frame);
         if self.measuring().is_some() {
             let now = Instant::now();
-            let mut f = self.frames.lock().unwrap();
+            let mut f = self.frames.locked();
             if let Some(last) = f.last {
                 f.intervals.push((now - last).as_secs_f64() * 1e3);
             }

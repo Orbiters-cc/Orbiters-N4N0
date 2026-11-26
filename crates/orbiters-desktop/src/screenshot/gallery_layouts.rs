@@ -50,7 +50,7 @@ pub(super) fn stage(ctx: &egui::Context, gallery: &mut crate::pages::gallery::St
     if !NAMES.contains(&name) {
         return;
     }
-    let dir = std::env::temp_dir().join("orbiters-gallery-fixture");
+    let dir = orbiters_core::paths::stand_ins().join("gallery-fixture");
     if f == 0 || f == 45 {
         gallery.stage_extra(entries(&dir));
         gallery.stage_layout(match name {

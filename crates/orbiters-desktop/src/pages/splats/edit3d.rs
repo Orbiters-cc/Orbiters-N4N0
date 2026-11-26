@@ -15,6 +15,7 @@
 //! every splat by its own circle of confusion. Its auto focus asks the projection for the depth under the focus dot
 //! (the dot's place on the picture taken back through the crop to the view's pixels) and eases towards each answer.
 
+use orbiters_core::locks::*;
 use super::super::editor::{files, Editor, LiveAsk};
 use super::*;
 use orbiters_i18n::tr;
@@ -137,13 +138,14 @@ impl Viewer {
         let (s, (device, queue), c) = (shared.clone(), self.window.clone(), ctx.clone());
         let made = std::thread::Builder::new().name("photo layers on the GPU".into()).spawn(move || { // i18n: not shown
             let stack = Stack::live(&device, &queue);
-            if let Ok(mut s) = s.lock() {
+            {
+                let mut s = s.locked();
                 s.stack = Some(stack);
             }
             c.request_repaint();
         });
         if let Err(e) = made {
-            eprintln!("Edit in 3D: {e}");
+            log_warn!("Edit in 3D: {e}", e = e);
         }
         self.edit3d.editing = Some(Editing { editor: Editor::live(self.title.clone(), full, doc), full, shared, flashed: f64::NEG_INFINITY, focus: None, focused_at: 0.0 });
     }
@@ -267,7 +269,7 @@ pub(super) fn show(v: &mut Viewer, ui: &mut Ui, rect: Rect) -> Option<bool> {
         let camera = orbit.camera(input.0, input.1);
         // The auto focus: towards the distance its last probe found, eased.
         let measured = match &l.source {
-            Source::Window(renderer) => renderer.lock().ok().and_then(|r| r.focus),
+            Source::Window(renderer) => renderer.locked().focus,
             Source::Integrated(worker) => worker.focus(),
         };
         let auto = ed.editor.edit().depth_blur().is_some_and(|(b, _)| b.focus == Focus::Auto);
@@ -293,7 +295,10 @@ pub(super) fn show(v: &mut Viewer, ui: &mut Ui, rect: Rect) -> Option<bool> {
         let marks = l.marks();
         let (inner, error) = match &mut l.source {
             Source::Window(renderer) => {
-                let (error, checking) = renderer.lock().map(|r| (r.error.clone(), r.checks > 0 || r.probing)).unwrap_or_default();
+                let (error, checking) = {
+                    let r = renderer.locked();
+                    (r.error.clone(), r.checks > 0 || r.probing)
+                };
                 if checking {
                     ctx.request_repaint();
                 }
@@ -312,7 +317,7 @@ pub(super) fn show(v: &mut Viewer, ui: &mut Ui, rect: Rect) -> Option<bool> {
         let p = ctx.layer_painter(s.layer).with_clip_rect(s.clip.intersect(s.frame));
         if let Some(e) = error {
             widgets::text(&p, s.frame.center(), Align2::CENTER_CENTER, &Txt::new(tr!("This view could not be drawn: {e}", e = e), 13.0).color(theme::DANGER));
-        } else if ed.shared.lock().map(|sh| sh.stack.is_none()).unwrap_or(false) {
+        } else if ed.shared.locked().stack.is_none() {
             orbiters_ui::feedback::spinner(&p, s.frame.center(), 12.0, 2.5, theme::accent());
         }
         // The shutter.
@@ -435,12 +440,15 @@ impl egui_wgpu::CallbackTrait for LiveCallback {
             Inner::Integrated(cb, _) => cb.prepare(device, queue, screen, encoder, resources),
         };
         let source = match &self.inner {
-            Inner::Window(_, r) => r.lock().ok().and_then(|r| r.target.as_ref().map(|t| (t.view.clone(), t.size, r.drawn))),
+            Inner::Window(_, r) => {
+                let r = r.locked();
+                r.target.as_ref().map(|t| (t.view.clone(), t.size, r.drawn))
+            },
             Inner::Integrated(_, latest) => latest.get(),
         };
         let Some((view, input_size, frames)) = source else { return cmds };
         let Some(show) = Show::of(device, resources) else { return cmds };
-        let Ok(mut shared) = self.shared.lock() else { return cmds };
+        let mut shared = self.shared.locked();
         let Shared { stack, frames: seen, bind } = &mut *shared;
         let fresh = *seen != Some(frames);
         *seen = Some(frames);
@@ -455,7 +463,7 @@ impl egui_wgpu::CallbackTrait for LiveCallback {
     }
 
     fn paint(&self, _info: egui::PaintCallbackInfo, pass: &mut wgpu::RenderPass<'static>, resources: &egui_wgpu::CallbackResources) {
-        let (Some(show), Ok(shared)) = (resources.get::<Show>(), self.shared.lock()) else { return };
+        let (Some(show), shared) = (resources.get::<Show>(), self.shared.locked()) else { return };
         if let Some((_, b)) = &shared.bind {
             show.draw(pass, b);
         }

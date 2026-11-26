@@ -493,6 +493,7 @@ pub static ENTRIES: &[Entry] = &[
     e("app.updates", App, mark("About"), mark("Updates"), mark("Orbiters - N4N0 looks for a newer version shortly after it starts, then every few hours."), mark("update version upgrade new release restart")).controls(&[mark("Restart now"), mark("Not after all"), mark("Restart when done"), mark("Restart to update"), mark("Look now")]),
     e("app.development", App, mark("About"), mark("Development environment"), mark("For testing development builds: the Orbiters server running on this computer instead of orbiters.cc, with its own account and updates."), mark("dev server testing builds")).controls(&["development"]),
     e("app.log", App, mark("Log"), mark("Log"), mark("Every notice, warning and error N4N0 showed, kept here"), mark("notices errors warnings history messages")).whole(),
+    e("app.error-log", App, mark("Log"), mark("Error log"), mark("When and where something went wrong inside the app, with its error codes. No names, no messages, no sign-in details. It stays on this computer, two weeks at most."), mark("diagnostics errors problems support folder copy")),
 ];
 
 /// What the panels around VRChat's two menus are: on a Mac with how they are pointed at (with an engine from before, "Right now" says Left Option).
@@ -602,9 +603,11 @@ pub static ACTIONS: &[(&str, &str)] = &[
     // About: the worker's log shown, quitting.
     (mark("About"), mark("Worker log")),
     (mark("About"), mark("Quit")),
-    // The log: its file, copying it.
+    // The logs: the notices, the local diagnostics folder, and its latest errors.
     (mark("Log"), mark("Show the file")),
     (mark("Log"), mark("Copy all")),
+    (mark("Log"), mark("Open the log folder")),
+    (mark("Log"), mark("Copy the last errors")),
 ];
 
 /// Whether `key` in `card` is one of [`ACTIONS`].

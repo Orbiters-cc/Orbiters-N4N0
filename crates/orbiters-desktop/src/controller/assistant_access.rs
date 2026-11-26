@@ -4,6 +4,7 @@
 //! and the page where the person does it opens instead; what waits to be done (a question, a share for the next capture) is
 //! dropped as it goes off.
 
+use orbiters_core::locks::*;
 use super::Controller;
 use orbiters_core::features::{Grant, N4N0_ASSISTANT_ACTIONS};
 use std::time::{Duration, Instant};
@@ -61,7 +62,7 @@ impl AssistantAccess {
 impl Controller {
     /// Whether the member signed in now has the account's actions.
     pub(super) fn assistant_actions(&self) -> bool {
-        self.assistant_access.lock().unwrap().allowed(self.identity_epoch(), Instant::now())
+        self.assistant_access.locked().allowed(self.identity_epoch(), Instant::now())
     }
 
     /// Asks Orbiters when it is time to, on a thread, with the credential of the member of the epoch the answer is kept for.
@@ -70,7 +71,7 @@ impl Controller {
         let epoch = self.identity_epoch();
         let Some((api, token)) = self.account_api_of(epoch) else { return };
         {
-            let mut access = self.assistant_access.lock().unwrap();
+            let mut access = self.assistant_access.locked();
             access.follow(epoch);
             if access.asking || !access.grant.due(Instant::now()) {
                 return;
@@ -80,18 +81,18 @@ impl Controller {
         let ctl = self.clone();
         let started = std::thread::Builder::new().name("assistant-access".into()).spawn(move || {
             let answer = api.member_feature(&token, N4N0_ASSISTANT_ACTIONS);
-            ctl.assistant_access.lock().unwrap().answered(epoch, &answer, Instant::now());
+            ctl.assistant_access.locked().answered(epoch, &answer, Instant::now());
             ctl.assistant_access_changed();
         });
         if started.is_err() {
-            self.assistant_access.lock().unwrap().asking = false;
+            self.assistant_access.locked().asking = false;
         }
     }
 
     /// How long until it is asked again, or a yes is too old to hold (never, with no member it could be asked for).
     pub(super) fn assistant_access_wait(&self) -> Option<Duration> {
         self.account_api_of(self.identity_epoch())?;
-        let access = self.assistant_access.lock().unwrap();
+        let access = self.assistant_access.locked();
         let now = Instant::now();
         let asked = if access.asking { Duration::from_secs(1) } else { access.grant.wait(now) };
         Some(if access.grant.allowed(now) { asked.min(access.grant.remaining(now)) } else { asked })
@@ -99,7 +100,7 @@ impl Controller {
 
     /// It went off: what waits to be done with it is dropped at once. (Outside its lock: N4N0 asks whether it is on.)
     fn assistant_access_changed(&self) {
-        let off = self.assistant_access.lock().unwrap().went_off(Instant::now());
+        let off = self.assistant_access.locked().went_off(Instant::now());
         if off {
             self.n4n0.account_actions_changed();
         }

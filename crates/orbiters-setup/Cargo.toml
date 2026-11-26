@@ -31,6 +31,8 @@ sha2 = "0.10"
 rfd = "0.17"
 
 [target.'cfg(windows)'.dependencies]
+# Where Creator Companion and ALCOM are installed: nothing is installed there (companions.rs).
+winreg = "0.55"
 windows = { workspace = true, features = [
     "Win32_Graphics_Dwm",
     "Win32_Storage_FileSystem",

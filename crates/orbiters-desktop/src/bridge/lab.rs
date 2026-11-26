@@ -7,6 +7,7 @@
 //! `orbiters-desktop --bridge-lab` runs it with the real MCP listener and the real keeper, behind a stand-in for Orbiters'
 //! `features/mine`, so that any MCP client can drive it: `scripts/bridge-lab.mjs` does, with the official SDK.
 
+use orbiters_core::locks::*;
 use super::game::{CaptureSeen, DiskSeen, EnvironmentSeen, Failure, Feedback, FeedbackAccount, Publish, PublishSeen, Find, Game, GameWindow, LaunchPlan, OscArg, PictureFiles, ReconstructionSeen, Seen, Shot, WorldCard, WorldPage};
 use orbiters_n4n0_core::feedback::{FeedbackAsk, LabelCount, WorldFeedback};
 use super::input::{Input, MouseButton};
@@ -224,7 +225,7 @@ impl LabGame {
                     Some(rosc::OscType::Float(f)) => *f,
                     _ => continue,
                 };
-                hearing.lock().unwrap().push((Heard { address: message.addr, value }, Instant::now()));
+                hearing.locked().push((Heard { address: message.addr, value }, Instant::now()));
             }
         });
         Arc::new(Self {
@@ -243,12 +244,12 @@ impl LabGame {
     }
 
     pub fn set_behaviour(&self, change: impl FnOnce(&mut Behaviour)) {
-        change(&mut self.state.lock().unwrap().behaviour);
+        change(&mut self.state.locked().behaviour);
     }
 
     /// The switch for the foreground: the real desktop's is never taken from the person.
     pub fn set_foreground(&self, foreground: bool) {
-        self.state.lock().unwrap().foreground = foreground;
+        self.state.locked().foreground = foreground;
     }
 
     /// A VRChat that is somebody else's: running, in a world, not started by the bridge.
@@ -288,7 +289,7 @@ impl LabGame {
 
     /// What the stand-in OSC listener heard, oldest first, with when.
     pub fn heard(&self) -> Vec<(Heard, Instant)> {
-        self.heard.lock().unwrap().clone()
+        self.heard.locked().clone()
     }
 
     /// The last value `address` got.
@@ -297,7 +298,7 @@ impl LabGame {
     }
 
     pub fn injected(&self) -> Vec<Input> {
-        self.state.lock().unwrap().injected.clone()
+        self.state.locked().injected.clone()
     }
 
     #[cfg(test)]
@@ -307,7 +308,7 @@ impl LabGame {
 
     /// The VR sandbox's camera route reached this VRChat (vr.rs): its camera opens, and says where it is.
     pub fn vr_camera(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         if state.pid.is_some() && !state.menu_open {
             state.camera_open = true;
             state.pose_known = true;
@@ -316,7 +317,7 @@ impl LabGame {
 
     /// The VR laser's trigger: on a world's page (a link sent to the running game), its Join.
     pub fn vr_click(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         if let Some((world, instance)) = state.world_page.take() {
             let load = state.behaviour.load;
             state.joining = Some((Instant::now() + load, world, instance));
@@ -325,7 +326,7 @@ impl LabGame {
     }
 
     pub fn launches(&self) -> Vec<LaunchPlan> {
-        self.state.lock().unwrap().launches.clone()
+        self.state.locked().launches.clone()
     }
 
     /// The links handed to the running game.
@@ -383,16 +384,16 @@ impl LabGame {
 
     /// Starts a new log file, as each start of VRChat does.
     fn new_log(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         state.log_serial += 1;
         let name = format!("output_log_2026-11-05_12-{:02}-{:02}.txt", state.log_serial / 60, state.log_serial % 60);
         drop(state);
-        *self.log.lock().unwrap() = std::fs::OpenOptions::new().create(true).append(true).open(self.dir.join(name)).ok();
+        *self.log.locked() = std::fs::OpenOptions::new().create(true).append(true).open(self.dir.join(name)).ok();
     }
 
     /// A line in VRChat's format.
     fn write_line(&self, message: &str) {
-        if let Some(file) = self.log.lock().unwrap().as_mut() {
+        if let Some(file) = self.log.locked().as_mut() {
             let _ = writeln!(file, "2026.11.05 12:00:00 Debug      -  {message}");
             let _ = file.flush();
         }
@@ -410,26 +411,25 @@ impl LabGame {
         // Windows the real fake window keeps its own 640 x 360, which the end-to-end tests are written for.)
         #[cfg(not(windows))]
         {
-            *window.size.lock().unwrap() = (plan.width, plan.height);
+            *window.size.locked() = (plan.width, plan.height);
         }
-        let mut state = self.state.lock().unwrap();
+        // Pollers can deliver the arrival as soon as it is scheduled. Open its log first.
+        self.new_log();
+        self.write_line("Launching with args"); // i18n: not shown
+        let mut state = self.state.locked();
         state.window = Some(window);
         state.pid = Some(std::process::id());
         state.started += 1000;
         state.args = Some(plan.args());
         state.player_from = Some(Instant::now() + state.behaviour.load + state.behaviour.player_after);
         state.joining = (!state.behaviour.never_arrives).then(|| (Instant::now() + state.behaviour.load, plan.world_id.clone(), plan.instance.clone()));
-        drop(state);
-        self.new_log();
-        // Like VRChat, its log names the start's own arguments first.
-        self.write_line("Launching with args"); // i18n: not shown
         Ok(())
     }
 
     /// Lets time pass: what was due happens.
     fn advance(&self) {
         let due = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.locked();
             if state.coming.as_ref().is_some_and(|(at, _)| Instant::now() >= *at) {
                 state.coming.take()
             } else {
@@ -440,7 +440,7 @@ impl LabGame {
             let _ = self.come_up(&plan);
         }
         let now = Instant::now();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         // The window closed: the game is gone.
         if state.window.as_ref().is_some_and(|w| w.closed.load(Ordering::Relaxed)) {
             state.window = None;
@@ -452,7 +452,7 @@ impl LabGame {
             state.foreground = false;
             drop(state);
             self.write_line("[Behaviour] OnLeftRoom");
-            state = self.state.lock().unwrap();
+            state = self.state.locked();
         }
         if let Some((at, world, instance)) = state.joining.clone() {
             if now >= at {
@@ -460,7 +460,7 @@ impl LabGame {
                 let instance = state.behaviour.land_in.clone().unwrap_or(instance);
                 drop(state);
                 self.write_join(&world, &instance, if world == LAB_WORLD_A { "Lab World A" } else { "Lab World B" }); // i18n: not shown
-                state = self.state.lock().unwrap();
+                state = self.state.locked();
             }
         }
         if state.recording_until.is_some_and(|t| now >= t) {
@@ -498,11 +498,11 @@ impl LabGame {
 impl Game for LabGame {
     fn seen(&self) -> Seen {
         self.advance();
-        let mut watcher = self.watcher.lock().unwrap();
+        let mut watcher = self.watcher.locked();
         watcher.poll();
         let world = watcher.state.clone();
         drop(watcher);
-        let state = self.state.lock().unwrap();
+        let state = self.state.locked();
         let running = state.pid.is_some();
         let reads = running && !(state.follows_beside && state.beside.is_some());
         let walking = ["/input/MoveForward", "/input/MoveBackward", "/input/MoveLeft", "/input/MoveRight"].iter().any(|a| self.last_value(a) == Some(1.0));
@@ -544,13 +544,13 @@ impl Game for LabGame {
     }
 
     fn camera_open(&self) -> Option<bool> {
-        Some(self.state.lock().unwrap().camera_open)
+        Some(self.state.locked().camera_open)
     }
 
     fn create_private_instance(&self, world: &str, region: &str) -> Result<String, Failure> {
-        let takes = self.state.lock().unwrap().behaviour.create_takes;
+        let takes = self.state.locked().behaviour.create_takes;
         std::thread::sleep(takes);
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         let instance = format!("{}~private({LAB_USER})~region({region})~nonce(lab)", 10_000 + state.instances.len());
         state.instances.push(format!("{world}:{instance}"));
         Ok(instance)
@@ -570,7 +570,7 @@ impl Game for LabGame {
     }
 
     fn launch(&self, plan: &LaunchPlan) -> Result<(), Failure> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         if state.behaviour.launch_fails {
             return Err(Failure::new("start_failed", "VRChat did not start: the lab says no.", "Ask the person to look at the computer.")); // i18n: not shown (an AI client reads it in the tool's answer; the lab is a fake VRChat for tests)
         }
@@ -591,13 +591,13 @@ impl Game for LabGame {
 
     fn adopt(&self, _since: Option<std::time::SystemTime>) -> Option<u32> {
         // The lab's game is one VRChat: a side session's own while it runs from a start with a profile and OSC ports.
-        let state = self.state.lock().unwrap();
+        let state = self.state.locked();
         let plan = state.launches.last()?;
         (plan.profile.is_some_and(|p| p != 0) && plan.osc.is_some()).then_some(state.pid).flatten()
     }
 
     fn send_link(&self, plan: &LaunchPlan) -> Result<(), Failure> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         if state.pid.is_none() || state.behaviour.link_refused {
             return Err(Failure::new("link_pipe_elsewhere", "VRChat's link pipe is another VRChat's.", "It is started in the instance instead.")); // i18n: not shown (the lab)
         }
@@ -614,7 +614,7 @@ impl Game for LabGame {
 
     fn identity(&self, pid: u32) -> super::game::Identity {
         use super::game::Identity;
-        let state = self.state.lock().unwrap();
+        let state = self.state.locked();
         if state.beside == Some(pid) {
             return Identity::Running(600);
         }
@@ -626,7 +626,7 @@ impl Game for LabGame {
     }
 
     fn launch_args(&self, pid: u32) -> Option<Vec<String>> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.locked();
         // Only the process the app follows now, read with its own log: the person's has its own arguments.
         let followed = if state.follows_beside { state.beside.or(state.pid) } else { state.pid.or(state.beside) };
         if followed != Some(pid) {
@@ -639,7 +639,7 @@ impl Game for LabGame {
     }
 
     fn window(&self, pid: u32) -> Option<GameWindow> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         state.windows_asked.push(pid);
         if state.foreign || state.beside == Some(pid) {
             return None;
@@ -653,43 +653,43 @@ impl Game for LabGame {
         #[cfg(not(windows))]
         {
             let window = state.window.as_ref().filter(|w| !w.closed.load(Ordering::Relaxed) && state.pid == Some(pid))?;
-            let (width, height) = *window.size.lock().unwrap();
+            let (width, height) = *window.size.locked();
             Some(GameWindow { handle: 1, width, height })
         }
     }
 
     fn is_foreground(&self, window: &GameWindow) -> bool {
-        self.state.lock().unwrap().foreground || super::win::is_foreground(window.handle)
+        self.state.locked().foreground || super::win::is_foreground(window.handle)
     }
 
     fn bring_forward(&self, _window: &GameWindow) {
         // Never on the person's desktop: a stand-in for Windows saying yes, when the test says it does.
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         state.foreground = state.behaviour.focus_works;
     }
 
     /// The real call on the fake window, which is off every screen and never activated.
     fn resize(&self, window: &GameWindow, width: u32, height: u32) {
-        self.state.lock().unwrap().resizes += 1;
+        self.state.locked().resizes += 1;
         super::win::resize_client(window.handle, width, height);
     }
 
     fn admit_start(&self, _own_running: bool) -> Result<(), Failure> {
-        match self.state.lock().unwrap().behaviour.admit_refused {
+        match self.state.locked().behaviour.admit_refused {
             Some(code) => Err(Failure::new(code, "The lab's shared start says no.", "Wait.").retry_after(1)), // i18n: not shown (the lab is a fake VRChat for tests)
             None => Ok(()),
         }
     }
 
     fn start_ready(&self) -> Option<Duration> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.locked();
         state.closed_at.and_then(|at| (at + state.behaviour.gate_after_close).checked_duration_since(Instant::now()))
     }
 
     fn close(&self, window: &GameWindow) -> Result<(), Failure> {
-        self.state.lock().unwrap().closed_at = Some(Instant::now());
+        self.state.locked().closed_at = Some(Instant::now());
         let (takes, refused, ignored) = {
-            let b = &self.state.lock().unwrap().behaviour;
+            let b = &self.state.locked().behaviour;
             (b.close_takes, b.close_refused, b.close_ignored)
         };
         std::thread::sleep(takes);
@@ -700,12 +700,12 @@ impl Game for LabGame {
             #[cfg(windows)]
             super::win::close_window(window.handle)?;
             #[cfg(not(windows))]
-            if let Some(w) = self.state.lock().unwrap().window.as_ref().filter(|_| window.handle == 1) {
+            if let Some(w) = self.state.locked().window.as_ref().filter(|_| window.handle == 1) {
                 w.closed.store(true, Ordering::Relaxed);
             }
         }
         // Counted once asked for and taken.
-        self.state.lock().unwrap().closes += 1;
+        self.state.locked().closes += 1;
         Ok(())
     }
 
@@ -743,14 +743,14 @@ impl Game for LabGame {
         }
         // VRChat says where its camera is when it moves.
         if address.starts_with("/input/Look") || address.starts_with("/input/Move") {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.locked();
             state.pose_known = state.pose_known || state.camera_open;
         }
         Ok(())
     }
 
     fn wear(&self, avatar_id: &str) -> Result<(), Failure> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         // VRChat only changes to an avatar this account may wear, and says nothing when it may not.
         if avatar_id != AVATAR_NOT_ALLOWED {
             state.worn = Some(avatar_id.to_string());
@@ -764,23 +764,23 @@ impl Game for LabGame {
     }
 
     fn give_back(&self) {
-        self.state.lock().unwrap().behaviour.lent_away = false;
+        self.state.locked().behaviour.lent_away = false;
     }
 
     fn lent_away(&self) -> bool {
-        self.state.lock().unwrap().behaviour.lent_away
+        self.state.locked().behaviour.lent_away
     }
 
     fn capture_kit(&self) -> Option<bool> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.locked();
         state.behaviour.tree_says_kit.then_some(state.behaviour.kit)
     }
 
     fn inject(&self, window: &GameWindow, input: &[Input]) -> Result<(), Failure> {
-        if let Some(sending) = self.sending.lock().unwrap().as_ref() {
+        if let Some(sending) = self.sending.locked().as_ref() {
             sending();
         }
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         if !state.foreground && !super::win::is_foreground(window.handle) {
             return Err(Failure::new("not_foreground", "VRChat is not the foreground window, so no keyboard or mouse input was sent.", "Call focus_game.")); // i18n: not shown (an AI client reads it in the tool's answer; the lab is a fake VRChat for tests)
         }
@@ -814,11 +814,11 @@ impl Game for LabGame {
     }
 
     fn release(&self, input: &[Input]) {
-        self.state.lock().unwrap().released.extend_from_slice(input);
+        self.state.locked().released.extend_from_slice(input);
     }
 
     fn take_picture(&self, length: Photo3dLength, _mode: PictureMode) -> Result<(), Failure> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         if !state.camera_open {
             return Err(Failure::new("camera_closed", "Open the camera before", "This is the lab.")); // i18n: not shown (an AI client reads it in the tool's answer; the lab is a fake VRChat for tests)
         }
@@ -836,13 +836,13 @@ impl Game for LabGame {
     }
 
     fn stop_picture(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         state.recording_until = None;
         state.capture_state = "idle".into();
     }
 
     fn picture_files(&self, session: &Path) -> PictureFiles {
-        let state = self.state.lock().unwrap();
+        let state = self.state.locked();
         let (frames, keyframes) = state.pictures.get(session).copied().unwrap_or_default();
         let done = state.done.iter().any(|d| d == session);
         let failed = state.behaviour.reconstruct_fails.clone();
@@ -850,7 +850,7 @@ impl Game for LabGame {
     }
 
     fn hold_reconstructions(&self, hold: bool) {
-        self.state.lock().unwrap().hold = hold;
+        self.state.locked().hold = hold;
     }
 
     fn favorite_groups(&self) -> Result<Vec<(String, String)>, Failure> {
@@ -858,12 +858,12 @@ impl Game for LabGame {
     }
 
     fn camera_pose(&self) -> Option<[f32; 6]> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.locked();
         state.pose_known.then(|| state.camera_pose.unwrap_or([1.0, 1.5, 2.0, 0.0, 90.0, 0.0]))
     }
 
     fn set_camera_pose(&self, pose: [f32; 6]) -> Result<(), Failure> {
-        self.state.lock().unwrap().camera_pose = Some(pose);
+        self.state.locked().camera_pose = Some(pose);
         Ok(())
     }
 }
@@ -895,7 +895,7 @@ impl LabWindow {
     fn show_menu(window: &GameWindow, open: bool) {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::Graphics::Gdi::{InvalidateRect, UpdateWindow};
-        let mut menus = window::MENU_OPEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut menus = window::MENU_OPEN.locked();
         if open {
             menus.insert(window.handle);
         } else {
@@ -973,7 +973,7 @@ mod window {
                         FillRect(dc, &rect, brush);
                         let _ = DeleteObject(brush.into());
                     }
-                    if MENU_OPEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&(window.0 as isize)) {
+                    if MENU_OPEN.locked().contains(&(window.0 as isize)) {
                         let (x, y) = (CAMERA_ICON.0 as i32, CAMERA_ICON.1 as i32);
                         let panel = RECT { left: 20, top: 20, right: 300, bottom: 240 };
                         let button = RECT { left: x - 40, top: y - 30, right: x + 40, bottom: y + 30 };
@@ -997,7 +997,7 @@ mod window {
                 }
                 WM_DESTROY => {
                     // A handle is used again by a later window, which starts with its menu closed.
-                    MENU_OPEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&(window.0 as isize));
+                    MENU_OPEN.locked().remove(&(window.0 as isize));
                     PostQuitMessage(0);
                     LRESULT(0)
                 }
@@ -1236,7 +1236,7 @@ impl LabFeedback {
     /// Signed in to the development server as `Lab member`.
     pub fn signed_in() -> Arc<Self> {
         let lab = Self::default();
-        lab.state.lock().unwrap().account = Some(FeedbackAccount {
+        lab.state.locked().account = Some(FeedbackAccount {
             server: "http://127.0.0.1:4100/".into(),
             development: true,
             name: Some("Lab member".into()), // i18n: not shown
@@ -1248,15 +1248,15 @@ impl LabFeedback {
 
 impl Feedback for LabFeedback {
     fn account(&self) -> Option<FeedbackAccount> {
-        self.state.lock().unwrap().account.clone()
+        self.state.locked().account.clone()
     }
 
     fn show(&self, world: &str) {
-        self.state.lock().unwrap().shown.push(world.to_string());
+        self.state.locked().shown.push(world.to_string());
     }
 
     fn feedback(&self, world: &str) -> WorldFeedback {
-        let st = self.state.lock().unwrap();
+        let st = self.state.locked();
         WorldFeedback {
             world: world.to_string(),
             loading: st.offline && !st.labels.contains_key(world),
@@ -1269,7 +1269,7 @@ impl Feedback for LabFeedback {
     }
 
     fn ask(&self, ask: FeedbackAsk) {
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.locked();
         st.asks.push(ask.clone());
         let FeedbackAsk::Label { world, label, on, text } = ask else { return };
         st.errors.remove(&world);
@@ -1357,7 +1357,7 @@ impl LabPublish {
 
 impl Publish for LabPublish {
     fn environment(&self) -> EnvironmentSeen {
-        let st = self.state.lock().unwrap();
+        let st = self.state.locked();
         let (server, website) = if st.development { ("http://127.0.0.1:4100/", "https://dev.orbiters.cc/") } else { ("https://api.orbiters.cc/", "https://orbiters.cc/") };
         let here = if st.development { st.signed_in.1 } else { st.signed_in.0 };
         let other = if st.development { st.signed_in.0 } else { st.signed_in.1 };
@@ -1372,7 +1372,7 @@ impl Publish for LabPublish {
     }
 
     fn set_environment(&self, development: bool) -> Result<(), Failure> {
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.locked();
         st.development = development;
         st.switches.push(development);
         Ok(())
@@ -1384,7 +1384,7 @@ impl Publish for LabPublish {
 
     fn publish(&self, session: &Path, world_id: &str, _world_name: &str, public: bool) -> Result<(), Failure> {
         let (development, fails) = {
-            let mut st = self.state.lock().unwrap();
+            let mut st = self.state.locked();
             st.asked.push((session.to_path_buf(), public));
             let development = st.development;
             if let Some(wait) = st.rate_limited {
@@ -1398,7 +1398,7 @@ impl Publish for LabPublish {
         let (state, session, world) = (self.state.clone(), session.to_path_buf(), world_id.to_string());
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(200));
-            let mut st = state.lock().unwrap();
+            let mut st = state.locked();
             let id = st.asked.len() as u64;
             let website = if development { "https://dev.orbiters.cc/" } else { "https://orbiters.cc/" };
             let seen = match fails {
@@ -1416,7 +1416,7 @@ impl Publish for LabPublish {
     }
 
     fn published(&self, session: &Path) -> PublishSeen {
-        let st = self.state.lock().unwrap();
+        let st = self.state.locked();
         match st.published.get(session) {
             Some((development, seen)) if *development == st.development => seen.clone(),
             _ => PublishSeen::None,
@@ -1435,7 +1435,7 @@ impl Publish for LabPublish {
     }
 
     fn disks(&self) -> Vec<DiskSeen> {
-        vec![DiskSeen { drive: "L:".into(), free_gb: self.state.lock().unwrap().free_gb, holds: vec!["pictures", "app"] }]
+        vec![DiskSeen { drive: "L:".into(), free_gb: self.state.locked().free_gb, holds: vec!["pictures", "app"] }]
     }
 }
 
@@ -1496,7 +1496,7 @@ impl LabOpener {
 
     /// The game of the session of `profile`.
     pub fn game_of(&self, profile: u32) -> Option<Arc<LabGame>> {
-        self.games.lock().unwrap().iter().rev().find(|g| g.1 == profile).map(|g| g.2.clone())
+        self.games.locked().iter().rev().find(|g| g.1 == profile).map(|g| g.2.clone())
     }
 }
 
@@ -1505,17 +1505,17 @@ impl super::game::Opener for LabOpener {
         // A VRChat of this profile whose session was forgotten (a start answered failed) still runs: it is the same game, as
         // the real VRChat is the same process.
         {
-            let forgotten = self.forgotten.lock().unwrap().clone();
-            let mut games = self.games.lock().unwrap();
-            if let Some(left) = games.iter_mut().find(|g| g.1 == profile && forgotten.contains(&g.0) && g.2.state.lock().unwrap().pid.is_some()) {
+            let forgotten = self.forgotten.locked().clone();
+            let mut games = self.games.locked();
+            if let Some(left) = games.iter_mut().find(|g| g.1 == profile && forgotten.contains(&g.0) && g.2.state.locked().pid.is_some()) {
                 left.0 = session.to_string();
                 return Ok(left.2.clone());
             }
         }
         let game = LabGame::with_osc_also(&self.root.join(session), None, None);
-        let signed_out = self.signed_out.lock().unwrap().contains(&profile);
-        let (hang, page) = (*self.launches_hang.lock().unwrap(), *self.links_open_page.lock().unwrap());
-        let after = *self.launches_come_up_after.lock().unwrap();
+        let signed_out = self.signed_out.locked().contains(&profile);
+        let (hang, page) = (*self.launches_hang.locked(), *self.links_open_page.locked());
+        let after = *self.launches_come_up_after.locked();
         game.set_behaviour(|b| {
             b.launch_hangs = hang;
             b.comes_up_after = after;
@@ -1523,71 +1523,71 @@ impl super::game::Opener for LabOpener {
             b.needs_sign_in = signed_out;
             b.account = (!signed_out).then(|| (format!("usr_{profile:08}-0000-4000-8000-000000000000"), format!("Lab Profile {profile}"))); // i18n: not shown
         });
-        self.games.lock().unwrap().push((session.to_string(), profile, game.clone()));
-        if let Some(rig) = self.rigs.lock().unwrap().iter().find(|r| r.session == session) {
-            *rig.game.lock().unwrap() = Some(game.clone());
+        self.games.locked().push((session.to_string(), profile, game.clone()));
+        if let Some(rig) = self.rigs.locked().iter().find(|r| r.session == session) {
+            *rig.game.locked() = Some(game.clone());
         }
         Ok(game)
     }
 
     fn forget(&self, session: &str) {
-        self.forgotten.lock().unwrap().push(session.to_string());
+        self.forgotten.locked().push(session.to_string());
     }
 
     fn rename(&self, from: &str, to: &str) {
-        for game in self.games.lock().unwrap().iter_mut().filter(|g| g.0 == from) {
+        for game in self.games.locked().iter_mut().filter(|g| g.0 == from) {
             game.0 = to.to_string();
         }
     }
 
     fn vrchat_pids(&self) -> Vec<u32> {
-        let mut pids: Vec<u32> = self.games.lock().unwrap().iter().filter_map(|g| g.2.state.lock().unwrap().pid).collect();
-        pids.extend(self.persons.lock().unwrap().iter().copied());
+        let mut pids: Vec<u32> = self.games.locked().iter().filter_map(|g| g.2.state.locked().pid).collect();
+        pids.extend(self.persons.locked().iter().copied());
         pids
     }
 
     fn others_profiles(&self) -> Vec<u32> {
         // The person's, and a forgotten session's VRChat still running: no session's mark any more.
-        let forgotten = self.forgotten.lock().unwrap().clone();
-        let mut profiles = self.others.lock().unwrap().clone();
-        let games = self.games.lock().unwrap().clone();
+        let forgotten = self.forgotten.locked().clone();
+        let mut profiles = self.others.locked().clone();
+        let games = self.games.locked().clone();
         for game in games.iter().filter(|g| forgotten.contains(&g.0)) {
             // Time passes for it too: a VRChat of a start answered failed comes up late.
             game.2.advance();
         }
-        profiles.extend(games.iter().filter(|g| forgotten.contains(&g.0) && g.2.state.lock().unwrap().pid.is_some()).map(|g| g.1));
+        profiles.extend(games.iter().filter(|g| forgotten.contains(&g.0) && g.2.state.locked().pid.is_some()).map(|g| g.1));
         profiles
     }
 
     fn eac(&self) -> super::sessions::Eac {
-        self.eac.lock().unwrap().clone()
+        self.eac.locked().clone()
     }
 
     fn memory_free(&self) -> Option<u64> {
-        *self.memory.lock().unwrap()
+        *self.memory.locked()
     }
 
     fn limit(&self) -> usize {
-        *self.limit.lock().unwrap()
+        *self.limit.locked()
     }
 
     fn foreground_pid(&self) -> Option<u32> {
-        *self.foreground.lock().unwrap()
+        *self.foreground.locked()
     }
 
     fn launcher_outcome(&self, _since: std::time::SystemTime) -> Option<(i64, String)> {
-        self.launcher_said.lock().unwrap().clone()
+        self.launcher_said.locked().clone()
     }
 
     fn end_launcher(&self, osc: (u16, u16)) -> usize {
-        self.launchers_ended.lock().unwrap().push(osc);
+        self.launchers_ended.locked().push(osc);
         1
     }
 
     fn vr_rig(&self, session: &str) -> Option<Arc<dyn super::vr::VrRig>> {
-        let busy = self.vr.lock().unwrap().clone()?;
+        let busy = self.vr.locked().clone()?;
         let rig = Arc::new(LabRig { session: session.to_string(), busy, game: Mutex::default(), calls: Mutex::default() });
-        self.rigs.lock().unwrap().push(rig.clone());
+        self.rigs.locked().push(rig.clone());
         Some(rig)
     }
 }
@@ -1603,7 +1603,7 @@ pub struct LabRig {
 
 impl LabRig {
     fn note(&self, call: String) {
-        let mut calls = self.calls.lock().unwrap();
+        let mut calls = self.calls.locked();
         if call != "keep" || calls.last().map(String::as_str) != Some("keep") {
             calls.push(call);
         }
@@ -1625,7 +1625,7 @@ impl super::vr::VrRig for LabRig {
 
     fn camera(&self) -> Result<(), Failure> {
         self.note("camera".into());
-        if let Some(game) = self.game.lock().unwrap().as_ref() {
+        if let Some(game) = self.game.locked().as_ref() {
             game.vr_camera();
         }
         Ok(())
@@ -1634,7 +1634,7 @@ impl super::vr::VrRig for LabRig {
     fn point(&self, pixel: (f64, f64), size: (u32, u32), click: bool) -> Result<(), Failure> {
         self.note(format!("point {} {} {} {} {click}", pixel.0, pixel.1, size.0, size.1)); // i18n: not shown (the lab's record of calls)
         if click {
-            if let Some(game) = self.game.lock().unwrap().as_ref() {
+            if let Some(game) = self.game.locked().as_ref() {
                 game.vr_click();
             }
         }

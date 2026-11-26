@@ -24,7 +24,7 @@ pub fn report_errors(device: &wgpu::Device) {
     device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
         let n = count.fetch_add(1, Ordering::Relaxed);
         if n < 5 || n.is_multiple_of(100) {
-            eprintln!("window GPU error ({}): {e}", n + 1);
+            log_warn!("window GPU error ({}): {e}", n + 1, e = e);
         }
     }));
 }

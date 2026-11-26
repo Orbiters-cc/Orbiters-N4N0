@@ -4,6 +4,8 @@
 //! browser to bring the code of the website's Connect, and trades it for the credential. The credential stays in this
 //! process (the window only sees the account's name and state).
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use super::rest::{sooner, until};
 use super::{Controller, NoticeKind, Shared};
 use crate::state::AccountState;
@@ -109,6 +111,16 @@ impl AccountRuntime {
         self.refused = None;
     }
 
+    /// After a panic with it (`locks::StartsOver`): nobody is installed and who it is is unknown, until the account's file
+    /// is read again. The old generation and any sign-in that was in progress are discarded.
+    pub(super) fn start_over(&mut self) -> u64 {
+        self.signing_in = None;
+        self.unreadable = None;
+        self.unsettled();
+        self.generation = self.generation.saturating_add(1);
+        self.generation
+    }
+
     /// Nobody is installed, and who it is is unknown: no credential is kept for any server.
     fn unsettled(&mut self) {
         self.read = None;
@@ -185,7 +197,7 @@ impl Controller {
         // What the saved account is shows before any window asks (r21): "checking", never "not signed in" while nothing
         // was read yet. Its file only; Orbiters is asked on the thread.
         let server = Server::current();
-        self.account_runtime.lock().unwrap().starting = true;
+        self.account_runtime.locked().starting = true;
         if let Ok(saved) = account::read_saved(server) {
             self.account_saved_at_launch(server, saved);
         }
@@ -201,10 +213,10 @@ impl Controller {
             }
         });
         let ctl = self.clone();
-        let _ = std::thread::Builder::new().name("account".into()).spawn(move || while !ctl.quitting.load(std::sync::atomic::Ordering::Relaxed) {
+        std::thread::Builder::new().name("account".into()).spawn(move || while !ctl.quitting.load(std::sync::atomic::Ordering::Relaxed) {
             ctl.account_tick();
             rest.wait(ctl.account_rests(told));
-        });
+        }).or_log("a thread could not be started");
     }
 
     /// How long until the next look at the account: until something is due by the clock (a file that could not be read, Orbiters
@@ -212,7 +224,7 @@ impl Controller {
     fn account_rests(&self, told: bool) -> Option<Duration> {
         let mut due = (!told).then_some(LOOK_EVERY);
         {
-            let rt = self.account_runtime.lock().unwrap();
+            let rt = self.account_runtime.locked();
             if rt.unknown && rt.unreadable.is_none() {
                 due = sooner(due, Some(LOOK_APART));
             }
@@ -238,7 +250,7 @@ impl Controller {
         let server = Server::current();
         let modified = account::modified(server);
         let (changed, offline_due, refused_due) = {
-            let rt = self.account_runtime.lock().unwrap();
+            let rt = self.account_runtime.locked();
             // One that could not be read: again now and then, or as soon as it changes.
             let waits = rt.unreadable.is_some_and(|(s, m, at)| (s, m) == (server, modified) && at.elapsed() < REREAD);
             (
@@ -255,7 +267,7 @@ impl Controller {
 
     /// What the account's file says at launch, before the account thread installed it.
     pub(super) fn account_saved_at_launch(&self, server: Server, saved: Option<Account>) {
-        self.vrchat_login.lock().unwrap().at_launch = super::vrchat_login::Owner::of(&super::identity::Identity::of(server, saved.as_ref()));
+        self.vrchat_login.locked().at_launch = super::vrchat_login::Owner::of(&super::identity::Identity::of(server, saved.as_ref()));
         self.account_at_launch(server, saved.map(|a| a.username));
     }
 
@@ -319,7 +331,7 @@ impl Controller {
     /// nothing. True when the account left.
     pub(super) fn leave_unless_same(&self, next: Option<(Server, &str)>) -> bool {
         let held = {
-            let rt = self.account_runtime.lock().unwrap();
+            let rt = self.account_runtime.locked();
             rt.account.as_ref().map(|a| (rt.read.map_or_else(Server::current, |(s, _)| s), a.token.clone()))
         };
         let Some((server, token)) = held else { return false };
@@ -341,19 +353,19 @@ impl Controller {
     ) {
         // The generation before the file is read: a sign-out (or a sign-in) between the read and its use makes what was
         // read stale, and it is not installed (verify-controller, C-7).
-        let before = self.account_runtime.lock().unwrap().generation;
+        let before = self.account_runtime.locked().generation;
         let saved = match read() {
             Ok(saved) => saved,
             // Could not be read (another tool may be writing it): whose it is is not known, and it is tried again soon. On the
             // environment it was last read for, the account installed stays with its own server (a call goes on), but is
             // nobody's for N4N0 until it is read; on any other (the environment was switched), nobody is signed in.
             Err(e) => {
-                eprintln!("account file: {e:#}");
+                log_warn!("account file: {e:#}", e = e);
                 let stays = {
-                    let rt = self.account_runtime.lock().unwrap();
+                    let rt = self.account_runtime.locked();
                     rt.generation == before && rt.account.is_some() && rt.read.is_some_and(|(s, _)| s == server)
                 };
-                if !stays && self.account_runtime.lock().unwrap().generation == before {
+                if !stays && self.account_runtime.locked().generation == before {
                     self.leave_unless_same(None);
                 }
                 let generation = self.install_account(|rt| {
@@ -389,7 +401,7 @@ impl Controller {
         };
         // Another account, another environment, or nobody: the account installed now leaves before the new one is put in
         // its place (and before "Checking" shows its name).
-        if self.account_runtime.lock().unwrap().generation == before {
+        if self.account_runtime.locked().generation == before {
             self.leave_unless_same(saved.as_ref().map(|a| (server, a.token.as_str())));
         }
         let installed = self.install_account(|rt| {
@@ -460,7 +472,7 @@ impl Controller {
                     AccountState::Expired { username: saved.username.clone() }
                 }
                 Err(e) => {
-                    eprintln!("account check: {e:#}");
+                    log_warn!("account check: {e:#}", e = e);
                     rt.offline_since = Some(Instant::now());
                     AccountState::Offline { username: saved.username.clone() }
                 }
@@ -507,9 +519,9 @@ impl Controller {
 
     /// [`Controller::sign_in`] through `api`, `server`'s (tests: a stand-in for Orbiters).
     fn sign_in_with(self: &Shared, server: Server, api: Api) -> anyhow::Result<()> {
-        let shown = self.snapshot.lock().unwrap().account.state.clone();
+        let shown = self.snapshot.locked().account.state.clone();
         let (generation, before) = {
-            let mut rt = self.account_runtime.lock().unwrap();
+            let mut rt = self.account_runtime.locked();
             rt.generation += 1;
             self.account_generation.store(rt.generation, std::sync::atomic::Ordering::SeqCst);
             // The one waiting before goes (its listener with it); what the account showed before it comes back at the
@@ -538,7 +550,7 @@ impl Controller {
             Ok(started) => started,
             Err(e) => {
                 // Unless a newer sign-in or a sign-out came meanwhile, the account shows what it did before.
-                let mut rt = self.account_runtime.lock().unwrap();
+                let mut rt = self.account_runtime.locked();
                 if rt.generation == generation {
                     self.check_restored_account(&mut rt, &before);
                     drop(rt);
@@ -549,7 +561,7 @@ impl Controller {
         };
         let stop = Arc::new(AtomicBool::new(false));
         {
-            let mut rt = self.account_runtime.lock().unwrap();
+            let mut rt = self.account_runtime.locked();
             if rt.generation != generation {
                 // Cancelled while Orbiters answered.
                 return Ok(());
@@ -574,7 +586,7 @@ impl Controller {
             let exchange = api.exchange_link(&link.exchange_token, code);
             // The account signed in before leaves first, before B is installed (unless this sign-in was cancelled).
             if let Exchange::Done(account) = &exchange {
-                if self.account_runtime.lock().unwrap().generation == generation {
+                if self.account_runtime.locked().generation == generation {
                     self.leave_unless_same(Some((server, account.token.as_str())));
                 }
             }
@@ -606,7 +618,7 @@ impl Controller {
                 }
                 return answer;
             }
-            let mut rt = self.account_runtime.lock().unwrap();
+            let mut rt = self.account_runtime.locked();
             if rt.generation != generation {
                 return cancelled();
             }
@@ -641,7 +653,7 @@ impl Controller {
             answer
         });
         if served == Served::TimedOut {
-            let mut rt = self.account_runtime.lock().unwrap();
+            let mut rt = self.account_runtime.locked();
             if rt.signing_in.as_ref().is_some_and(|s| s.generation == generation) {
                 let before = rt.signing_in.take().map(|s| s.before.clone());
                 before.iter().for_each(|b| self.check_restored_account(&mut rt, b));
@@ -656,7 +668,7 @@ impl Controller {
 
     /// Opens the sign-in page again (closed by mistake).
     pub fn reopen_sign_in(&self) -> anyhow::Result<()> {
-        let link = self.account_runtime.lock().unwrap().signing_in.as_ref().map(|s| (s.server, s.link_url.clone()));
+        let link = self.account_runtime.locked().signing_in.as_ref().map(|s| (s.server, s.link_url.clone()));
         match link {
             Some((server, url)) if server.is_website_page(&url) => open_url(&url),
             _ => Ok(()),
@@ -666,7 +678,7 @@ impl Controller {
     /// Stops waiting for the browser: the listener closes, and the account shows what it did before.
     pub fn cancel_sign_in(&self) {
         let before = {
-            let mut rt = self.account_runtime.lock().unwrap();
+            let mut rt = self.account_runtime.locked();
             rt.generation += 1;
             self.account_generation.store(rt.generation, std::sync::atomic::Ordering::SeqCst);
             let before = rt.signing_in.take().map(|s| s.before.clone()).unwrap_or_else(|| rt.resting());
@@ -685,7 +697,7 @@ impl Controller {
     pub fn sign_out(&self) -> anyhow::Result<()> {
         let server = Server::current();
         self.sign_out_with(server, || {
-            let _file = ACCOUNT_FILE.lock().unwrap_or_else(|e| e.into_inner());
+            let _file = ACCOUNT_FILE.locked();
             account::remove(server)
         })
     }
@@ -702,8 +714,8 @@ impl Controller {
         save: impl FnOnce(&Account) -> anyhow::Result<()>,
         modified: impl Fn() -> Option<SystemTime>,
     ) {
-        let _file = ACCOUNT_FILE.lock().unwrap_or_else(|e| e.into_inner());
-        if self.account_runtime.lock().unwrap().generation != generation {
+        let _file = ACCOUNT_FILE.locked();
+        if self.account_runtime.locked().generation != generation {
             return;
         }
         let was = modified();
@@ -716,7 +728,7 @@ impl Controller {
             return;
         }
         if let Err(e) = save(account) {
-            eprintln!("account file: {e:#}");
+            log_warn!("account file: {e:#}", e = e);
             return;
         }
         // What the file holds is what was written here, or it is read again as the change it is.
@@ -724,7 +736,7 @@ impl Controller {
         if !matches!(read(), Ok(Some(held)) if held.token == account.token && held.user == account.user) || modified() != written {
             return;
         }
-        let mut rt = self.account_runtime.lock().unwrap();
+        let mut rt = self.account_runtime.locked();
         // Not a change to read again: it is what was written here.
         if rt.generation == generation && rt.read.is_some_and(|(s, _)| s == server) {
             rt.read = Some((server, written));
@@ -754,7 +766,7 @@ impl Controller {
 
     /// The API and credential when an account is saved; the outer `None` until the saved account was read at all.
     pub(super) fn language_account(&self) -> Option<Option<(Api, String)>> {
-        let rt = self.account_runtime.lock().unwrap();
+        let rt = self.account_runtime.locked();
         let (server, _) = rt.read?;
         Some(rt.account.as_ref().map(|a| (Api::new(server), a.token.clone())))
     }
@@ -763,7 +775,7 @@ impl Controller {
     /// The server, the account's id and the API with its credential, read together (what a send goes as and the list
     /// it was taken from are the same account).
     pub(super) fn account_with_api(&self) -> Option<(Server, Option<String>, Api, String)> {
-        let rt = self.account_runtime.lock().unwrap();
+        let rt = self.account_runtime.locked();
         let (server, _) = rt.read?;
         rt.account.as_ref().map(|a| (server, a.user.clone(), Api::new(server), a.token.clone()))
     }
@@ -777,7 +789,7 @@ impl Controller {
     }
 
     pub(super) fn feedback_account(&self) -> Option<(Server, Option<String>, Option<String>)> {
-        let rt = self.account_runtime.lock().unwrap();
+        let rt = self.account_runtime.locked();
         let (server, _) = rt.read?;
         rt.account.as_ref().map(|a| (server, a.username.clone(), a.user.clone()))
     }
@@ -789,7 +801,7 @@ impl Controller {
         if !matches!(self.view().account.state, AccountState::SignedIn { .. }) {
             return None;
         }
-        let rt = self.account_runtime.lock().unwrap();
+        let rt = self.account_runtime.locked();
         let (server, _) = rt.read?;
         let a = rt.account.as_ref()?;
         let account = a.user.clone().filter(|u| !u.trim().is_empty()).or_else(|| a.username.as_ref().map(|n| format!("name:{}", n.trim().to_lowercase())))?;
@@ -804,7 +816,7 @@ impl Controller {
 
     /// The API and credential for calls to Orbiters, when an account is saved (checked or not).
     pub fn account_api(&self) -> Option<(Api, String)> {
-        let rt = self.account_runtime.lock().unwrap();
+        let rt = self.account_runtime.locked();
         let (server, _) = rt.read?;
         rt.account.as_ref().map(|a| (Api::new(server), a.token.clone()))
     }
@@ -812,7 +824,7 @@ impl Controller {
     /// [`Self::account_api`] with whom it is for (read together, so the two agree): the server's API address and the
     /// account's id (a digest of its credential when the account file names no id; none when nobody is signed in).
     pub(super) fn account_api_for(&self) -> (Option<(Api, String)>, orbiters_core::world_feedback::Stamp) {
-        let rt = self.account_runtime.lock().unwrap();
+        let rt = self.account_runtime.locked();
         // The environment chosen now; the account read only when it was read for that environment (just after a switch
         // the account thread may still hold the other one's: nobody, then, rather than the other server's account).
         let server = Server::current();
@@ -831,6 +843,29 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// XCT-31's named exception: whose credential it is is never half changed. A panic with it starts it over, as before the
+    /// account's file is read, and the next one read is installed as any other.
+    #[test]
+    fn a_panic_with_the_account_held_leaves_no_half_of_one() {
+        let ctl = Controller::new(orbiters_core::settings::Settings::default());
+        ctl.sign_in_for_test("1");
+        assert!(ctl.account_api().is_some());
+        let generation = ctl.account_generation.load(Ordering::SeqCst);
+        let c = ctl.clone();
+        let panicked = std::thread::spawn(move || {
+            let mut rt = c.account_runtime.locked();
+            rt.account.as_mut().unwrap().token = "orbit-test-another".into();
+            panic!("between the credential and whose it is, on purpose");
+        });
+        assert!(panicked.join().is_err());
+        assert!(ctl.account_api().is_none(), "nobody's credential goes out");
+        assert_eq!(ctl.signed_as(), orbiters_n4n0::status::SignedAs::Unknown);
+        assert!(!ctl.commit_account_check(generation, AccountState::SignedIn { username: "previous".into() }));
+        assert!(ctl.account_runtime.locked().read.is_none(), "read again at the next look");
+        ctl.install_account(|rt| rt.settled(Server::current(), None, Some(Account { token: "orbit-test-1".into(), user: Some("1".into()), username: None, avatar_url: None, features: None })));
+        assert_eq!(ctl.signed_as(), orbiters_n4n0::status::SignedAs::Member);
+    }
     use crate::controller::Controller;
     use orbiters_core::settings::Settings;
     use std::io::{Read, Write};

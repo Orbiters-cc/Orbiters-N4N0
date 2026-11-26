@@ -15,6 +15,8 @@
 //!
 //! [`Request::Instance`]: crate::controller::vrchat_data::Request::Instance
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use super::destinations::{joinable_without_asking, kind_access, kinds, rejoinable, Places, Tone};
 use super::selection::{Asker, Destination, Offer, Origin, Outcome, Verified};
 use super::{access_icon, access_name, cover_uv, region_tag, Cx, State};
@@ -142,7 +144,7 @@ impl Previous {
 
     /// Pictures of the page and tests: the history's instances handed in (nothing read), the sheet up with `query`.
     pub fn stand_in(&mut self, rows: Vec<Visit>, query: &str) {
-        self.history.lock().unwrap_or_else(|e| e.into_inner()).rows = Some(rows.into());
+        self.history.locked().rows = Some(rows.into());
         self.staged = true;
         self.quiet = true;
         self.query = query.into();
@@ -173,7 +175,7 @@ impl Previous {
         self.query.clear();
         if !self.staged {
             // Read again (it changes as VRChat runs), unless a read is under way: its rows come.
-            let mut h = self.history.lock().unwrap_or_else(|e| e.into_inner());
+            let mut h = self.history.locked();
             if !h.reading {
                 h.rows = None;
             }
@@ -388,7 +390,7 @@ pub(super) fn check(state: &mut State, cx: &Cx, play: Option<LaunchMode>) {
     // A read into memory (whether VRChat says the instance is open): nothing of the window's work, unless Play waits for
     // it: the window does not rest to the tray in the middle of that.
     let working = play.map(|_| crate::pages::Working::begin());
-    let _ = std::thread::Builder::new().name("where-previous-open".into()).spawn(move || {
+    std::thread::Builder::new().name("where-previous-open".into()).spawn(move || {
         let _working = working;
         let (world, instance) = (ticket.visit.world_id.clone(), ticket.visit.instance.clone());
         #[cfg(test)]
@@ -401,7 +403,7 @@ pub(super) fn check(state: &mut State, cx: &Cx, play: Option<LaunchMode>) {
         if let Some(ctx) = ctx {
             anim::wake(&ctx);
         }
-    });
+    }).or_log("a thread could not be started");
 }
 
 /// What VRChat said of an instance asked about at `asked`, and when it said so: the service may hand on an answer it kept,
@@ -485,7 +487,7 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     };
     if let (false, Some(reader)) = (state.places.previous.staged, reader) {
         let start = {
-            let mut h = state.places.previous.history.lock().unwrap_or_else(|e| e.into_inner());
+            let mut h = state.places.previous.history.locked();
             let start = h.rows.is_none() && !h.reading;
             h.reading |= start;
             start
@@ -494,14 +496,14 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
             let (history, ctx2) = (state.places.previous.history.clone(), ctx.clone());
             let started = std::thread::Builder::new().name("where-previous-history".into()).spawn(move || {
                 let rows = reader();
-                let mut h = history.lock().unwrap_or_else(|e| e.into_inner());
+                let mut h = history.locked();
                 h.rows = Some(rows.into());
                 h.reading = false;
                 drop(h);
                 anim::wake(&ctx2);
             });
             if started.is_err() {
-                let mut h = state.places.previous.history.lock().unwrap_or_else(|e| e.into_inner());
+                let mut h = state.places.previous.history.locked();
                 h.rows = Some(Vec::new().into());
                 h.reading = false;
             }
@@ -530,7 +532,7 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     // The head: its name, what it is, and close.
     let p = panel.painter().clone();
     widgets::text(&p, pos2(inner.left(), inner.top() + 14.0), Align2::LEFT_CENTER, &Txt::new(tr("Previous instances"), 20.0).weight(weight::SEMIBOLD).tracking(-0.01));
-    let rows = state.places.previous.history.lock().unwrap_or_else(|e| e.into_inner()).rows.clone();
+    let rows = state.places.previous.history.locked().rows.clone();
     let sub = match &rows {
         Some(rows) if !rows.is_empty() => tr_n("{count} instance you were in, newest first", "{count} instances you were in, newest first", rows.len() as u64),
         _ => tr("Instances you were in").into(),

@@ -3,6 +3,8 @@
 //! For a trial: what it shares with its original, what to do in Creator Companion while it waits, then Open in Unity 6
 //! and what each opening showed. Calm and factual: VRChat's Unity 6 SDK is a beta with no announced end for Unity 2022.
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use orbiters_i18n::tr;
 use super::art;
 use super::state::State;
@@ -526,7 +528,7 @@ pub(super) fn vcc_steps(ui: &mut Ui, state: &mut State, trial: &Path, target: &t
     match buttons(ui, &list, false) {
         Some(0) => ctx.copy_text(trial.display().to_string()),
         Some(1) => {
-            let _ = orbiters_projects::reveal(trial);
+            orbiters_projects::reveal(trial).or_log("a folder could not be shown");
         }
         Some(2) => {
             state.u6.vccs = None;
@@ -595,7 +597,7 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
         match buttons(ui, &list, false) {
             Some(0) => state.open(&ctx, job.unity6().path.clone()),
             Some(1) => {
-                let _ = orbiters_projects::reveal(&job.trial.path);
+                orbiters_projects::reveal(&job.trial.path).or_log("a folder could not be shown");
             }
             _ => {}
         }
@@ -685,7 +687,7 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
                 let log = last.log.clone();
                 let written = !matches!(state.u6.outcomes.get(&(job.id.clone(), last.n)), None | Some(outcome::Outcome::Undetermined { why: outcome::Unknown::NoLog, .. }));
                 if buttons(ui, &[(tr("Show the last log"), icons::FOLDER_OPEN, written, "log")], false).is_some() {
-                    let _ = orbiters_projects::reveal(&log);
+                    orbiters_projects::reveal(&log).or_log("a folder could not be shown");
                 }
             }
         }
@@ -711,7 +713,7 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
             }
         }
         Some(1) => {
-            let _ = orbiters_projects::reveal(&job.unity6().path);
+            orbiters_projects::reveal(&job.unity6().path).or_log("a folder could not be shown");
         }
         Some(2) => {
             let id = job.id.clone();
@@ -778,12 +780,12 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
         inner.spacing_mut().item_spacing = vec2(0.0, 8.0);
         let bg = ui.painter().add(egui::Shape::Noop);
         // What this window does with it now, if it does: its Stop and its progress.
-        let run = state.u6.run.as_ref().filter(|r| r.recorded.lock().unwrap().as_deref() == Some(job.id.as_str())).map(|r| (r.cancel.clone(), r.progress.clone()));
+        let run = state.u6.run.as_ref().filter(|r| r.recorded.locked().as_deref() == Some(job.id.as_str())).map(|r| (r.cancel.clone(), r.progress.clone()));
         let finishing = state.u6.finishing.as_ref().filter(|f| f.0 == job.id && state.u6.busy().is_some()).map(|f| (f.1.clone(), f.2.clone()));
         let mine = run.or(finishing);
         let (glyph, tint, text) = match &status {
             trial::Status::Running => {
-                match mine.as_ref().map(|(_, p)| p.lock().unwrap().clone()) {
+                match mine.as_ref().map(|(_, p)| p.locked().clone()) {
                     Some(p) => {
                         let pct = if p.total > 0 { format!(" · {:.0}%", 100.0 * p.copied as f32 / p.total as f32) } else { String::new() };
                         (icons::CIRCLE_NOTCH, theme::accent(), format!("{}{pct}", super::unity6::phase_label(&p.phase)))
@@ -850,7 +852,7 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
                 }
             }
             Some("reveal") => {
-                let _ = orbiters_projects::reveal(&job.trial.path);
+                orbiters_projects::reveal(&job.trial.path).or_log("a folder could not be shown");
             }
             // Its folder stays, and stays known.
             Some("forget") => state.u6.act(&ctx, tr("Taking it off…"), move || {
@@ -925,7 +927,7 @@ pub(super) fn copy_rows(ui: &mut Ui, state: &mut State) {
                 Ok(tr!("The copy at {path} is listed.", path = at.display()))
             }),
             Some("reveal") => {
-                let _ = orbiters_projects::reveal(&copy.destination);
+                orbiters_projects::reveal(&copy.destination).or_log("a folder could not be shown");
             }
             Some("ask") => state.u6.deleting = Some(id),
             Some("keep") => state.u6.deleting = None,

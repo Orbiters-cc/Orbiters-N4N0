@@ -6,6 +6,7 @@
 //! Publishing runs here, not through `Controller::capture_share`: that one tells the person of every share with a notice,
 //! and a tour publishes hundreds while nobody watches. The library and the Map explorer are refreshed after each all the same.
 
+use orbiters_core::locks::*;
 use super::{Controller, Shared};
 use crate::bridge::game::{DiskSeen, EnvironmentSeen, Failure, PublishSeen};
 use orbiters_core::account::{self, Server};
@@ -55,7 +56,7 @@ impl Pacer {
 
     /// Seconds Orbiters still asked to wait, in that environment.
     fn wait_s(&self, server: Server) -> Option<u64> {
-        let until = self.hold.lock().unwrap().iter().find(|(s, _)| *s == server)?.1;
+        let until = self.hold.locked().iter().find(|(s, _)| *s == server)?.1;
         let left = until.saturating_duration_since(Instant::now());
         (!left.is_zero()).then(|| left.as_secs().max(1))
     }
@@ -63,14 +64,14 @@ impl Pacer {
     /// Queued: published in its turn. A picture already queued or under way is not queued twice.
     fn add(self: &Arc<Self>, job: Job) {
         {
-            let mut jobs = self.jobs.lock().unwrap();
+            let mut jobs = self.jobs.locked();
             if matches!(jobs.get(&job.dir), Some((_, PublishSeen::Running { .. } | PublishSeen::RateLimited { .. }))) {
                 return;
             }
             jobs.insert(job.dir.clone(), (job.server, stage(super::shares::Stage::Waiting)));
         }
-        self.queue.lock().unwrap().push_back(job);
-        let mut working = self.working.lock().unwrap();
+        self.queue.locked().push_back(job);
+        let mut working = self.working.locked();
         if !*working {
             *working = true;
             let me = self.clone();
@@ -83,45 +84,45 @@ impl Pacer {
     fn work(self: Arc<Self>) {
         loop {
             let job = {
-                let mut queue = self.queue.lock().unwrap();
+                let mut queue = self.queue.locked();
                 match queue.pop_front() {
                     Some(job) => job,
                     None => {
-                        *self.working.lock().unwrap() = false;
+                        *self.working.locked() = false;
                         return;
                     }
                 }
             };
             // Orbiters asked to wait: nothing goes until then.
             if let Some(wait) = self.wait_s(job.server) {
-                self.queue.lock().unwrap().push_front(job);
+                self.queue.locked().push_front(job);
                 std::thread::sleep(Duration::from_secs(wait.min(5)));
                 continue;
             }
             let (jobs, dir, server) = (&self.jobs, job.dir.clone(), job.server);
             let report = |s: super::shares::Stage| {
-                jobs.lock().unwrap().insert(dir.clone(), (server, stage(s)));
+                jobs.locked().insert(dir.clone(), (server, stage(s)));
             };
             let request = shares::Share { public: job.public, recipients: Vec::new(), acknowledge_explicit: false, message: String::new() };
             let explicit = job.public && job.entry.content.explicit;
             match (self.share)(job.whose.as_ref(), job.entry.clone(), request, &report) {
                 Ok(shares::Shared::Item { item, .. }) => {
-                    self.jobs.lock().unwrap().insert(dir, (server, done(server, &item)));
+                    self.jobs.locked().insert(dir, (server, done(server, &item)));
                 }
                 Ok(_) => {
-                    self.jobs.lock().unwrap().insert(dir, (server, PublishSeen::Failed { message: "Orbiters answered with a share request, not the item.".into(), explicit: false })); // i18n: not shown (an AI client reads it)
+                    self.jobs.locked().insert(dir, (server, PublishSeen::Failed { message: "Orbiters answered with a share request, not the item.".into(), explicit: false })); // i18n: not shown (an AI client reads it)
                 }
                 Err(e) => match e.downcast_ref::<shares::RateLimited>() {
                     Some(limited) => {
-                        let mut hold = self.hold.lock().unwrap();
+                        let mut hold = self.hold.locked();
                         hold.retain(|(s, _)| *s != server);
                         hold.push((server, Instant::now() + Duration::from_secs(limited.retry_after_s)));
                         drop(hold);
-                        self.jobs.lock().unwrap().insert(dir, (server, PublishSeen::RateLimited { retry_after_s: limited.retry_after_s, ahead: 0 }));
-                        self.queue.lock().unwrap().push_front(job);
+                        self.jobs.locked().insert(dir, (server, PublishSeen::RateLimited { retry_after_s: limited.retry_after_s, ahead: 0 }));
+                        self.queue.locked().push_front(job);
                     }
                     None => {
-                        self.jobs.lock().unwrap().insert(dir, (server, PublishSeen::Failed { message: format!("{e:#}"), explicit }));
+                        self.jobs.locked().insert(dir, (server, PublishSeen::Failed { message: format!("{e:#}"), explicit }));
                     }
                 },
             }
@@ -131,8 +132,8 @@ impl Pacer {
 
     /// Where a picture publishing from here stands, a wait said with the seconds left now and its place in the queue.
     fn seen(&self, dir: &Path) -> Option<(Server, PublishSeen)> {
-        let (server, seen) = self.jobs.lock().unwrap().get(dir).cloned()?;
-        let queued = self.queue.lock().unwrap().iter().filter(|j| j.server == server).position(|j| j.dir == dir);
+        let (server, seen) = self.jobs.locked().get(dir).cloned()?;
+        let queued = self.queue.locked().iter().filter(|j| j.server == server).position(|j| j.dir == dir);
         match (self.wait_s(server), queued, seen) {
             (Some(wait), Some(ahead), PublishSeen::Running { .. } | PublishSeen::RateLimited { .. }) => Some((server, PublishSeen::RateLimited { retry_after_s: wait, ahead })),
             (None, Some(_), PublishSeen::RateLimited { .. }) => Some((server, stage(super::shares::Stage::Waiting))),

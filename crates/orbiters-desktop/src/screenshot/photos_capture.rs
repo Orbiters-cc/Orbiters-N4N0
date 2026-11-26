@@ -25,9 +25,9 @@ fn snapshot_of(scenarios: &[Scenario], name: &str) -> crate::state::Snapshot {
     scenarios.iter().find(|s| s.name == name).map(|s| s.snapshot.clone()).unwrap_or_else(|| scenarios[0].snapshot.clone())
 }
 
-/// The made-up pictures' folder (the layouts' own, written once to the temporary folder).
+/// The made-up pictures' folder (the layouts' own, written once).
 fn fixture() -> std::path::PathBuf {
-    std::env::temp_dir().join("orbiters-gallery-fixture")
+    orbiters_core::paths::stand_ins().join("gallery-fixture")
 }
 
 pub(super) fn append(scenarios: &mut Vec<Scenario>) {

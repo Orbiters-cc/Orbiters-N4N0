@@ -5,6 +5,7 @@
 //! The window never waits for the integrated GPU: a view asked for while a frame is drawn replaces the one asked
 //! before, and the window shows the last frame until the next is there.
 
+use orbiters_core::locks::*;
 use super::splats::{Blit, BACKGROUND, REDRAW_CHECKS};
 use eframe::egui_wgpu::{self, wgpu};
 use orbiters_reconstruct::camera::Camera;
@@ -68,7 +69,7 @@ pub struct Latest(Arc<Mutex<Option<Shown>>>);
 impl Latest {
     /// The texture, its size and how many frames it has shown.
     pub fn get(&self) -> Option<(wgpu::TextureView, (u32, u32), u64)> {
-        let s = self.0.lock().ok()?;
+        let s = self.0.locked();
         s.as_ref().map(|s| (s.texture.create_view(&Default::default()), s.size, s.frames))
     }
 }
@@ -95,7 +96,7 @@ impl Worker {
     pub fn ask(&mut self, request: Request) {
         if self.last != Some(request) {
             self.last = Some(request);
-            self.shared.state.lock().unwrap().asked = Some(request);
+            self.shared.state.locked().asked = Some(request);
             self.shared.wake.notify_one();
         }
     }
@@ -105,7 +106,7 @@ impl Worker {
     pub fn set_marks(&mut self, version: u64, marks: Arc<Vec<u8>>) {
         if self.marks != version {
             self.marks = version;
-            self.shared.state.lock().unwrap().marks = Some(marks);
+            self.shared.state.locked().marks = Some(marks);
         }
     }
 
@@ -116,12 +117,12 @@ impl Worker {
 
     /// Why the last view could not be drawn.
     pub fn error(&self) -> Option<String> {
-        self.shared.state.lock().unwrap().error.clone()
+        self.shared.state.locked().error.clone()
     }
 
     /// The auto focus's distance under the probe of the last frame that had one.
     pub fn focus(&self) -> Option<f32> {
-        self.shared.state.lock().unwrap().focus
+        self.shared.state.locked().focus
     }
 
     /// The paint callback that shows the last frame.
@@ -138,7 +139,7 @@ impl Worker {
 impl Drop for Worker {
     /// The thread ends after the frame it may be drawing (not waited for: the window carries on).
     fn drop(&mut self) {
-        self.shared.state.lock().unwrap().quit = true;
+        self.shared.state.locked().quit = true;
         self.shared.wake.notify_one();
     }
 }
@@ -151,7 +152,7 @@ fn run(shared: &Shared, ctx: &egui::Context, mut gpu: Gpu, device: &wgpu::Device
     let mut checks = 0u8;
     loop {
         let (asked, marks) = {
-            let mut s = shared.state.lock().unwrap();
+            let mut s = shared.state.locked();
             let asked = loop {
                 if s.quit {
                     return;
@@ -160,10 +161,10 @@ fn run(shared: &Shared, ctx: &egui::Context, mut gpu: Gpu, device: &wgpu::Device
                     break Some(r);
                 }
                 if checks == 0 {
-                    s = shared.wake.wait(s).unwrap();
+                    s = shared.wake.wait_locked(s);
                     continue;
                 }
-                s = shared.wake.wait_timeout(s, Duration::from_millis(16)).unwrap().0;
+                s = shared.wake.wait_timeout_locked(s, Duration::from_millis(16)).0;
                 if s.asked.is_none() && !s.quit {
                     break None;
                 }
@@ -205,7 +206,7 @@ fn run(shared: &Shared, ctx: &egui::Context, mut gpu: Gpu, device: &wgpu::Device
         // Its probe came back with the frame (the read waited for the GPU).
         let focus = if request.probe.is_some() { gpu.probed() } else { None };
         {
-            let mut s = shared.state.lock().unwrap();
+            let mut s = shared.state.locked();
             if focus.is_some() {
                 s.focus = focus;
             }
@@ -306,8 +307,8 @@ impl egui_wgpu::CallbackTrait for FrameCallback {
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         let Some(blit) = Blit::of(device, resources) else { return Vec::new() };
-        let Some(frame) = self.shared.state.lock().unwrap().frame.take() else { return Vec::new() };
-        let mut shown = self.shown.lock().unwrap();
+        let Some(frame) = self.shared.state.locked().frame.take() else { return Vec::new() };
+        let mut shown = self.shown.locked();
         let (w, h) = frame.size;
         if shown.as_ref().is_none_or(|s| s.size != frame.size) {
             let texture = device.create_texture(&wgpu::TextureDescriptor {

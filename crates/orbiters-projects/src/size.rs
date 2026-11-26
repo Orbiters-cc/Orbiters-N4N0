@@ -3,6 +3,7 @@
 //! (`Orbiters/project-sizes.json`) with what it was measured against: the modification times of the folders a change
 //! of size shows in (the project's own, Assets, Packages, ProjectSettings and Library, which Unity touches each time
 //! it opens the project). A project whose stamp is the same, measured less than a day ago, is not walked again.
+use orbiters_core::locks::*;
 use crate::discovery;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -72,7 +73,7 @@ pub fn lookup(project: &Path) -> Lookup {
 }
 
 fn lookup_in(file: &Path, project: &Path, now: u64) -> Lookup {
-    let _one = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = CACHE.locked();
     match read(file).remove(&discovery::key(project)) {
         Some(e) => Lookup { size: Some(e.size), fresh: e.stamp == stamp(project) && now.saturating_sub(e.measured) < FRESH_SECS },
         None => Lookup::default(),
@@ -90,7 +91,7 @@ fn measure_in(file: &Path, project: &Path, cancel: &AtomicBool, now: u64) -> any
     // Stamped before the walk: a change while it runs makes the answer stale, not the next one wrong.
     let stamp = stamp(project);
     let size = walk(project, cancel)?;
-    let _one = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = CACHE.locked();
     let mut all = read(file);
     all.insert(discovery::key(project), Entry { stamp, measured: now, size });
     // A cache that cannot be written only means walking again next time.

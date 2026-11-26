@@ -9,6 +9,7 @@
 //! downloaded at its full size into the app's cache first ([`fetch`]); its copy goes into VRChat's pictures folder,
 //! in the month it was taken, with its world and time as VRChat writes them, so Photos & captures lists it there.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_ui::photo::{Edit, Rgba8, SourceStack};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -332,11 +333,11 @@ fn get_link(api: &orbiters_core::account::Api, url: &str) -> anyhow::Result<Vec<
 pub fn seed(source: &Source, from: &Path) {
     if source.remote.is_some() && !source.picture.is_file() && from.is_file() {
         if let Some(dir) = source.picture.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            std::fs::create_dir_all(dir).or_log("a folder could not be made");
         }
         let temp = source.picture.with_extension("seeding");
         if std::fs::copy(from, &temp).is_ok() {
-            let _ = std::fs::rename(&temp, &source.picture);
+            std::fs::rename(&temp, &source.picture).or_log("a file could not be moved or copied");
         }
     }
 }

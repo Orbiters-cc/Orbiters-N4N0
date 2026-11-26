@@ -2,6 +2,7 @@
 //! databases are opened read-only while they run). N4N0's calls use them (contracts `Docs/n4n0-calls.md`): the account is
 //! offered for the verified link, the friends are matched on Orbiters as hashes. Nothing here signs in to VRChat.
 
+use crate::locks::*;
 use orbiters_i18n::tr;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -106,8 +107,7 @@ fn last_pictures_stamped(
     // The primary key's largest value: one look at the index's end, not a scan.
     let newest: Option<i64> = db.query_row(&format!("SELECT MAX(id) FROM \"{table}\""), [], |r| r.get(0)).ok()?; // i18n: not shown (SQL)
     if let Some((.., pictures)) = KEPT
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .locked()
         .iter()
         .find(|(p, a, s, n, at, _)| p == path && a == account && *s == stamps && *n == newest && at.elapsed() < PICTURES_KEPT)
     {
@@ -131,7 +131,7 @@ fn last_pictures_stamped(
         }
     }
     let pictures = std::sync::Arc::new(pictures);
-    let mut kept = KEPT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut kept = KEPT.locked();
     kept.retain(|(p, a, ..)| !(p == path && a == account));
     kept.push((path.to_path_buf(), account.to_string(), stamps, newest, std::time::Instant::now(), pictures.clone()));
     if kept.len() > 4 {

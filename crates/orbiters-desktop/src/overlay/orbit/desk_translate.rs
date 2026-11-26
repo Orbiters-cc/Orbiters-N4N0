@@ -11,6 +11,8 @@
 //! looks at a few small patches of the window ten times a second ([`Signature`]); when they change the translations go at once, and come back from a new look as
 //! soon as the view is still. While one of VRChat's menus or ours is up they go too, and reading waits (VR does the same), as the menus cover the view.
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use super::desktop::{client_in_frame, Gpu, PanelWindow};
 use crate::backend::Ctl;
 use crate::overlay::translate::{self as vr_translate, LanFound, Nobody};
@@ -464,7 +466,7 @@ impl Host {
         if !self.remote_set {
             // Orbiters' translation service through the desktop service, which holds the account's credential (as the VR overlay does).
             let backend = backend.clone();
-            *vr_translate::REMOTE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(move |batch: &orbiters_translate::provider::Batch| backend.translate(batch.clone()).map_err(Into::into)));
+            *vr_translate::REMOTE.locked() = Some(Arc::new(move |batch: &orbiters_translate::provider::Batch| backend.translate(batch.clone()).map_err(Into::into)));
             self.remote_set = true;
         }
         if self.thread.is_none() {
@@ -474,7 +476,7 @@ impl Host {
         let dt = self.last_turn.map_or(0.0, |t| (now - t).as_secs_f32());
         self.last_turn = Some(now);
         let (scene, moving, status) = {
-            let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = self.shared.locked();
             s.window = on.map(|o| (o.window.0 as isize, [o.client.x.max(0.0) as u32, o.client.y.max(0.0) as u32]));
             s.pid = on.map_or(0, |o| o.pid);
             s.paused = covered;
@@ -493,7 +495,7 @@ impl Host {
         // Nothing over a menu, nothing stale over a view that moved, nothing where VRChat's window is not.
         let hide = covered || moving || on.is_none();
         let shown_now = self.animate(dt, hide, on);
-        self.shared.lock().unwrap_or_else(|e| e.into_inner()).status.shown = shown_now;
+        self.shared.locked().status.shown = shown_now;
         self.report(backend, TranslateStatus { shown: shown_now, ..status });
     }
 
@@ -541,7 +543,7 @@ impl Host {
             let px = [rect.width().max(1.0) as u32, rect.height().max(1.0) as u32];
             let at = self.shown.iter().position(|s| s.track == q.track);
             let fresh = |q: &Quad| -> Option<Shown> {
-                let mut window = PanelWindow::new(px[0], px[1], false).map_err(|e| eprintln!("translation window: {e}")).ok()?; // i18n: not shown (a log's line)
+                let mut window = PanelWindow::new(px[0], px[1], false).map_err(|e| log_warn!("translation window: {e}", e = e)).ok()?; // i18n: not shown (a log's line)
                 window.picture(&scaled_premultiplied(&q.picture.rgba, q.picture.width, q.picture.height, px), [0, 0, px[0], px[1]]);
                 Some(Shown { window, track: q.track, picture: q.picture.clone(), rect, alpha: 0.0, to: 1.0 })
             };
@@ -632,13 +634,13 @@ fn follow_unless_stopped(
 /// The view forgotten ([`Motion::reset`]), and the host told nothing moves (it shows nothing stale meanwhile: it cleared on what caused this).
 fn reset_motion(motion: &mut Motion, shared: &Mutex<Shared>) {
     motion.reset();
-    let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = shared.locked();
     s.moving = false;
     s.scene = None;
 }
 
 fn set_state(shared: &Mutex<Shared>, state: TranslateState) {
-    shared.lock().unwrap_or_else(|e| e.into_inner()).status.state = state;
+    shared.locked().status.state = state;
 }
 
 /// The reading thread: the text reader (downloaded the first time), the translator the settings ask for, then looks at VRChat's window as long as it is on.
@@ -666,7 +668,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
         if stop.load(Ordering::Relaxed) {
             return;
         }
-        if let Some(s) = shared.lock().unwrap_or_else(|e| e.into_inner()).settings.clone() {
+        if let Some(s) = shared.locked().settings.clone() {
             break s;
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -683,7 +685,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
     let mut translator_checked = Instant::now();
     // The built-in translator's download, while reading goes on: bytes so far, in all, and how it ended.
     let fetching: Arc<Mutex<Option<(u64, u64, Option<Result<(), String>>)>>> = Arc::default();
-    let gpu = Gpu::new().map_err(|e| eprintln!("desk translate: {e}")).ok(); // i18n: not shown (a log's line)
+    let gpu = Gpu::new().map_err(|e| log_warn!("desk translate: {e}", e = e)).ok(); // i18n: not shown (a log's line)
     let mut grab: Option<Grab> = None;
     let mut looks = 0u32;
     let mut cost = Duration::from_millis(300);
@@ -696,7 +698,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
     vr_translate::note("desktop reading started"); // i18n: not shown (a log's line)
     while !stop.load(Ordering::Relaxed) {
         let (window, paused, now_settings, pid) = {
-            let s = shared.lock().unwrap_or_else(|e| e.into_inner());
+            let s = shared.locked();
             (s.window, s.paused, s.settings.clone(), s.pid)
         };
         core.save_cache(false);
@@ -704,24 +706,24 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
         if let Some((s, t)) = now_settings {
             let translator_changed = s.provider != settings.provider || s.server != settings.server || s.model != settings.model || s.orbiters_agreed != settings.orbiters_agreed || s.orbiters_agreed_window != settings.orbiters_agreed_window;
             if translator_state == Some(TranslateState::NoLocalTranslator) && s.provider == TranslateProvider::ThisComputer {
-                let mut f = fetching.lock().unwrap_or_else(|e| e.into_inner());
+                let mut f = fetching.locked();
                 if f.is_none() {
                     *f = Some((0, 0, None));
                     let (fetching, stop) = (fetching.clone(), vr_translate::stop_flag(stop));
-                    let _ = std::thread::Builder::new().name("translate download".into()).spawn(move || { // i18n: not shown (a thread's name)
+                    std::thread::Builder::new().name("translate download".into()).spawn(move || { // i18n: not shown (a thread's name)
                         vr_translate::lower_priority();
                         let result = orbiters_translate::models::install_files(&orbiters_translate::builtin::FILES, &stop, &mut |done, total| {
-                            if let Some(f) = fetching.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                            if let Some(f) = fetching.locked().as_mut() {
                                 (f.0, f.1) = (done, total);
                             }
                         });
-                        if let Some(f) = fetching.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                        if let Some(f) = fetching.locked().as_mut() {
                             f.2 = Some(result.map_err(|e| e.to_string()));
                         }
-                    });
+                    }).or_log("a thread could not be started");
                 }
             }
-            let downloaded = matches!(*fetching.lock().unwrap_or_else(|e| e.into_inner()), Some((_, _, Some(Ok(())))));
+            let downloaded = matches!(*fetching.locked(), Some((_, _, Some(Ok(())))));
             let retry = translator_state.is_some() && (translator_checked.elapsed() > Duration::from_secs(15) || (downloaded && translator_state == Some(TranslateState::NoLocalTranslator)));
             if translator_changed || retry {
                 translator_checked = Instant::now();
@@ -743,7 +745,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
         }
         // Translations that came meanwhile show at once; none from before a look is due again (they would lie where the view no longer has them).
         if let Some(scene) = core.poll(started.elapsed().as_secs_f64(), ([0.0; 3], [0.0, 0.0, -1.0])).filter(|_| !motion.needs_look()) {
-            let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = shared.locked();
             let size = s.window.map(|(_, c)| c).unwrap_or([1, 1]);
             s.scene = Some((scene, size));
         }
@@ -757,7 +759,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
             continue;
         };
         if paused {
-            let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = shared.locked();
             if !matches!(s.status.state, TranslateState::Problem { .. } | TranslateState::NeedsAgreement | TranslateState::NeedsAddress | TranslateState::NoLocalTranslator) {
                 s.status.state = TranslateState::Paused;
             }
@@ -769,7 +771,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
         }
         if grab.as_ref().is_none_or(|g| g.window != hwnd) {
             // Still VRChat's: a closed window's handle may be another program's now (verify-r15).
-            grab = gpu.as_ref().filter(|_| super::desktop::is_vrchat_window(HWND(hwnd as *mut _), pid)).and_then(|g| Grab::new(HWND(hwnd as *mut _), g).map_err(|e| eprintln!("desk translate: {e}")).ok()); // i18n: not shown (a log's line)
+            grab = gpu.as_ref().filter(|_| super::desktop::is_vrchat_window(HWND(hwnd as *mut _), pid)).and_then(|g| Grab::new(HWND(hwnd as *mut _), g).map_err(|e| log_warn!("desk translate: {e}", e = e)).ok()); // i18n: not shown (a log's line)
             reset_motion(&mut motion, shared);
             if grab.is_none() {
                 std::thread::sleep(Duration::from_millis(500));
@@ -785,7 +787,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
         if last_signature.is_none_or(|t| t.elapsed() >= SIGNATURE_EVERY) {
             last_signature = Some(Instant::now());
             motion.sample(g.signature(client));
-            shared.lock().unwrap_or_else(|e| e.into_inner()).moving = motion.moving();
+            shared.locked().moving = motion.moving();
         }
         let pace = vr_translate::pace_for(cost, false, quiet);
         let due = motion.needs_look() || last_look.is_none_or(|t| t.elapsed() >= pace);
@@ -817,14 +819,14 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
         let gaze = ([0.0; 3], [0.0, 0.0, -1.0]);
         let now = started.elapsed().as_secs_f64() - began.elapsed().as_secs_f64();
         cost = began.elapsed();
-        let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = shared.locked();
         match read {
             Ok((lines, timings)) => {
                 let before = core.tracker.tracks.iter().map(|t| t.id).max().unwrap_or(0);
                 // Turned off during the read: what it found is never followed, nor asked for (verify-r15 B7).
                 let Some(scene) = follow_unless_stopped(&mut core, stop, now, &look, lines, timings, gaze) else { break };
                 quiet = !core.tracker.tracks.iter().any(|t| t.id > before);
-                let fetch = fetching.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let fetch = fetching.locked().clone();
                 s.status.state = match (&translator_state, &scene.activity) {
                     (Some(TranslateState::NoLocalTranslator), _) if matches!(fetch, Some((_, _, None))) => {
                         let (done, total, _) = fetch.unwrap_or_default();

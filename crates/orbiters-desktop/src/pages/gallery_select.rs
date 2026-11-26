@@ -20,6 +20,7 @@
 //! and a drag never toggles the view. Presses on the controls over the picture (arrows, layers, Edit, close) stay
 //! theirs: they sit above the picture's own response. While a window is open the bar shows only what a drag out of it
 //! says.
+use orbiters_core::locks::*;
 use crate::controller::shares::{Entry, Local};
 use crate::drag_out::{self, Outcome};
 use egui::{pos2, vec2, Align2, Id, Order, Pos2, Rect, Response, Sense, Stroke, Ui};
@@ -1047,7 +1048,7 @@ const EXTENSIONS: [&str; 5] = ["png", "jpg", "webp", "gif", "avif"];
 
 impl Fetches {
     fn lock(&self) -> std::sync::MutexGuard<'_, FetchInner> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner.locked()
     }
 
     pub fn state(&self, key: &str) -> Option<Fetch> {
@@ -1086,7 +1087,7 @@ impl Fetches {
 fn work(shared: &Arc<Mutex<FetchInner>>, ctx: &egui::Context) {
     loop {
         let job = {
-            let mut inner = shared.lock().unwrap_or_else(|e| e.into_inner());
+            let mut inner = shared.locked();
             match inner.queue.pop_front() {
                 Some(job) => job,
                 None => {
@@ -1103,7 +1104,7 @@ fn work(shared: &Arc<Mutex<FetchInner>>, ctx: &egui::Context) {
             }
             Err(e) => (Fetch::Failed(e.to_string()), None),
         };
-        let mut inner = shared.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = shared.locked();
         inner.states.insert(key.clone(), state);
         if let Some(s) = small {
             inner.small.insert(key, s);

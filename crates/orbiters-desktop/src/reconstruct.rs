@@ -60,7 +60,7 @@ impl ReconstructHandle {
                 // A report with a number written as null (NaN) still ends the run (`Event::from_line`).
                 match Event::from_line(&line) {
                     Some(e) => on_event(e),
-                    None => eprintln!("reconstruct: unexpected output: {line}"),
+                    None => log_info!("reconstruct: unexpected output: {line}", line = line),
                 }
             }
             on_exit();

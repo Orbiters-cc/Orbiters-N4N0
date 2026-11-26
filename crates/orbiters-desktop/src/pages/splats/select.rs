@@ -19,6 +19,7 @@
 //! removed once the selection is left or the view closed ([`redraw_picture`], from the camera the worker drew it
 //! from); the worker's own picture waits beside it until nothing is removed.
 
+use orbiters_core::locks::*;
 use super::*;
 use egui::{PointerButton, Pos2};
 use orbiters_i18n::{mark, tr, tr_ctx};
@@ -42,7 +43,7 @@ pub fn pictures() -> u64 {
 static WRITING: Mutex<()> = Mutex::new(());
 
 fn writing() -> std::sync::MutexGuard<'static, ()> {
-    WRITING.lock().unwrap_or_else(|e| e.into_inner())
+    WRITING.locked()
 }
 
 /// Why a view's splats or edits no longer go together with the PLY on the disk.
@@ -426,7 +427,7 @@ impl Drop for Edits {
         if self.save_error.is_some() {
             self.save();
             if let Some(e) = &self.save_error {
-                eprintln!("Splat edits of {} not saved: {e}", self.session.display());
+                log_warn!("Splat edits of {} not saved: {e}", self.session.display(), e = e);
                 return;
             }
         }
@@ -448,11 +449,11 @@ impl Drop for Edits {
                 }
             }
             if let Err(err) = redraw_picture(&session, window) {
-                eprintln!("The picture of {}: {err:#}", session.display());
+                log_warn!("The picture of {}: {err:#}", session.display(), err = err);
             }
         });
         if let Err(e) = spawned {
-            eprintln!("Splat edits: {e}");
+            log_warn!("Splat edits: {e}", e = e);
         }
     }
 }

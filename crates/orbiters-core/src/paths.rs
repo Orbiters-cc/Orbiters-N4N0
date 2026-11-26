@@ -223,6 +223,18 @@ pub fn platform_settings_file() -> PathBuf {
     config_dir_in(None).join("settings.json")
 }
 
+/// What a screenshot scene or a test stands in for: a folder of this process's own, in the folders it was given. Never a
+/// fixed name in the system's temporary folder: several processes make the same scenes at once, and each takes away what
+/// it made.
+pub fn stand_ins() -> PathBuf {
+    let dir = match roots() {
+        Some(r) => r.cache.join("stand-ins"),
+        None => std::env::temp_dir().join(format!("orbiters-stand-ins-{}", std::process::id())),
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 pub fn settings_file() -> PathBuf {
     config_dir().join("settings.json")
 }

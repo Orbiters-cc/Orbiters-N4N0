@@ -1,6 +1,7 @@
 //! Session bundles (see `contracts/Docs/session-bundle.md`): writing during capture, listing and reading
 //! for the library.
 
+use crate::locks::*;
 use crate::contracts::frame_record::{record_flags, FrameRecord, RECORD_SIZE};
 use crate::contracts::manifest::{self, SessionManifest};
 use crate::contracts::qoi;
@@ -296,7 +297,7 @@ type Measured = std::collections::HashMap<PathBuf, (Stamp, crate::cleanup::Sizes
 
 fn measured() -> std::sync::MutexGuard<'static, Option<Measured>> {
     static SIZES: std::sync::Mutex<Option<Measured>> = std::sync::Mutex::new(None);
-    SIZES.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    SIZES.locked()
 }
 
 /// [`crate::cleanup::measure`] of a session (`video`: its manifest's `capture.video`), measured again only once

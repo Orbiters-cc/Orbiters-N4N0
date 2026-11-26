@@ -3,6 +3,8 @@
 //! summaries to Orbiters every few minutes while the setting is on. Other people are only counted: their avatars go by
 //! name, never who wears them. Unsent summaries wait on disk (a day at most).
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use super::Shared;
 use crate::state::FrameChunk;
 use orbiters_core::account::Api;
@@ -102,7 +104,7 @@ fn pending_file_in(dir: &std::path::Path, server: orbiters_core::account::Server
 fn read_pending(path: &std::path::Path) -> Vec<Sample> {
     let Ok(Some(text)) = orbiters_core::read_text(path) else { return Vec::new() };
     serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(&text)).unwrap_or_else(|e| {
-        eprintln!("world performance: {}: {e}; kept as {:?}", path.display(), orbiters_core::keep_aside(&path));
+        log_warn!("world performance: {}: {e}; kept as {:?}", path.display(), orbiters_core::keep_aside(&path), e = e);
         Vec::new()
     })
 }
@@ -111,7 +113,7 @@ fn read_pending(path: &std::path::Path) -> Vec<Sample> {
 /// so that an older list never lands after a newer one.
 fn keep_pending(path: &std::path::Path, pending: &[Sample]) {
     if let Err(e) = orbiters_core::write_atomic(path, serde_json::to_string(pending).unwrap_or_default().as_bytes()) {
-        eprintln!("world performance: could not keep the summaries waiting: {e}");
+        log_warn!("world performance: could not keep the summaries waiting: {e}", e = e);
     }
 }
 
@@ -196,7 +198,7 @@ impl super::Controller {
             return;
         }
         let (world, avatar_id) = {
-            let snap = self.snapshot.lock().unwrap();
+            let snap = self.snapshot.locked();
             (snap.vrchat.world.clone(), snap.n4n0.avatar_id.clone())
         };
         let (Some(world_id), Some(instance), true) = (world.world_id.clone(), world.instance.clone(), world.in_world) else { return };
@@ -206,7 +208,7 @@ impl super::Controller {
         let local = world.local_player.clone();
         let list = self.performance_file();
         let finished = {
-            let mut rt = self.performance.lock().unwrap();
+            let mut rt = self.performance.locked();
             rt.hardware.gpu = chunk.gpu.clone().or(rt.hardware.gpu.take());
             rt.hardware.headset = chunk.headset.clone().or(rt.hardware.headset.take());
             rt.hardware.refresh_hz = chunk.refresh_hz.or(rt.hardware.refresh_hz);
@@ -250,7 +252,7 @@ impl super::Controller {
     /// "Share my frame rate per world" was turned off (PRIV-12): what waited to be sent is forgotten, here and on
     /// disk, and the minute being gathered too, so that turning it on later never sends what was gathered before.
     pub(super) fn performance_forget(&self) {
-        let mut rt = self.performance.lock().unwrap();
+        let mut rt = self.performance.locked();
         rt.pending = None;
         rt.minute = None;
         // Every account's waiting list on this computer, and the one of the version before.
@@ -260,7 +262,7 @@ impl super::Controller {
         });
         for path in lists {
             if let Err(e) = std::fs::remove_file(&path) {
-                eprintln!("world performance: the summaries waiting could not be removed: {e}");
+                log_warn!("world performance: the summaries waiting could not be removed: {e}", e = e);
             }
         }
     }
@@ -286,7 +288,7 @@ impl super::Controller {
         if gathered_for != Some(path.as_path()) {
             return;
         }
-        let mut rt = self.performance.lock().unwrap();
+        let mut rt = self.performance.locked();
         // Turned off while this minute was being finished: it is not kept (the switch is read under the lock that
         // forgetting takes, so it is either forgotten after this or never kept).
         if !self.with_settings(|s| s.world_performance) {
@@ -298,13 +300,13 @@ impl super::Controller {
             let extra = pending.len() - MAX_PENDING;
             pending.drain(..extra);
         }
-        let _ = std::fs::create_dir_all(orbiters_core::paths::config_dir());
+        std::fs::create_dir_all(orbiters_core::paths::config_dir()).or_log("a folder could not be made");
         keep_pending(&path, pending);
     }
 
     /// Whether summaries wait that a look could send.
     pub(super) fn performance_waits(&self) -> bool {
-        let rt = self.performance.lock().unwrap();
+        let rt = self.performance.locked();
         rt.hardware.refresh_hz.is_some() && rt.pending.as_ref().is_some_and(|(_, p)| !p.is_empty())
     }
 
@@ -312,7 +314,7 @@ impl super::Controller {
     pub(super) fn performance_send_if_due(self: &Shared, now: bool) {
         let Some(path) = self.performance_file() else { return };
         let batch = {
-            let mut rt = self.performance.lock().unwrap();
+            let mut rt = self.performance.locked();
             pending_for(&mut rt, &path);
             // Asked with every chunk of frames: nothing is copied until it is time.
             let due = now || rt.last_sent.is_none_or(|t| t.elapsed() >= SEND_EVERY);
@@ -344,13 +346,13 @@ impl super::Controller {
             let sent = send(&api, &token, &batch.0, &batch.1);
             match &sent {
                 Ok(()) => {}
-                Err(e) if refused_for_good(e) => eprintln!("world performance: {} summaries refused for good, dropped: {e:#}", batch.0.len()),
+                Err(e) if refused_for_good(e) => log_warn!("world performance: {} summaries refused for good, dropped: {e:#}", batch.0.len(), e = e),
                 Err(e) => {
-                    eprintln!("world performance: {e:#}");
+                    log_warn!("world performance: {e:#}", e = e);
                     return;
                 }
             }
-            let mut rt = ctl.performance.lock().unwrap();
+            let mut rt = ctl.performance.locked();
             // Turned off meanwhile: forgotten already, nothing to write back.
             if !ctl.with_settings(|s| s.world_performance) {
                 return;

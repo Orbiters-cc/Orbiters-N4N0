@@ -4358,6 +4358,7 @@ dependencies = [
  "serde",
  "serde_json",
  "ureq 3.4.2",
+ "uuid",
  "zune-core",
  "zune-jpeg",
 ]
@@ -4488,6 +4489,7 @@ dependencies = [
  "sha2 0.10.9",
  "time",
  "windows 0.62.2",
+ "winreg 0.55.0",
  "winresource",
 ]
 

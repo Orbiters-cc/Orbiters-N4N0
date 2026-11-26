@@ -46,6 +46,7 @@ pub mod vr_audio;
 pub mod watch;
 pub mod worlds;
 
+use orbiters_core::locks::*;
 pub use watch::Watch;
 
 use crate::backend::Ctl;
@@ -579,7 +580,7 @@ fn localized(t: time::OffsetDateTime) -> time::OffsetDateTime {
 
 fn local_offset() -> Option<time::UtcOffset> {
     static KEPT: std::sync::Mutex<Option<(std::time::Instant, Option<time::UtcOffset>)>> = std::sync::Mutex::new(None);
-    let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+    let mut kept = KEPT.locked();
     match *kept {
         Some((at, offset)) if at.elapsed().as_secs() < 60 => offset,
         _ => {

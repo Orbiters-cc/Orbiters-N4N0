@@ -12,6 +12,8 @@
 //! offer opens nothing before its Show. A state applies only to the share accepted, only from a newer revision and
 //! term ([`orbiters_core::shared_view`]). The capture is downloaded signed in, never from a public address.
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use super::rest::Part;
 use super::{Controller, NoticeKind, Shared};
 use crate::ipc::SharedViewCommand;
@@ -412,11 +414,11 @@ impl SharedRuntime {
 /// break, the credential), on a thread of its own: the identity that leaves is not the one the queue sends with.
 fn shared_withdraw_as(stamp: &str) {
     let Some((base, token)) = credential_of(stamp) else { return };
-    let _ = std::thread::Builder::new().name("shared-view-leave".into()).spawn(move || {
+    std::thread::Builder::new().name("shared-view-leave".into()).spawn(move || {
         let api = Api::at(&base);
         let agent = orbiters_core::http_agent(Some(Duration::from_secs(3)), Some(Duration::from_secs(5)));
-        let _ = agent.delete(&api.url("n4n0/shares/presence")).header("Authorization", &format!("Bearer {token}")).call();
-    });
+        agent.delete(&api.url("n4n0/shares/presence")).header("Authorization", &format!("Bearer {token}")).call().or_log("Orbiters could not be told");
+    }).or_log("a thread could not be started");
 }
 
 /// The API's address and the credential a stamp (`SharedRuntime::identity`) names.
@@ -490,12 +492,12 @@ impl Controller {
                 rest.wait(ctl.shared_rests());
             }
             // Quitting: Orbiters hears it at once (it would let the presence lapse in 2 minutes anyway).
-            let owed = ctl.shared_view.lock().unwrap().withdraw();
+            let owed = ctl.shared_view.locked().withdraw();
             if let (Some(_), Some((api, token))) = (owed, ctl.account_api()) {
                 let agent = orbiters_core::http_agent(Some(Duration::from_secs(3)), Some(Duration::from_secs(5)));
-                let _ = agent.delete(&api.url("n4n0/shares/presence")).header("Authorization", &format!("Bearer {token}")).call();
+                agent.delete(&api.url("n4n0/shares/presence")).header("Authorization", &format!("Bearer {token}")).call().or_log("Orbiters could not be told");
             }
-        });
+        }).or_log("a thread could not be started");
     }
 
     fn shared_rest(&self) -> std::sync::Arc<super::rest::Rest> {
@@ -508,7 +510,7 @@ impl Controller {
 
     /// Whether the calls' event stream is wanted for shares (open even with Calls off).
     pub(super) fn shared_view_wants_stream(&self) -> bool {
-        self.shared_view.lock().unwrap().present
+        self.shared_view.locked().present
     }
 
     /// How long until the next look: two seconds in an instance and while anything is shared, else until that changes.
@@ -516,7 +518,7 @@ impl Controller {
         let view = self.view();
         let world = &view.vrchat.world;
         let in_world = view.settings.n4n0.enabled && view.vrchat.running && world.in_world && world.instance.is_some();
-        let rt = self.shared_view.lock().unwrap();
+        let rt = self.shared_view.locked();
         let shared = rt.present || rt.out.is_some() || rt.watching.is_some() || !rt.offers.is_empty() || !rt.targets.is_empty();
         (shared || in_world && rt.identity.is_some()).then_some(Duration::from_secs(2))
     }
@@ -540,7 +542,7 @@ impl Controller {
                 here.truncate(HERE_MOST);
                 here
             });
-            let mut rt = self.shared_view.lock().unwrap();
+            let mut rt = self.shared_view.locked();
             let expired = rt.expire(now_ms());
             let request = rt.presence(account_id.as_ref().map(|(id, _)| id.as_str()), here.unwrap_or_default(), Instant::now());
             if request == Some(Request::Withdraw) {
@@ -550,7 +552,7 @@ impl Controller {
         };
         if let Some(r) = request.0 {
             let acts = Acts { requests: vec![r], publish: true, ..Default::default() };
-            self.shared_act(self.shared_view.lock().unwrap(), acts);
+            self.shared_act(self.shared_view.locked(), acts);
         } else if request.1 {
             self.shared_publish();
         }
@@ -575,7 +577,7 @@ impl Controller {
         if begins && acting.is_none() {
             return self.n4n0.refuse_other_identity();
         }
-        let mut rt = self.shared_view.lock().unwrap();
+        let mut rt = self.shared_view.locked();
         let acts = match command {
             SharedViewCommand::Share { contact, capture, revision, reach, moved } => {
                 rt.share(&contact, CaptureRef { kind: "capture".into(), id: capture, revision, title: String::new() }, reach, moved, now_ms())
@@ -590,7 +592,7 @@ impl Controller {
 
     /// An event of the calls' stream about shares.
     pub(super) fn shared_view_event(self: &Shared, event: &str, v: &Value) {
-        let mut rt = self.shared_view.lock().unwrap();
+        let mut rt = self.shared_view.locked();
         let acts = rt.event(event, v, now_ms());
         self.shared_act(rt, acts);
     }
@@ -609,9 +611,12 @@ impl Controller {
             };
             let (tx, rx) = mpsc::channel();
             let ctl = self.clone();
-            if std::thread::Builder::new().name("shared-view-requests".into()).spawn(move || ctl.shared_requests(rx)).is_ok() {
-                let _ = tx.send(request);
-                rt.requests = Some(tx);
+            match std::thread::Builder::new().name("shared-view-requests".into()).spawn(move || ctl.shared_requests(rx)) {
+                Ok(_) => {
+                    tx.send(request).or_log("what a worker was asked did not reach it");
+                    rt.requests = Some(tx);
+                }
+                Err(error) => Err::<(), _>(error).or_log("a thread could not be started"),
             }
         }
         drop(rt);
@@ -629,7 +634,7 @@ impl Controller {
     /// sent, the identity it was for.
     pub(super) fn shared_identity_to(&self, now: Option<String>) -> Option<String> {
         let (departed, forgot) = {
-            let mut rt = self.shared_view.lock().unwrap();
+            let mut rt = self.shared_view.locked();
             if rt.identity == now {
                 return None;
             }
@@ -666,7 +671,7 @@ impl Controller {
     /// The account signed in changed: the shares follow it now (another account's shares are not shown a moment longer).
     pub(super) fn shared_follow_account(&self) {
         let now = self.shared_identity_now().map(|(now, ..)| now);
-        let held = self.shared_view.lock().unwrap().identity.clone();
+        let held = self.shared_view.locked().identity.clone();
         if held.is_some() && held != now {
             self.shared_identity_to(None);
         }
@@ -686,7 +691,7 @@ impl Controller {
         if self.shared_identity_now().is_none_or(|(now, ..)| now != stamp) {
             return None;
         }
-        let rt = self.shared_view.lock().unwrap();
+        let rt = self.shared_view.locked();
         (rt.identity.as_deref() == Some(stamp)).then_some(rt)
     }
 
@@ -749,7 +754,7 @@ impl Controller {
                             self.shared_publish();
                         }
                         Err(e) => {
-                            eprintln!("shared view presence: {e:#}");
+                            log_warn!("shared view presence: {e:#}", e = e);
                             let Some(mut rt) = self.shared_for(&stamp) else { continue };
                             rt.backoff_until = Some(Instant::now() + PRESENCE_BACKOFF);
                             rt.here_sent = None;
@@ -761,14 +766,14 @@ impl Controller {
                 }
                 Request::Withdraw => {
                     let agent = orbiters_core::http_agent(Some(Duration::from_secs(5)), Some(Duration::from_secs(10)));
-                    let _ = agent.delete(&api.url("n4n0/shares/presence")).header("Authorization", &format!("Bearer {token}")).call();
+                    agent.delete(&api.url("n4n0/shares/presence")).header("Authorization", &format!("Bearer {token}")).call().or_log("Orbiters could not be told");
                 }
                 Request::Offer { number, contact, capture, state } => {
                     let body = json!({ "v": sv::VERSION, "contact": contact, "capture": { "type": "capture", "id": capture.id, "revision": capture.revision }, "state": state });
                     let answer = match post(&api, &token, "n4n0/shares", &body) {
                         Ok(v) => v["share"].as_str().filter(|s| sv::share_id(s)).map(str::to_string).ok_or(None),
                         Err(e) => {
-                            eprintln!("shared view offer: {e:#}");
+                            log_warn!("shared view offer: {e:#}", e = e);
                             Err(code_of(&e))
                         }
                     };
@@ -781,23 +786,23 @@ impl Controller {
                     let answer = post(&api, &token, &path, &json!({ "v": sv::VERSION }));
                     if !accept {
                         if let Err(e) = answer {
-                            eprintln!("shared view decline: {e:#}");
+                            log_warn!("shared view decline: {e:#}", e = e);
                         }
                         continue;
                     }
-                    let answer = answer.map(|v| serde_json::from_value::<ViewState>(v["state_now"].clone()).ok()).map_err(|e| eprintln!("shared view accept: {e:#}"));
+                    let answer = answer.map(|v| serde_json::from_value::<ViewState>(v["state_now"].clone()).ok()).map_err(|e| log_warn!("shared view accept: {e:#}", e = e));
                     let Some(mut rt) = self.shared_for(&stamp) else { continue };
                     let acts = rt.accepted(number, answer);
                     self.shared_act(rt, acts);
                 }
                 Request::State { share, state } => {
                     if let Err(e) = post(&api, &token, &format!("n4n0/shares/{share}/state"), &json!({ "v": sv::VERSION, "state": state })) {
-                        eprintln!("shared view state: {e:#}");
+                        log_warn!("shared view state: {e:#}", e = e);
                     }
                 }
                 Request::End { share } => {
                     if let Err(e) = post(&api, &token, &format!("n4n0/shares/{share}/end"), &json!({ "v": sv::VERSION })) {
-                        eprintln!("shared view end: {e:#}");
+                        log_warn!("shared view end: {e:#}", e = e);
                     }
                 }
                 Request::Fetch { number, capture } => {
@@ -811,7 +816,7 @@ impl Controller {
     }
 
     fn shared_publish(&self) {
-        let status = self.shared_view.lock().unwrap().status();
+        let status = self.shared_view.locked().status();
         self.update_if(|s| s.shared_view.set(status));
     }
 }

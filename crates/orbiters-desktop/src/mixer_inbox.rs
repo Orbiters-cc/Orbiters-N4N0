@@ -1,6 +1,7 @@
 //! "Send to Mixer": every Unity editor running Mixer keeps a folder `%LOCALAPPDATA%/Orbiters/Mixer/inbox/<pid>/`
 //! with an `endpoint.json` naming its project (Mixer's `SplatInbox`), and imports the requests dropped next to it.
 
+use orbiters_core::locks::*;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -77,7 +78,7 @@ pub fn session_for_mixer_with(session: &Path, exports: &Path, requests: &Path) -
     use orbiters_core::reconstruction as rec;
     // One export at a time: two sends at once (two presses, the window and the VR menu) make one copy, not two halves.
     static EXPORTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _one = EXPORTING.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = EXPORTING.locked();
     let result = rec::result_dir(session);
     if orbiters_reconstruct::edit::generation(&result)? == orbiters_reconstruct::edit::UNEDITED {
         return Ok(session.to_path_buf());

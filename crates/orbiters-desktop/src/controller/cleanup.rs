@@ -4,6 +4,7 @@
 //! the library reloads. A session being recorded, reconstructed or waiting to be is left alone, checked when asked and
 //! again when its turn comes.
 
+use orbiters_core::locks::*;
 use super::{CaptureState, Controller, NoticeKind, Shared};
 use orbiters_core::{bundle, cleanup};
 use orbiters_i18n::{mark, tr};
@@ -81,7 +82,7 @@ impl Controller {
         let total: u64 = trim.iter().map(|d| bytes(d, false)).sum::<u64>() + delete.iter().map(|d| bytes(d, true)).sum::<u64>();
         // Admission and the start of the thread under one lock: a second request comes either before (and its sessions
         // go with this job) or after it is known whether a thread runs (verify-controller, CTL-11 b).
-        let mut rt = self.cleanup.lock().unwrap();
+        let mut rt = self.cleanup.locked();
         if !busy.is_empty() {
             rt.skipped.extend(busy);
         }
@@ -108,7 +109,7 @@ impl Controller {
 
     /// Why `dir` cannot be cleaned up now: it is being recorded, reconstructed, or waits to be.
     pub(super) fn cleanup_blocked(&self, dir: &Path) -> Option<&'static str> {
-        let s = self.snapshot.lock().unwrap();
+        let s = self.snapshot.locked();
         if s.capture.state != CaptureState::Idle && s.capture.session_dir.as_deref().is_some_and(|d| same(d, dir)) {
             Some(mark("it is being recorded"))
         } else if s.reconstruction.as_ref().is_some_and(|j| same(&j.session_dir, dir)) {
@@ -122,7 +123,7 @@ impl Controller {
 
     /// Whether the clean-up has `dir` still to do or doing.
     pub(super) fn cleaning(&self, dir: &Path) -> bool {
-        self.snapshot.lock().unwrap().cleanup.as_ref().is_some_and(|j| j.of(dir).is_some())
+        self.snapshot.locked().cleanup.as_ref().is_some_and(|j| j.of(dir).is_some())
     }
 
     /// The job: one session after the other until none waits, then what came of it.
@@ -131,7 +132,7 @@ impl Controller {
             // Taken, or the job ended, under the lock a new request takes too: none comes between the last session
             // and the end, unseen.
             let step = {
-                let mut rt = self.cleanup.lock().unwrap();
+                let mut rt = self.cleanup.locked();
                 let step = self.update(|s| {
                     let Some(job) = s.cleanup.as_mut() else { return Err(0) };
                     let next = if !job.trim.is_empty() {
@@ -157,18 +158,18 @@ impl Controller {
                 Err(summary) => break summary,
             };
             if let Some(why) = self.cleanup_blocked(&dir) {
-                self.cleanup.lock().unwrap().skipped.push(format!("{} ({})", name(&dir), tr(why)));
+                self.cleanup.locked().skipped.push(format!("{} ({})", name(&dir), tr(why)));
                 continue;
             }
             // Asked as a capture without a 3D view: one made since (a reconstruction that ended while the job deleted
             // others) is not deleted with the folder (SWEEP-12).
             if whole && cleanup::has_view(&dir) {
-                self.cleanup.lock().unwrap().skipped.push(format!("{} ({})", name(&dir), tr(HAS_VIEW_NOW)));
+                self.cleanup.locked().skipped.push(format!("{} ({})", name(&dir), tr(HAS_VIEW_NOW)));
                 continue;
             }
             let mut published = Instant::now();
             let mut freed = |n: u64| {
-                if let Some(job) = self.snapshot.lock().unwrap().cleanup.as_mut() {
+                if let Some(job) = self.snapshot.locked().cleanup.as_mut() {
                     job.freed += n;
                 }
                 if published.elapsed() >= PROGRESS_EVERY {
@@ -182,7 +183,7 @@ impl Controller {
                 let _ = super::shares::keep_pictures_on_orbiters(&dir);
             }
             let result = if whole { cleanup::delete_session(&dir, &mut freed) } else { cleanup::keep_only_view(&dir, &mut freed) };
-            let mut rt = self.cleanup.lock().unwrap();
+            let mut rt = self.cleanup.locked();
             match result {
                 Ok(_) if whole => rt.deleted += 1,
                 Ok(_) => rt.trimmed += 1,

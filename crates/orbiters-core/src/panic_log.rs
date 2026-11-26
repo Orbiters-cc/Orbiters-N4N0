@@ -25,6 +25,7 @@ pub fn install_in(dir: PathBuf) {
         let message = info.payload_as_str().unwrap_or("(a value that is not text)");
         let location = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())).unwrap_or_else(|| "an unknown place".into()); // i18n: not shown (a log line)
         let backtrace = std::backtrace::Backtrace::force_capture();
+        crate::app_log::panicked(info.location());
         let who = match &role {
             Some(role) => format!("{process} {role}"),
             None => process.clone(),

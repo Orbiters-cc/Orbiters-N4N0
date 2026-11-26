@@ -1,5 +1,6 @@
 //! Passive admission is only a load-reduction hint. Background Init is the authoritative,
 //! non-launching usability check. No log file is required or read.
+use orbiters_core::locks::*;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -26,22 +27,18 @@ pub fn current_session() -> Option<Session> {
 
 pub fn ready_session() -> Option<Session> {
     let Some(server) = current_session() else {
-        if let Ok(mut waiting) = WAITING.lock() {
-            *waiting = None;
-        }
+        *WAITING.locked() = None;
         return None;
     };
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     let ready = admitted(server, now);
-    if let Ok(mut waiting) = WAITING.lock() {
-        if *waiting != Some((server, ready)) {
-            eprintln!(
-                "SteamVR {}: {}",
-                server.0,
-                if ready { "trying non-launching Background connection" } else { "waiting for two-second server age bound; no readiness hint required" }
-            );
-            *waiting = Some((server, ready));
-        }
+    let mut waiting = WAITING.locked();
+    if *waiting != Some((server, ready)) {
+        log_info!(
+            "SteamVR {}: {}",
+            server.0,
+            if ready { "trying non-launching Background connection" } else { "waiting for two-second server age bound; no readiness hint required" });
+        *waiting = Some((server, ready));
     }
     ready.then_some(server)
 }

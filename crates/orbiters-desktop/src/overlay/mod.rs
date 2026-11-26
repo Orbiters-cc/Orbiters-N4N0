@@ -31,6 +31,8 @@ pub mod ui;
 pub mod walk;
 pub mod worlds;
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use crate::backend::{Ctl, Remote};
 use crate::ipc::{Client, Endpoint, N4n0Command, Role};
 use anyhow::Context as _;
@@ -195,7 +197,7 @@ impl Presenter {
                     self.retry = None;
                 }
                 Err(e) => {
-                    eprintln!("overlay textures: {e}; raw pixels for now");
+                    log_warn!("overlay textures: {e}; raw pixels for now", e = e);
                     self.refusals += 1;
                     self.retry = Some(Instant::now() + after_refusals(self.refusals));
                 }
@@ -236,14 +238,14 @@ impl Presenter {
                     (e, after_refusals(self.refusals))
                 }
             };
-            eprintln!("{}; raw pixels for {} s", failed.0, failed.1.as_secs());
+            log_warn!("{}; raw pixels for {} s", failed.0, failed.1.as_secs());
             self.gpu = None;
             self.retry = Some(Instant::now() + failed.1);
         }
         #[cfg(not(windows))]
         let _ = changed;
         if let Err(code) = overlay.set_raw(handle, rgba, width, height) {
-            eprintln!("overlay pixels: SteamVR overlay error {code}");
+            log_warn!("overlay pixels: SteamVR overlay error {code}", code = code);
             return false;
         }
         true
@@ -322,7 +324,7 @@ fn mismatch_report(kind: crate::mismatch::Kind, steamvr: &vr::Client, snap: &cra
         match read {
             Ok(p) => crate::mismatch::Picture::small(p.width, p.height, &p.rgba),
             Err(e) => {
-                eprintln!("menu mismatch: the eye's picture could not be read: {e}"); // i18n: not shown (a log's line)
+                log_warn!("menu mismatch: the eye's picture could not be read: {e}", e = e); // i18n: not shown (a log's line)
                 None
             }
         }
@@ -702,11 +704,11 @@ impl Sounds {
         let output = orbiters_sound::Output::new();
         let click = Arc::new(std::sync::OnceLock::new());
         let (out, slot) = (output.clone(), click.clone());
-        let _ = std::thread::Builder::new().name("overlay-sounds".into()).spawn(move || {
+        std::thread::Builder::new().name("overlay-sounds".into()).spawn(move || {
             use orbiters_sound::{render, sounds, RATE};
             let _ = slot.set(Arc::new(render(&sounds::ROCKER, RATE)));
             out.play(&Arc::new(render(&sounds::REVEAL, RATE)));
-        });
+        }).or_log("a thread could not be started");
         Self { output, click }
     }
 
@@ -953,12 +955,12 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     // retry, every 2 to 4 s, OVERLAY-17).
     let sounds = Sounds::start();
     // The floating panel is an addition: without its overlays the tab and the rest work as before.
-    let floating = floating::Floating::new(&overlay, KEY).map_err(|e| eprintln!("floating panel unavailable: {e}")).ok();
-    let orbit = orbit::vr::OrbitVr::new(&overlay, KEY, backend.clone()).map_err(|e| eprintln!("panels around VRChat's menus unavailable: {e}")).ok();
+    let floating = floating::Floating::new(&overlay, KEY).map_err(|e| log_warn!("floating panel unavailable: {e}", e = e)).ok();
+    let orbit = orbit::vr::OrbitVr::new(&overlay, KEY, backend.clone()).map_err(|e| log_warn!("panels around VRChat's menus unavailable: {e}", e = e)).ok();
     let boost = booster::Host::new(&steamvr);
     let mut t = Teardown { steamvr: &steamvr, overlay: &overlay, backend: &backend, main, state, walk, world, menu, coverage, floating, orbit, booster: boost, translate: translate::TranslateHost::default(), steamvr_gone: false };
     // Orbiters' translation service is reached through the desktop service, which holds the account's credential.
-    *translate::REMOTE.lock().unwrap_or_else(|e| e.into_inner()) = Some({
+    *translate::REMOTE.locked() = Some({
         let backend = backend.clone();
         Arc::new(move |batch: &orbiters_translate::provider::Batch| backend.translate(batch.clone()).map_err(Into::into))
     });

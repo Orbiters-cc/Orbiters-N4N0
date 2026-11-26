@@ -13,6 +13,7 @@
 //! credential has no expiry of its own: the server drops it after 90 idle days or when the account signs out
 //! everywhere, and `unity-wizard/token` tells whether it still works.
 
+use crate::locks::*;
 use anyhow::{bail, Context as _};
 use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
@@ -507,7 +508,7 @@ impl Api {
     pub fn at(base: &str) -> Self {
         static AGENTS: std::sync::Mutex<Vec<(String, ureq::Agent)>> = std::sync::Mutex::new(Vec::new());
         let base = format!("{}/", base.trim_end_matches('/'));
-        let mut agents = AGENTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut agents = AGENTS.locked();
         if let Some((_, agent)) = agents.iter().find(|(b, _)| *b == base) {
             return Self { agent: agent.clone(), base };
         }
@@ -800,27 +801,45 @@ mod tests {
     /// CORE-19: a file that arrives slowly but steadily is not cut by the time every API call has (here 1 s for the
     /// 90 s), while a call is.
     #[test]
-    fn a_slow_download_outlasts_the_api_calls_time() {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/file", listener.local_addr().unwrap());
-        let server = std::thread::spawn(move || {
-            for _ in 0..2 {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0u8; 2048];
-                let _ = stream.read(&mut request);
-                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n12345").unwrap();
-                stream.flush().unwrap();
-                std::thread::sleep(Duration::from_millis(1600));
-                let _ = stream.write_all(b"67890");
+    fn downloads_use_transfer_deadlines_instead_of_the_api_deadline() {
+        use ureq::config::Config;
+        use ureq::unversioned::{
+            resolver::{ResolvedSocketAddrs, Resolver},
+            transport::{DefaultConnector, NextTimeout},
+        };
+
+        #[derive(Debug)]
+        struct CheckDeadlines;
+
+        impl Resolver for CheckDeadlines {
+            fn resolve(
+                &self,
+                uri: &ureq::http::Uri,
+                config: &Config,
+                _: NextTimeout,
+            ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+                let timeouts = config.timeouts();
+                match uri.path() {
+                    "/api" => {
+                        assert_eq!(timeouts.global, Some(Duration::from_secs(1)));
+                        assert_eq!(timeouts.recv_response, None);
+                    }
+                    "/transfer" => {
+                        assert_eq!(timeouts.global, Some(TRANSFER_TIMEOUT));
+                        assert_eq!(timeouts.recv_response, Some(TRANSFER_ANSWER));
+                    }
+                    _ => panic!("unexpected fixture request"),
+                }
+                // Stop at the resolver after observing the effective request configuration.
+                Err(ureq::Error::HostNotFound)
             }
-        });
-        let agent = ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(1))).build().new_agent();
-        let call = agent.get(&url).call().and_then(|r| r.into_body().read_to_vec());
-        assert!(call.is_err(), "an API call has its time: {call:?}");
-        let body = transfer(agent.get(&url)).call().unwrap().into_body().read_to_vec().unwrap();
-        assert_eq!(body, b"1234567890");
-        server.join().unwrap();
+        }
+
+        let config = ureq::Agent::config_builder().proxy(None).timeout_global(Some(Duration::from_secs(1))).build();
+        let agent = ureq::Agent::with_parts(config, DefaultConnector::default(), CheckDeadlines);
+        for request in [agent.get("http://download.test/api"), transfer(agent.get("http://download.test/transfer"))] {
+            assert!(matches!(request.call(), Err(ureq::Error::HostNotFound)));
+        }
     }
 
     /// CORE2-13: the app's setting decides from the first call on, production too; a change is told once.

@@ -4,6 +4,8 @@
 //! Photos & captures), and keeps `<world id>.json` current (the world's sessions, their state and upload, the answers)
 //! for the worlds asked about in the last 10 minutes.
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use super::shares::{self, Entry, Local, Operation};
 use super::Shared;
 use crate::state::{AccountState, CaptureState, Snapshot};
@@ -159,7 +161,7 @@ struct Job {
 /// The requests' thread: at each change of their folder (every [`TICK`] where the system tells of none), and every [`TICK`] while
 /// something of one is under way.
 pub(super) fn spawn(ctl: Shared) {
-    let _ = std::thread::Builder::new().name("world-captures".into()).spawn(move || {
+    std::thread::Builder::new().name("world-captures".into()).spawn(move || {
         let mut taken: HashSet<String> = HashSet::new();
         let mut imports: VecDeque<(Request, PathBuf)> = VecDeque::new();
         let mut jobs: HashMap<String, Job> = HashMap::new();
@@ -188,7 +190,7 @@ pub(super) fn spawn(ctl: Shared) {
                         take(&ctl, r, file, &mut imports, &mut jobs);
                     }
                     Err(message) => {
-                        eprintln!("world captures: {}: {message}", file.display());
+                        log_info!("world captures: {}: {message}", file.display(), message = message);
                         let _ = std::fs::remove_file(&file);
                     }
                 }
@@ -216,7 +218,7 @@ pub(super) fn spawn(ctl: Shared) {
             let busy = !imports.is_empty() || !jobs.is_empty() || !watched.is_empty() || !taken.is_empty();
             rest.wait((busy || !told).then_some(TICK));
         }
-    });
+    }).or_log("a thread could not be started");
 }
 
 /// The requests waiting, oldest first; `Err` for a file that is not a request of this schema.
@@ -244,7 +246,7 @@ fn read_requests(dir: &Path) -> Vec<(PathBuf, Result<Request, String>)> {
 fn take(ctl: &Shared, r: Request, file: PathBuf, imports: &mut VecDeque<(Request, PathBuf)>, jobs: &mut HashMap<String, Job>) {
     let world = r.world.id.to_ascii_lowercase();
     let fail = |message: String| {
-        ctl.world_captures.lock().unwrap().answer(&world, answer(&r.id, &r.action, false, message, r.session.clone()), Some(&file));
+        ctl.world_captures.locked().answer(&world, answer(&r.id, &r.action, false, message, r.session.clone()), Some(&file));
     };
     if !is_world_id(&world) {
         return fail(tr("The request names no VRChat world: upload the world once, then publish its captures.").into());
@@ -342,7 +344,7 @@ fn same_path(a: &Path, b: &Path) -> bool {
 /// Starts the next import once no capture runs; answers one whose start failed.
 fn step_import(ctl: &Shared, imports: &mut VecDeque<(Request, PathBuf)>) {
     let state = ctl.view().capture.state;
-    let mut rt = ctl.world_captures.lock().unwrap();
+    let mut rt = ctl.world_captures.locked();
     if let Some(import) = rt.importing.as_mut() {
         // Saved, the session is answered by the Stopped event (`world_import_saved`); idle twice without that, it
         // never started.
@@ -364,7 +366,7 @@ fn step_import(ctl: &Shared, imports: &mut VecDeque<(Request, PathBuf)>) {
     rt.importing = Some(Import { request: r.id, world: r.world.id.to_ascii_lowercase(), file, frames, idle: 0 });
     drop(rt);
     if let Err(e) = ctl.import_raw_capture(capture) {
-        let mut rt = ctl.world_captures.lock().unwrap();
+        let mut rt = ctl.world_captures.locked();
         if let Some(import) = rt.importing.take() {
             rt.answer(&import.world, answer(&import.request, "import", false, e.to_string(), None), Some(&import.file));
         }
@@ -387,7 +389,7 @@ fn finish_jobs(ctl: &Shared, jobs: &mut HashMap<String, Job>) {
             _ if job.action == "share" => (true, tr("Shared publicly.").to_string()),
             _ => (true, tr("Taken off the public listing.").to_string()),
         };
-        ctl.world_captures.lock().unwrap().answer(&job.world, answer(id, job.action, done, message, Some(job.session.clone())), Some(&job.file));
+        ctl.world_captures.locked().answer(&job.world, answer(id, job.action, done, message, Some(job.session.clone())), Some(&job.file));
         false
     });
 }
@@ -401,7 +403,7 @@ fn status(
     uploads: &[(PathBuf, orbiters_core::shares::Item)],
     jobs: &HashMap<String, Job>,
 ) -> Status {
-    let frames = ctl.world_captures.lock().unwrap().importing.as_ref().map_or(0, |i| i.frames);
+    let frames = ctl.world_captures.locked().importing.as_ref().map_or(0, |i| i.frames);
     let captures = sessions
         .iter()
         .filter(|s| world_of(s).as_deref() == Some(world))
@@ -461,7 +463,7 @@ fn status(
         signed_in: matches!(snapshot.account.state, AccountState::SignedIn { .. }),
         development: Server::current() == Server::Development,
         captures,
-        answers: ctl.world_captures.lock().unwrap().answers.get(world).map(|a| a.iter().cloned().collect()).unwrap_or_default(),
+        answers: ctl.world_captures.locked().answers.get(world).map(|a| a.iter().cloned().collect()).unwrap_or_default(),
     }
 }
 
@@ -474,19 +476,19 @@ fn write_status(world: &str, mut status: Status, written: &mut HashMap<String, S
     status.updated_utc = orbiters_core::now_utc_iso();
     let Ok(bytes) = serde_json::to_vec_pretty(&status) else { return };
     let dir = root();
-    let _ = std::fs::create_dir_all(&dir);
+    std::fs::create_dir_all(&dir).or_log("a folder could not be made");
     match orbiters_core::write_atomic(&dir.join(format!("{world}.json")), &bytes) {
         Ok(()) => {
             written.insert(world.to_string(), same);
         }
-        Err(e) => eprintln!("world captures: {world}.json: {e}"),
+        Err(e) => log_warn!("world captures: {world}.json: {e}", world = world, e = e),
     }
 }
 
 impl super::Controller {
     /// A recording was saved: an import My World asked for goes on to its reconstruction, and is answered.
     pub(super) fn world_import_saved(self: &Shared, session: Option<PathBuf>) {
-        let Some(import) = self.world_captures.lock().unwrap().importing.take() else { return };
+        let Some(import) = self.world_captures.locked().importing.take() else { return };
         let answered = match session {
             Some(dir) => match self.queue_reconstruction(dir.clone()) {
                 Ok(false) => answer(&import.request, "import", true, tr("Imported: it is being reconstructed."), Some(dir)),
@@ -495,7 +497,7 @@ impl super::Controller {
             },
             None => answer(&import.request, "import", false, tr("The import was not saved."), None),
         };
-        self.world_captures.lock().unwrap().answer(&import.world, answered, Some(&import.file));
+        self.world_captures.locked().answer(&import.world, answered, Some(&import.file));
     }
 }
 

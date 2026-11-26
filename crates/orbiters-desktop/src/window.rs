@@ -6,6 +6,7 @@ use crate::backend::{Ctl, Remote};
 use crate::gpu;
 use crate::ipc::{Client, Endpoint, Role};
 use anyhow::Context as _;
+use orbiters_core::app_log::OrLog as _;
 use std::sync::Arc;
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
@@ -17,19 +18,21 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     // Not in a process given a folder of its own (`--sandbox`, by `--link-smoke`): it knows none of the person's
     // projects, and must not judge their caches.
     let sandboxed = args.iter().any(|a| a == "--sandbox");
-    let working = (!sandboxed).then(crate::pages::Working::begin);
-    let _ = (!sandboxed).then(|| std::thread::Builder::new().name("unity-cache-orphans".into()).spawn(move || {
-        // Work of the window (it removes caches): the window does not close to the tray meanwhile.
-        let _working = working;
-        orbiters_projects::discovery::low_priority();
-        let swept = orbiters_projects::storage::remove_orphans(&std::sync::atomic::AtomicBool::new(false));
-        for cache in &swept.removed {
-            eprintln!("removed the cache an interrupted repair left: {}", cache.display());
-        }
-        for (path, why) in &swept.failed {
-            eprintln!("could not remove {}: {why}", path.display());
-        }
-    }));
+    if !sandboxed {
+        let working = crate::pages::Working::begin();
+        std::thread::Builder::new().name("unity-cache-orphans".into()).spawn(move || {
+            // Work of the window (it removes caches): the window does not close to the tray meanwhile.
+            let _working = working;
+            orbiters_projects::discovery::low_priority();
+            let swept = orbiters_projects::storage::remove_orphans(&std::sync::atomic::AtomicBool::new(false));
+            for cache in &swept.removed {
+                log_info!("removed the cache an interrupted repair left: {}", cache.display());
+            }
+            for (path, why) in &swept.failed {
+                log_warn!("could not remove {}: {why}", path.display(), why = why);
+            }
+        }).or_log("a thread could not be started");
+    }
     #[cfg(target_os = "macos")]
     crate::mac::stay_awake();
     let backend: Ctl = Arc::new(Remote(Client::connect(&endpoint, Role::Window)?));

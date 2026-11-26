@@ -23,6 +23,7 @@
 //! (VRCNext saves the address after the file): it is skipped this time. A file that is cut short or not a picture is
 //! the caller's to reject when it decodes it.
 
+use crate::locks::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -112,7 +113,7 @@ impl OtherCaches {
     }
 
     fn vrcnext_name(&self, root: &Path, file: &str, version: u32) -> Option<String> {
-        let mut index = self.vrcnext_index.lock().unwrap_or_else(|e| e.into_inner());
+        let mut index = self.vrcnext_index.locked();
         if index.as_ref().is_none_or(|(at, _)| at.elapsed() > REREAD) {
             *index = Some((Instant::now(), vrcnext_index(root)));
         }

@@ -18,6 +18,7 @@
 //! chosen name and no part file behind. Never anywhere inside the capture's own folder: reconstructing it again deletes
 //! its `reconstruction/` folder whole, and deleting the capture deletes the rest for good ([`Failure::OwnFiles`]).
 
+use orbiters_core::locks::*;
 use crate::upload_prep::ResultIdentity;
 use orbiters_core::reconstruction as rec;
 use orbiters_i18n::{mark, tr, tr_ctx};
@@ -131,12 +132,12 @@ impl Progress {
             Step::Making => (0.4, 0.1),
             Step::Writing => (0.5, 0.5),
         };
-        *self.now.lock().unwrap_or_else(|e| e.into_inner()) = Some((step, from + span * part.clamp(0.0, 1.0)));
+        *self.now.locked() = Some((step, from + span * part.clamp(0.0, 1.0)));
     }
 
     /// The step under way and how much of the whole export is done (0 to 1); none before it starts.
     pub fn get(&self) -> Option<(Step, f32)> {
-        *self.now.lock().unwrap_or_else(|e| e.into_inner())
+        *self.now.locked()
     }
 
     /// Stops the export at its next step (its part file goes).

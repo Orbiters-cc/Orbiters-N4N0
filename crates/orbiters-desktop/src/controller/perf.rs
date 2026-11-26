@@ -1,6 +1,8 @@
 //! The service's side of the performance self-check (`crate::perf`): a sample every ten seconds while VRChat or SteamVR
 //! runs (every minute otherwise), the hint said once in the window, and the Performance report made and sent on request.
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use super::{Controller, Shared};
 use crate::perf::{self, Command, ReportView};
 use super::NoticeKind;
@@ -33,7 +35,7 @@ impl Controller {
                 next = Instant::now() + if mode == "idle" { perf::QUIET_WINDOW } else { perf::WINDOW };
                 let began = Instant::now();
                 let (line, lines) = {
-                    let mut keeper = perf::keeper().lock().unwrap_or_else(|e| e.into_inner());
+                    let mut keeper = perf::keeper().locked();
                     match keeper.sample(Instant::now(), mode, perf::features(&snap)) {
                         Some(line) => (Some(line), Some(keeper.lines())),
                         None => (None, None),
@@ -43,7 +45,7 @@ impl Controller {
                 let Some(lines) = lines else { continue };
                 ctl.perf_follow(&lines);
             }
-        });
+        }).or_log("a thread could not be started");
     }
 
     /// The hint of the last minute: in the window's state, and said once as a notice (unless muted).
@@ -51,7 +53,7 @@ impl Controller {
         let muted = perf::hints_muted();
         let hint = perf::hint(lines).filter(|h| !muted.contains(&h.key));
         if let Some(h) = &hint {
-            let tell = perf::keeper().lock().unwrap_or_else(|e| e.into_inner()).to_tell(h, &muted);
+            let tell = perf::keeper().locked().to_tell(h, &muted);
             if tell {
                 let (title, advice) = h.words();
                 crate::overlay::vr_log::line(&format!("performance self-check: {} ({:?})", h.key, h.part)); // i18n: not shown (a log's line)
@@ -77,30 +79,30 @@ impl Controller {
                 }
                 self.set_perf_report(Some(ReportView { making: true, ..Default::default() }));
                 let ctl = self.clone();
-                let _ = std::thread::Builder::new().name("perf-report".into()).spawn(move || {
-                    let lines = perf::keeper().lock().unwrap_or_else(|e| e.into_inner()).lines();
+                std::thread::Builder::new().name("perf-report".into()).spawn(move || {
+                    let lines = perf::keeper().locked().lines();
                     let report = perf::report::make(&lines, &ctl.view());
                     let summary = perf::report::summary(&report);
                     let (path, error) = match perf::report::save(&report) {
                         Ok(p) => (Some(p), None),
                         Err(e) => (None, Some(e.to_string())),
                     };
-                    *ctl.perf_last.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
+                    *ctl.perf_last.locked() = Some(report);
                     ctl.set_perf_report(Some(ReportView { making: false, path, summary, sending: false, sent: None, error }));
-                });
+                }).or_log("a thread could not be started");
             }
             Command::Send => {
-                let Some(report) = self.perf_last.lock().unwrap_or_else(|e| e.into_inner()).clone() else { return };
+                let Some(report) = self.perf_last.locked().clone() else { return };
                 let Some(view) = self.view().perf.report.clone().filter(|r| !r.making && !r.sending) else { return };
                 self.set_perf_report(Some(ReportView { sending: true, sent: None, error: None, ..view.clone() }));
                 let ctl = self.clone();
-                let _ = std::thread::Builder::new().name("perf-send".into()).spawn(move || {
+                std::thread::Builder::new().name("perf-send".into()).spawn(move || {
                     let sent = perf::report::send(&report);
                     if let Err(e) = &sent {
-                        eprintln!("performance report: {e}"); // i18n: not shown (a log's line)
+                        log_warn!("performance report: {e}", e = e); // i18n: not shown (a log's line)
                     }
                     ctl.set_perf_report(Some(ReportView { sending: false, sent: Some(sent.is_ok()), error: sent.err(), ..view }));
-                });
+                }).or_log("a thread could not be started");
             }
             Command::Mute(key) => {
                 perf::mute_hint(&key);

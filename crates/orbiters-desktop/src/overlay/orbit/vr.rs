@@ -290,7 +290,7 @@ impl Tune {
         match serde_json::from_str(&std::fs::read_to_string(Self::file()).ok()?) {
             Ok(tune) => Some(tune),
             Err(e) => {
-                eprintln!("{}: {e}", Self::file().display());
+                log_warn!("{}: {e}", Self::file().display(), e = e);
                 None
             }
         }
@@ -299,7 +299,7 @@ impl Tune {
     fn write(&self) {
         let written = serde_json::to_string_pretty(self).map_err(|e| e.to_string()).and_then(|text| std::fs::write(Self::file(), text).map_err(|e| e.to_string()));
         if let Err(e) = written {
-            eprintln!("{}: {e}", Self::file().display());
+            log_warn!("{}: {e}", Self::file().display(), e = e);
         }
     }
 

@@ -15,6 +15,7 @@
 //! its look held is let go (Settings' look keeps the microphones open), and each starts again, with a look, at the
 //! first frame drawn once the window shows. Not the focus: a window in view behind another goes on showing changes.
 
+use orbiters_core::locks::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
@@ -63,7 +64,7 @@ fn window_shown(ctx: &egui::Context, shown: bool) {
     if window.hidden.swap(!shown, Ordering::AcqRel) == !shown || shown {
         return;
     }
-    let mut watches = window.watches.lock().unwrap_or_else(|e| e.into_inner());
+    let mut watches = window.watches.locked();
     watches.retain(|watch| match watch.upgrade() {
         Some(watch) => {
             watch.wake();
@@ -118,7 +119,7 @@ struct Gate {
 impl<T> Shared<T> {
     /// A worker that panicked while it held the lock leaves what it had: the page goes on with the last look.
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner<T>> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner.locked()
     }
 
     /// Whether the thread has to end: the watch was dropped or replaced, or its window is no longer shown.
@@ -259,7 +260,7 @@ impl<K: PartialEq + Clone, T: Clone + PartialEq + Send + 'static> Watch<K, T> {
                     }
                     self.panics += 1;
                     if self.panics == PANICS_MOST {
-                        eprintln!("a page's watch is given up: its look panicked {PANICS_MOST} times in a row");
+                        log_warn!("a page's watch is given up: its look panicked {PANICS_MOST} times in a row", PANICS_MOST = PANICS_MOST);
                     }
                 }
                 if self.panics >= PANICS_MOST {
@@ -281,7 +282,7 @@ impl<K: PartialEq + Clone, T: Clone + PartialEq + Send + 'static> Watch<K, T> {
             gate: Mutex::new(self.gate.take()),
         });
         {
-            let mut watches = window.watches.lock().unwrap_or_else(|e| e.into_inner());
+            let mut watches = window.watches.locked();
             watches.retain(|watch| watch.strong_count() > 0);
             let sleeper: Arc<dyn Sleeper> = shared.clone();
             watches.push(Arc::downgrade(&sleeper));
@@ -334,7 +335,7 @@ fn run<T: PartialEq>(shared: Arc<Shared<T>>, ctx: egui::Context, period: Duratio
             inner.changes += 1;
             orbiters_ui::anim::wake(&ctx);
         }
-        let (mut inner, _) = shared.wake.wait_timeout_while(inner, period, |inner| !shared.over(inner) && !inner.now).unwrap_or_else(|e| e.into_inner());
+        let (mut inner, _) = shared.wake.wait_timeout_while_locked(inner, period, |inner| !shared.over(inner) && !inner.now);
         inner.now = false;
     }
 }

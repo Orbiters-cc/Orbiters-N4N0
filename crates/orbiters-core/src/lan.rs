@@ -7,6 +7,7 @@
 //! too but may keep OSCQuery on its loopback interface: it is listed all the same, without an input port from it, and
 //! sends here only when its launch options say so ([`launch_option`]).
 
+use crate::locks::*;
 use crate::osc::{http_get, on_lan, primary_ipv4};
 use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
@@ -306,7 +307,7 @@ impl LanBrowser {
 
     /// The VRChats on the network now.
     pub fn found(&self) -> Vec<FoundVrchat> {
-        self.found.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+        self.found.locked().clone()
     }
 
     /// Asks the network again at once (the person pressed Look again, or the network changed).
@@ -349,7 +350,7 @@ fn browse(daemon: mdns_sd::ServiceDaemon, mut events: mdns_sd::Receiver<mdns_sd:
             asked = Instant::now();
             list.ask_again(&ask);
         }
-        let mut shared = shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut shared = shared.locked();
         if *shared != list.found {
             shared.clone_from(&list.found);
         }

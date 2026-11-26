@@ -19,7 +19,7 @@ use orbiters_i18n::{mark, tr};
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 type OsStatus = i32;
@@ -486,18 +486,15 @@ pub struct Turn {
 
 impl Turn {
     fn tell(&self) {
-        if let Ok(mut came) = self.came.lock() {
-            *came = true;
-            self.wake.notify_all();
-        }
+        *self.came.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.wake.notify_all();
     }
 
     /// Waits for a turn, at most `timeout`.
     pub fn wait(&self, timeout: Duration) {
-        let Ok(came) = self.came.lock() else { return };
-        if let Ok((mut came, _)) = self.wake.wait_timeout_while(came, timeout, |came| !*came) {
-            *came = false;
-        }
+        let came = self.came.lock().unwrap_or_else(PoisonError::into_inner);
+        let (mut came, _) = self.wake.wait_timeout_while(came, timeout, |came| !*came).unwrap_or_else(PoisonError::into_inner);
+        *came = false;
     }
 }
 
@@ -513,13 +510,11 @@ impl<T> Back<T> {
     }
 
     fn pop(&self) -> Option<T> {
-        self.items.lock().ok()?.pop_front()
+        self.items.lock().unwrap_or_else(PoisonError::into_inner).pop_front()
     }
 
     fn push(&self, item: T) {
-        if let Ok(mut items) = self.items.lock() {
-            items.push_back(item);
-        }
+        self.items.lock().unwrap_or_else(PoisonError::into_inner).push_back(item);
     }
 }
 

@@ -4,6 +4,7 @@
 //! The world its log says is for captures alone (a capture's manifest, a new session in a new world, who else is there for a picture of the world). What the rest of the app
 //! does with a world on a PC (the visited worlds, what is said to Orbiters, the notices) stays as it is on a Mac.
 
+use orbiters_core::locks::*;
 use super::Shared;
 use orbiters_core::osc::OscService;
 use orbiters_core::protocol::WorkerCommand;
@@ -43,12 +44,12 @@ impl OwnGame {
             self.game = game;
             self.query = None;
             self.log = game.map(|pid| follow(library, born(library, pid)));
-            *ctl.mac_game.world.lock().unwrap() = WorldState::default();
+            *ctl.mac_game.world.locked() = WorldState::default();
         }
         let Some(log) = self.log.as_mut() else { return (Vec::new(), false) };
         let events = log.poll();
         if log.caught_up() {
-            *ctl.mac_game.world.lock().unwrap() = log.state.clone();
+            *ctl.mac_game.world.locked() = log.state.clone();
         }
         if tick.is_multiple_of(2) {
             let file = log.state.log_file.clone();
@@ -106,13 +107,13 @@ impl super::Controller {
     }
 
     fn own_pid(&self) -> Option<u32> {
-        let snapshot = self.snapshot.lock().unwrap();
+        let snapshot = self.snapshot.locked();
         snapshot.launcher.desktop_game.filter(|_| snapshot.launcher.camera)
     }
 
     /// The world the game of this Mac is in.
     pub(super) fn mac_world(&self) -> WorldState {
-        self.mac_game.world.lock().unwrap().clone()
+        self.mac_game.world.locked().clone()
     }
 
     /// Whose frames are read from now on, here and in the capture worker: the running game's, told at each change.
@@ -120,7 +121,7 @@ impl super::Controller {
         let game = self.own_pid();
         let host = game.map(|pid| orbiters_core::obelisk::host_folder(&orbiters_core::obelisk::user_tmp(), pid)).filter(|h| h.is_dir());
         {
-            let mut held = self.mac_game.host.lock().unwrap();
+            let mut held = self.mac_game.host.locked();
             if *held == host {
                 return;
             }
@@ -132,7 +133,7 @@ impl super::Controller {
 
     /// What a worker that just started is told first.
     pub(super) fn worker_host(&self) -> WorkerCommand {
-        WorkerCommand::Host { folder: self.mac_game.host.lock().unwrap().clone() }
+        WorkerCommand::Host { folder: self.mac_game.host.locked().clone() }
     }
 }
 

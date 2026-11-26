@@ -742,9 +742,10 @@ end tell"#
     /// `osascript` ends by itself after its two minutes.
     fn ask(script: String) -> mpsc::Receiver<std::io::Result<Output>> {
         let (tx, rx) = mpsc::channel();
-        let _ = std::thread::Builder::new().name("media-script".into()).spawn(move || {
+        use orbiters_core::app_log::OrLog as _;
+        std::thread::Builder::new().name("media-script".into()).spawn(move || {
             let _ = tx.send(Command::new("/usr/bin/osascript").arg("-e").arg(script).stdin(Stdio::null()).output());
-        });
+        }).or_log("a thread could not be started");
         rx
     }
 
@@ -762,7 +763,7 @@ end tell"#
             Ok(output) => output,
             Err(e) => {
                 if !std::mem::replace(said, true) {
-                    eprintln!("media: {}: osascript: {e}", app.name);
+                    log_warn!("media: {}: osascript: {e}", app.name, e = e);
                 }
                 return Answer::Nothing;
             }
@@ -777,7 +778,7 @@ end tell"#
         }
         // The player quit meanwhile, or has no track (`-600`, `-1728`): nothing to say. Anything else once.
         if !error.contains("-600") && !error.contains("-1728") && !std::mem::replace(said, true) {
-            eprintln!("media: {}: {}", app.name, error.trim());
+            log_warn!("media: {}: {}", app.name, error.trim());
         }
         Answer::Nothing
     }

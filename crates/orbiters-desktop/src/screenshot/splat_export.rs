@@ -12,6 +12,7 @@
 //! `--only splat-export-cpu` is the same walk painted by the CPU (orbiters_ui::software), without the 3D view: no GPU,
 //! so no wait for the lab's GPU lock.
 
+use orbiters_core::locks::*;
 use super::*;
 use crate::pages::splat_export::{self as dialog, Hooks};
 use orbiters_core::reconstruction as rec;
@@ -24,12 +25,12 @@ static FREE: Mutex<Option<u64>> = Mutex::new(None);
 
 fn hooks() -> Hooks {
     Hooks {
-        pick: |ask| TO.lock().unwrap().as_ref().map(|d| d.join(ask.name)),
+        pick: |ask| TO.locked().as_ref().map(|d| d.join(ask.name)),
         reveal: |p| {
             println!("Show in folder: {}", p.display());
             Ok(())
         },
-        free_space: |p| FREE.lock().unwrap().or_else(|| orbiters_projects::size::free_space(p)),
+        free_space: |p| FREE.locked().or_else(|| orbiters_projects::size::free_space(p)),
     }
 }
 
@@ -62,7 +63,7 @@ fn walk(run: &mut Run<'_>, out: &Path, settings: &Settings, handles: Option<&cra
     let exports = out.join("exports");
     let _ = std::fs::remove_dir_all(&exports);
     std::fs::create_dir_all(&exports)?;
-    *TO.lock().unwrap() = Some(exports.clone());
+    *TO.locked() = Some(exports.clone());
     dialog::stage(hooks());
     let t = run.time();
     run.app.set_page(Page::Sessions, t);
@@ -125,7 +126,7 @@ fn walk(run: &mut Run<'_>, out: &Path, settings: &Settings, handles: Option<&cra
     anyhow::ensure!(!run.app.sessions_mut().exporting(), "Done closes the dialog");
 
     // A full disk: why, and Choose another place; nothing written.
-    *FREE.lock().unwrap() = Some(1 << 20);
+    *FREE.locked() = Some(1 << 20);
     run.click("Export…", 10.0)?;
     run.wait(0.9)?;
     run.click("SPZ", 10.0)?;
@@ -136,7 +137,7 @@ fn walk(run: &mut Run<'_>, out: &Path, settings: &Settings, handles: Option<&cra
     let spz = crate::splat_export::file_name(&dir, "", crate::splat_export::Format::Spz);
     let parts = std::fs::read_dir(&exports)?.flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".part")).count();
     anyhow::ensure!(!exports.join(&spz).exists() && parts == 0, "nothing written on a full disk");
-    *FREE.lock().unwrap() = None;
+    *FREE.locked() = None;
     run.click("Close", 10.0)?;
     run.wait(0.8)?;
 

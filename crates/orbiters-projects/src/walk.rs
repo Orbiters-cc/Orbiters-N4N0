@@ -3,12 +3,13 @@
 //! without seeks, one on a hard disk, every disk beside the others. What the folders held is kept ([`Index`]) with when each was last
 //! changed, on the file systems that keep that (NTFS and ReFS, a Mac's): the next walk lists only those that changed since. (A folder's
 //! time is asked of the folder: the one its parent's listing gives is not kept up to date on NTFS.)
+use orbiters_core::locks::*;
 use crate::discovery::{asks_permission, is_link, is_project, skip_dir, unfinished_copy};
 use orbiters_i18n::tr;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex, PoisonError};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 /// A folder that changed less than this before it was looked at may change again within what its file system tells apart: listed next time.
@@ -216,7 +217,7 @@ impl Pool {
         if let Some(item) = own.pop() {
             return Some(item);
         }
-        let mut shared = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut shared = self.shared.locked();
         shared.1 -= 1;
         loop {
             if self.stop.load(Ordering::Relaxed) {
@@ -231,7 +232,7 @@ impl Pool {
                 return None;
             }
             self.waiting.fetch_add(1, Ordering::Relaxed);
-            shared = self.wake.wait_timeout(shared, Duration::from_millis(100)).unwrap_or_else(PoisonError::into_inner).0;
+            shared = self.wake.wait_timeout_locked(shared, Duration::from_millis(100)).0;
             self.waiting.fetch_sub(1, Ordering::Relaxed);
         }
     }
@@ -239,7 +240,7 @@ impl Pool {
     fn share(&self, own: &mut Vec<(PathBuf, u32)>) {
         if own.len() > 1 && self.waiting.load(Ordering::Relaxed) > 0 {
             let half = own.len() / 2;
-            self.shared.lock().unwrap_or_else(PoisonError::into_inner).0.extend(own.drain(..half));
+            self.shared.locked().0.extend(own.drain(..half));
             self.wake.notify_all();
         }
     }
@@ -282,7 +283,7 @@ impl Pool {
 
 /// `n` threads of `pool`, each telling what it found.
 fn start(pool: &Arc<Pool>, n: usize, number: usize, tell: &mpsc::Sender<Event>) -> Vec<std::thread::JoinHandle<()>> {
-    pool.shared.lock().unwrap_or_else(PoisonError::into_inner).1 = n;
+    pool.shared.locked().1 = n;
     (0..n)
         .map(|_| {
             let (pool, tell) = (pool.clone(), tell.clone());
@@ -300,7 +301,7 @@ pub(crate) fn near(roots: impl Iterator<Item = PathBuf>, depth: Option<u32>, qui
     // A root may be a link, which a walk does not follow.
     let roots = roots.filter(|r| std::fs::symlink_metadata(r).is_ok_and(|m| m.is_dir() && !is_link(&m)));
     let pool = Pool::new(roots, How { depth, quiet, times: false, index: None });
-    pool.shared.lock().unwrap_or_else(PoisonError::into_inner).1 = 1;
+    pool.shared.locked().1 = 1;
     let mut own = vec![];
     let mut out = vec![];
     while let Some((path, depth)) = pool.next(&mut own) {

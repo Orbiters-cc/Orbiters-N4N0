@@ -10,6 +10,7 @@
 //!
 //! [`remove_orphans`] takes away what a repair could not: closing the app in the middle of a copy kills the thread and
 //! leaves a cache folder no Library points at.
+use orbiters_core::locks::*;
 use orbiters_i18n::tr;
 use anyhow::{bail, Context};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -94,7 +95,7 @@ fn disk_error_in_log(log: Option<PathBuf>, project: &Path) -> bool {
     let meta = file.metadata().ok();
     let len = meta.as_ref().map_or(0, |m| m.len());
     let modified = meta.and_then(|m| m.modified().ok());
-    if let (Some(modified), Some((l, n, m, p, answer))) = (modified, &*LAST.lock().unwrap_or_else(|e| e.into_inner())) {
+    if let (Some(modified), Some((l, n, m, p, answer))) = (modified, &*LAST.locked()) {
         if *l == log && *n == len && *m == modified && p == project {
             return *answer;
         }
@@ -104,7 +105,7 @@ fn disk_error_in_log(log: Option<PathBuf>, project: &Path) -> bool {
     let _ = file.take(1024 * 1024).read_to_end(&mut text);
     let answer = matches_disk_error(&String::from_utf8_lossy(&text), project);
     if let Some(modified) = modified {
-        *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some((log, len, modified, project.to_path_buf(), answer));
+        *LAST.locked() = Some((log, len, modified, project.to_path_buf(), answer));
     }
     answer
 }
@@ -407,7 +408,7 @@ impl Progress {
 pub type SharedProgress = Arc<Mutex<Progress>>;
 
 fn update(progress: &SharedProgress, f: impl FnOnce(&mut Progress)) {
-    f(&mut progress.lock().unwrap_or_else(|e| e.into_inner()));
+    f(&mut progress.locked());
 }
 
 /// What stops a repair from being offered, or where it would go.
@@ -888,7 +889,7 @@ fn copy_and_check(disk: &dyn Written, from: &Path, to: &Path, buffers: &mut [Vec
 /// [`remove_orphans`] finds it.
 #[cfg(any(windows, unix))]
 fn discard_copy(target: &Path, work: &Work) -> Option<PathBuf> {
-    let done = work.progress.lock().unwrap_or_else(|e| e.into_inner()).files_done + 1;
+    let done = work.progress.locked().files_done + 1;
     update(work.progress, |p| {
         p.phase = Phase::RemovingPartial;
         p.files_removed = 0;
@@ -1412,11 +1413,10 @@ fn sweep(roots: &[PathBuf], known: &[PathBuf], cancel: &AtomicBool) -> Swept {
     let mut swept = Swept::default();
     // Waiting for the other one (it may be deleting tens of gigabytes), but not past a Cancel.
     let _one = loop {
-        match SWEEP.try_lock() {
-            Ok(guard) => break guard,
-            Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) if is_cancelled(cancel) => return swept,
-            Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(std::time::Duration::from_millis(100)),
+        match SWEEP.try_locked() {
+            Some(guard) => break guard,
+            None if is_cancelled(cancel) => return swept,
+            None => std::thread::sleep(std::time::Duration::from_millis(100)),
         }
     };
     #[cfg(any(windows, unix))]

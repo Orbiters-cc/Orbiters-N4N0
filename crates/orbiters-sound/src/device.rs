@@ -68,7 +68,7 @@ impl Shared {
     }
 
     fn trouble(&self, message: Option<String>) {
-        *self.trouble.lock().unwrap() = message;
+        *self.trouble.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = message;
     }
 
     fn stopped(&self) -> bool {
@@ -120,7 +120,7 @@ impl Running {
     }
 
     fn trouble(&self) -> Option<String> {
-        self.trouble.lock().unwrap().clone()
+        self.trouble.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 }
 
@@ -146,7 +146,7 @@ impl MicMonitor {
             let queue = Mutex::new(VecDeque::new());
             // Bounded here: with the output gone nothing plays it out (and trims it), and the microphone goes on.
             let most = MONITOR_BUFFERING.keep * 2;
-            imp::run(device.as_deref(), shared, &mut |samples| push_newest(&mut queue.lock().unwrap(), samples, most), &queue, MONITOR_BUFFERING, false);
+            imp::run(device.as_deref(), shared, &mut |samples| push_newest(&mut queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner), samples, most), &queue, MONITOR_BUFFERING, false);
         })?;
         Ok(Self { running })
     }
@@ -238,7 +238,7 @@ impl Playout {
     /// waits for the rest (N4N-18).
     fn fill(&mut self, queue: &Mutex<VecDeque<f32>>, out: &mut [f32]) {
         let frames = out.len() / 2;
-        let stretched = self.take(&mut queue.lock().unwrap(), frames);
+        let stretched = self.take(&mut queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner), frames);
         if stretched {
             stretch(&mut self.scratch, frames);
         }

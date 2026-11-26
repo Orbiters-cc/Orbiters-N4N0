@@ -3,6 +3,8 @@
 //! music the system tells, and N4N0's ears in a worker process of their own (`orbiters-voice`, below normal priority on
 //! Windows). The names say Windows for where they began; these are this computer's on macOS too.
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use orbiters_core::voice::{VoiceCommand, VoiceEvent};
 #[allow(unused_imports)] // Its macro, which only some systems use.
 use orbiters_i18n::tr;
@@ -116,13 +118,13 @@ impl Sounds for PressSound {
             return;
         }
         static SOUND: std::sync::OnceLock<(orbiters_sound::Output, Arc<orbiters_sound::Sound>)> = std::sync::OnceLock::new();
-        let _ = std::thread::Builder::new().name("copy-sound".into()).spawn(|| {
+        std::thread::Builder::new().name("copy-sound".into()).spawn(|| {
             let (output, sound) = SOUND.get_or_init(|| {
                 use orbiters_sound::{render, sounds, Output, RATE};
                 (Output::new(), Arc::new(render(&sounds::ROCKER, RATE)))
             });
             output.play(sound);
-        });
+        }).or_log("a thread could not be started");
     }
 }
 
@@ -368,7 +370,7 @@ impl VoiceChild {
                 match serde_json::from_str::<VoiceEvent>(&line) {
                     Ok(e) => events(e),
                     // Not the line: it may hold what someone said.
-                    Err(e) => eprintln!("voice: unexpected output ({} bytes): {e}", line.len()),
+                    Err(e) => log_warn!("voice: unexpected output ({} bytes): {e}", line.len(), e = e),
                 }
             }
             ended();
@@ -378,8 +380,8 @@ impl VoiceChild {
         std::thread::Builder::new().name("voice-stderr".into()).spawn(move || {
             for line in crate::worker::log_lines(stderr) {
                 let line = line.strip_prefix("voice: ").unwrap_or(&line).to_string();
-                eprintln!("voice: {line}");
-                *last.lock().unwrap() = Some(line);
+                log_info!("voice: {line}", line = line);
+                *last.locked() = Some(line);
             }
         })?;
         Ok(VoiceChild { child, stdin, last_line })
@@ -413,7 +415,7 @@ impl VoiceWorker for VoiceChild {
     }
 
     fn last_line(&self) -> Option<String> {
-        self.last_line.lock().unwrap().clone()
+        self.last_line.locked().clone()
     }
 }
 

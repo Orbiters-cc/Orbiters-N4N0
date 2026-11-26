@@ -9,6 +9,7 @@
 //! Each return from a wait is counted under the loop's name, for `--idle-service` and the test that holds an idle minute to
 //! its budget (`controller::rest::tests`).
 
+use orbiters_core::locks::*;
 use super::Controller;
 use crate::mailbox::Mailbox;
 use crate::state::Snapshot;
@@ -71,7 +72,7 @@ pub(super) struct Rests {
 
 impl Rests {
     fn loops(&self) -> std::sync::MutexGuard<'_, Vec<(&'static str, Weak<Rest>)>> {
-        self.loops.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.loops.locked()
     }
 
     /// Wakes every loop.
@@ -94,7 +95,7 @@ impl Controller {
         let mailbox = Mailbox::watching(watched);
         // The state now is what the loop begins with: only a change of it wakes it.
         self.watch_from_now(&mailbox);
-        let turns = self.rests.turns.lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(name).or_default().clone();
+        let turns = self.rests.turns.locked().entry(name).or_default().clone();
         let rest = Arc::new(Rest { mailbox, turns });
         self.rests.loops().push((name, Arc::downgrade(&rest)));
         rest
@@ -102,7 +103,7 @@ impl Controller {
 
     /// How often each loop woke so far.
     pub(crate) fn wake_ups(&self) -> BTreeMap<&'static str, u64> {
-        let turns = self.rests.turns.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let turns = self.rests.turns.locked();
         let mut all: BTreeMap<&'static str, u64> = turns.iter().map(|(name, n)| (*name, n.load(Ordering::Relaxed))).collect();
         all.insert("n4n0", self.n4n0.steps());
         all
@@ -111,7 +112,7 @@ impl Controller {
     /// Whether an interface shows the state: a window, the overlay or the desktop panels linked, or one in this process. What
     /// only they show is not kept up for nobody.
     pub(crate) fn shown(&self) -> bool {
-        self.repaint.lock().unwrap().is_some() || self.subscribers.lock().unwrap().iter().any(|m| m.shows_notices() && !m.closed())
+        self.repaint.locked().is_some() || self.subscribers.locked().iter().any(|m| m.shows_notices() && !m.closed())
     }
 }
 

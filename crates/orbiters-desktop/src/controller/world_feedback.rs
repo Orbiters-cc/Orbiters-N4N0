@@ -5,6 +5,8 @@
 //! worlds N4N0's menus give feedback on (the shown capture's world, the one the player is in, previous instances'),
 //! handed to N4N0 ([`orbiters_n4n0::N4n0::set_feedback`]) whenever what they show changes.
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use super::rest::Part;
 use super::Shared;
 use orbiters_contracts::world_feedback::{self as contract, Action as Line, Refusal};
@@ -198,7 +200,7 @@ impl WorldFeedbackRuntime {
 
     fn save(&self) {
         if let Err(e) = self.queue.save(&self.queue_path) {
-            eprintln!("world feedback: the queue could not be kept: {e}");
+            log_warn!("world feedback: the queue could not be kept: {e}", e = e);
         }
     }
 
@@ -534,7 +536,7 @@ impl super::Controller {
 
     /// The world the player is in now (VRChat's log as the watchers read it), with its name.
     fn feedback_here(&self) -> Option<(String, String)> {
-        let s = self.snapshot.lock().unwrap();
+        let s = self.snapshot.locked();
         let w = &s.vrchat.world;
         if !w.in_world {
             return None;
@@ -547,7 +549,7 @@ impl super::Controller {
         let here = self.feedback_here();
         let signed_in = self.feedback_api().is_some();
         let view = {
-            let mut rt = self.world_feedback.lock().unwrap();
+            let mut rt = self.world_feedback.locked();
             let view = rt.view(here, signed_in);
             if rt.sent.as_ref() == Some(&view) {
                 return;
@@ -562,7 +564,7 @@ impl super::Controller {
     pub(super) fn world_feedback_ask(self: &Shared, ask: FeedbackAsk) {
         let (_, stamp) = self.account_api_for();
         {
-            let mut rt = self.world_feedback.lock().unwrap();
+            let mut rt = self.world_feedback.locked();
             rt.set_stamp(stamp);
             match menu_action(&ask) {
                 Some((world, action)) => {
@@ -590,23 +592,23 @@ impl super::Controller {
 
     /// Why the N4N0 world cannot reach this app, when it cannot (for the window).
     pub fn world_feedback_note(&self) -> Option<String> {
-        self.world_feedback.lock().unwrap().port_note.clone()
+        self.world_feedback.locked().port_note.clone()
     }
 
     /// World label changes and comments waiting to be sent (to whichever environment is active when they go).
     pub(super) fn feedback_pending(&self) -> u32 {
-        let rt = self.world_feedback.lock().unwrap();
+        let rt = self.world_feedback.locked();
         rt.queue.for_stamp(&rt.stamp).count() as u32
     }
 
     /// The Development environment was switched: what Orbiters answered for worlds is the other server's, so it is read again.
     pub(super) fn world_feedback_environment_changed(&self) {
-        self.world_feedback.lock().unwrap().environment_changed();
+        self.world_feedback.locked().environment_changed();
     }
 
     fn feedback_follow(self: &Shared) -> bool {
         let (development, api, stamp) = self.feedback_context();
-        let mut rt = self.world_feedback.lock().unwrap();
+        let mut rt = self.world_feedback.locked();
         rt.set_stamp(stamp);
         let changed = rt.follow(development, api.is_some());
         drop(rt);
@@ -652,7 +654,7 @@ impl crate::bridge::game::Feedback for RealFeedback {
     }
 
     fn feedback(&self, world: &str) -> WorldFeedback {
-        self.ctl.upgrade().map(|ctl| ctl.world_feedback.lock().unwrap().feedback_of(&world.to_ascii_lowercase())).unwrap_or_default()
+        self.ctl.upgrade().map(|ctl| ctl.world_feedback.locked().feedback_of(&world.to_ascii_lowercase())).unwrap_or_default()
     }
 
     fn ask(&self, ask: FeedbackAsk) {
@@ -665,7 +667,7 @@ impl crate::bridge::game::Feedback for RealFeedback {
 /// Starts world feedback: the log's follower, the calls to Orbiters and the local address.
 pub(super) fn spawn(ctl: Shared) {
     let c = ctl.clone();
-    let _ = std::thread::Builder::new().name("world-feedback-log".into()).spawn(move || {
+    std::thread::Builder::new().name("world-feedback-log".into()).spawn(move || {
         let mut beat = 0u32;
         let rest = c.rest("world-feedback-log", |s| (s.vrchat.running, s.steamvr.running, Part::of(&s.account), s.settings.development));
         while !c.quitting.load(std::sync::atomic::Ordering::Relaxed) {
@@ -680,15 +682,15 @@ pub(super) fn spawn(ctl: Shared) {
             beat = if here { beat.wrapping_add(1) } else { 0 };
             rest.wait(here.then_some(LOG_EVERY));
         }
-    });
+    }).or_log("a thread could not be started");
     let c = ctl.clone();
-    let _ = std::thread::Builder::new().name("world-feedback-send".into()).spawn(move || {
+    std::thread::Builder::new().name("world-feedback-send".into()).spawn(move || {
         let rest = c.rest("world-feedback-send", |s| (Part::of(&s.account), s.settings.development));
         while !c.quitting.load(std::sync::atomic::Ordering::Relaxed) {
             // The account and server read once: what is handed out is for them, and goes with them.
             let (api, stamp) = c.account_api_for();
             let (call, scope) = {
-                let mut rt = c.world_feedback.lock().unwrap();
+                let mut rt = c.world_feedback.locked();
                 // Switched between reading the account and here: read it again, never a call for the other server.
                 if stamp.server != Api::new(orbiters_core::account::Server::current()).url("") {
                     drop(rt);
@@ -699,7 +701,7 @@ pub(super) fn spawn(ctl: Shared) {
                 (rt.next_call(), rt.scope)
             };
             let Some(call) = call else {
-                let due = c.world_feedback.lock().unwrap().next_due(now_ms());
+                let due = c.world_feedback.locked().next_due(now_ms());
                 rest.wait(due);
                 continue;
             };
@@ -707,19 +709,19 @@ pub(super) fn spawn(ctl: Shared) {
             if matches!(result, Err(Failure::SignedOut)) && api.is_none() {
                 // Nothing to send with: kept until an account is signed in.
                 if let Call::Send { op, .. } = &call {
-                    let mut rt = c.world_feedback.lock().unwrap();
+                    let mut rt = c.world_feedback.locked();
                     if let Some(i) = rt.queue.items.iter().position(|p| p.op == *op) {
                         rt.queue.items[i].due = now_ms() + 10_000;
                     }
                 }
             } else {
-                c.world_feedback.lock().unwrap().answered_in(&call, result, scope);
+                c.world_feedback.locked().answered_in(&call, result, scope);
             }
             c.feedback_publish();
         }
-    });
+    }).or_log("a thread could not be started");
     if !cfg!(test) && !orbiters_core::osc::no_network_listening() {
-        let _ = std::thread::Builder::new().name("world-feedback-probe".into()).spawn(move || serve(ctl));
+        std::thread::Builder::new().name("world-feedback-probe".into()).spawn(move || serve(ctl)).or_log("a thread could not be started");
     }
 }
 
@@ -727,7 +729,7 @@ impl super::Controller {
     /// Ends the local address's wait for a connection once the app quits (W23-verify m1): a connection of its own, which it
     /// leaves unanswered.
     pub(super) fn wake_feedback_listener(&self) {
-        let listening = self.world_feedback.lock().unwrap().listening.take();
+        let listening = self.world_feedback.locked().listening.take();
         if let Some(at) = listening {
             let _ = TcpStream::connect_timeout(&at, Duration::from_millis(500));
         }
@@ -743,11 +745,11 @@ fn serve(ctl: Shared) {
         }
         match TcpListener::bind(("127.0.0.1", contract::PORT)) {
             Ok(l) => {
-                ctl.world_feedback.lock().unwrap().port_note = None;
+                ctl.world_feedback.locked().port_note = None;
                 break l;
             }
             Err(e) => {
-                ctl.world_feedback.lock().unwrap().port_note =
+                ctl.world_feedback.locked().port_note =
                     Some(tr!("Port {port} is taken ({error}): the N4N0 world cannot reach Orbiters - N4N0 to give feedback", port = contract::PORT, error = e));
                 rest.wait(Some(Duration::from_secs(30)));
             }
@@ -759,7 +761,7 @@ fn serve(ctl: Shared) {
 /// Answers each connection until the app quits, then lets the port go: quitting ends the wait for the next connection
 /// ([`super::Controller::wake_feedback_listener`]).
 fn listen(ctl: &Shared, listener: TcpListener) {
-    ctl.world_feedback.lock().unwrap().listening = listener.local_addr().ok();
+    ctl.world_feedback.locked().listening = listener.local_addr().ok();
     // (Quitting before the address was there to wake.)
     if ctl.quitting.load(std::sync::atomic::Ordering::Relaxed) {
         return;
@@ -770,9 +772,9 @@ fn listen(ctl: &Shared, listener: TcpListener) {
         }
         let Ok(stream) = stream else { continue };
         let c = ctl.clone();
-        let _ = std::thread::Builder::new().name("world-feedback-answer".into()).spawn(move || {
+        std::thread::Builder::new().name("world-feedback-answer".into()).spawn(move || {
             let _ = answer(&c, stream);
-        });
+        }).or_log("a thread could not be started");
     }
 }
 
@@ -820,7 +822,7 @@ fn answer(ctl: &Shared, stream: TcpStream) -> std::io::Result<()> {
 fn respond(runtime: &std::sync::Mutex<WorldFeedbackRuntime>, mut stream: TcpStream, development: bool, signed_in: bool, stamp: Option<Stamp>) -> std::io::Result<()> {
     let Some((method, target, host)) = request(&mut stream) else { return Ok(()) };
     let (status, body) = {
-        let mut rt = runtime.lock().unwrap();
+        let mut rt = runtime.locked();
         // The lines this reads are queued for whom the follower would queue them now (verify2: never the scope of before).
         if let Some(stamp) = stamp {
             rt.set_stamp(stamp);
@@ -880,7 +882,7 @@ mod tests {
     #[test]
     fn the_worlds_lines_become_actions_once_each() {
         let mut rt =
-            WorldFeedbackRuntime { queue: Queue::default(), queue_path: std::env::temp_dir().join("orbiters-feedback-unit.json"), ..Default::default() };
+            WorldFeedbackRuntime { queue: Queue::default(), queue_path: orbiters_core::paths::stand_ins().join("feedback-unit.json"), ..Default::default() };
         assert!(rt.line(line(1, r#""t":"hello""#), false, true));
         rt.line(line(2, &format!(r#""t":"select","world":"{WORLD}","name":"Home","preview":1,"slot":2,"key":3"#)), false, true);
         assert_eq!(rt.world.selected, Some((WORLD.into(), "Home".into())));

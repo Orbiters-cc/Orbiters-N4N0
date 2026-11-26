@@ -1,0 +1,9 @@
+{
+  "Copy the last errors": "Copiar os últimos erros",
+  "Error log": "Registro de erros",
+  "No error in the app's log.": "Nenhum erro no registro do app.",
+  "Orbiters - N4N0 is installed in {folder}, inside a folder of Creator Companion or ALCOM, and can no longer be updated there. Uninstall it without removing its settings, then install it again in another folder.": "O Orbiters - N4N0 está instalado em {folder}, dentro de uma pasta do Creator Companion ou do ALCOM, e não pode mais ser atualizado ali. Desinstale-o sem remover as configurações e instale-o de novo em outra pasta.",
+  "When and where something went wrong inside the app, with its error codes. No names, no messages, no sign-in details. It stays on this computer, two weeks at most.": "Quando e onde algo deu errado dentro do app, com os códigos de erro. Nenhum nome, nenhuma mensagem, nenhum dado de login. Fica neste computador, por duas semanas no máximo.",
+  "diagnostics errors problems support folder copy": "diagnóstico erros problemas suporte pasta copiar",
+  "{folder} is Creator Companion's or ALCOM's own folder: Orbiters puts nothing there. Choose another folder.": "{folder} é uma pasta do Creator Companion ou do ALCOM: o Orbiters não coloca nada ali. Escolha outra pasta."
+}

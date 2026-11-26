@@ -1,4 +1,5 @@
 //! Camera-scoped consumers. No browser or shared QR page actions run here.
+use orbiters_core::locks::*;
 use super::{Controller, Shared};
 use serde::{Deserialize, Serialize};
 
@@ -78,7 +79,7 @@ fn begin_demo(state: &mut crate::state::Snapshot) -> bool {
 }
 impl Controller {
     pub fn camera_qr(self: &Shared, active: bool) {
-        let mut scan = self.camera_scan.lock().unwrap();
+        let mut scan = self.camera_scan.locked();
         scan.take();
         self.update(|s| {
             s.camera_tools.qr_generation += 1;
@@ -102,7 +103,7 @@ impl Controller {
         let weak = std::sync::Arc::downgrade(self);
         let events: orbiters_n4n0::QrEvents = Box::new(move |event| {
             if let Some(ctl) = weak.upgrade() {
-                let mut scan=ctl.camera_scan.lock().unwrap();
+                let mut scan=ctl.camera_scan.locked();
                 let mut finished = false;
                 ctl.update(|s| {
                     if s.camera_tools.qr_generation == generation && matches!(s.camera_tools.qr, Qr::Looking | Qr::NoStream | Qr::Seen(_) | Qr::NotALink) {
@@ -150,8 +151,7 @@ impl Controller {
                 }
                 let observed = ctl
                     .osc_values
-                    .lock()
-                    .unwrap()
+                    .locked()
                     .latest
                     .get(super::AVATAR_CHANGE)
                     .is_some_and(|(v, at)| *at >= requested && matches!(v.first(), Some(orbiters_core::osc::OscValue::Text(a)) if a == id));

@@ -1,4 +1,6 @@
 //! Small decoded pictures kept on the system disk. Originals are never changed.
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use super::*;
 
 const LIMIT: u64 = 512 << 20;
@@ -9,7 +11,7 @@ fn indexed() -> &'static Mutex<HashMap<PathBuf, Stamp>> {
     INDEX.get_or_init(Mutex::default)
 }
 pub(super) fn set_index(index: &visited::ShotIndex) {
-    *indexed().lock().unwrap_or_else(|e| e.into_inner()) = index.fingerprints()
+    *indexed().locked() = index.fingerprints()
         .map(|(p, size, modified)| (p.to_path_buf(), Stamp { size, modified: u128::from(modified) })).collect();
 }
 
@@ -30,7 +32,7 @@ pub(super) fn read(p: &Picture, path: &Path, width: u32) -> Option<(qoi::QoiHead
 fn read_cached(file: &Path, meta: &Path, path: &Path) -> Option<(qoi::QoiHeader, Vec<u8>)> {
     let saved: Stamp = serde_json::from_slice(&std::fs::read(meta).ok()?).ok()?;
     // An unplugged drive keeps its last good preview; an online changed file is decoded again.
-    let known = indexed().lock().unwrap_or_else(|e| e.into_inner()).get(path).cloned();
+    let known = indexed().locked().get(path).cloned();
     let stale = match known {
         Some(now) => now != saved,
         None => stamp(path).is_some_and(|now| now != saved),
@@ -47,12 +49,12 @@ pub(super) fn write(p: &Picture, path: &Path, width: u32, before: Option<Stamp>,
     if std::fs::create_dir_all(dir).is_err() { return; }
     // Cache writes are serialized, leaving at least 600 MiB for the rest of the application.
     static LOCK: Mutex<()> = Mutex::new(());
-    let _one = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = LOCK.locked();
     if orbiters_projects::size::free_space(dir).is_none_or(|n| n < (600 << 20) + bytes.len() as u64) { return; }
     static TOTAL: std::sync::OnceLock<Mutex<u64>> = std::sync::OnceLock::new();
     let total = TOTAL.get_or_init(|| Mutex::new(std::fs::read_dir(dir).into_iter().flatten().flatten()
         .filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum()));
-    let mut total = total.lock().unwrap_or_else(|e| e.into_inner());
+    let mut total = total.locked();
     let cost = bytes.len() as u64 + 128;
     if *total + cost > LIMIT {
         let mut files: Vec<_> = std::fs::read_dir(dir).into_iter().flatten().flatten()
@@ -65,7 +67,7 @@ pub(super) fn write(p: &Picture, path: &Path, width: u32, before: Option<Stamp>,
     }
     if *total + cost > LIMIT { return; }
     if orbiters_core::write_atomic(&file, bytes).is_ok() {
-        let _ = orbiters_core::write_atomic(&meta, &serde_json::to_vec(&stamp).unwrap_or_default());
+        orbiters_core::write_atomic(&meta, &serde_json::to_vec(&stamp).unwrap_or_default()).or_log("a file could not be written");
         *total += cost;
     }
 }

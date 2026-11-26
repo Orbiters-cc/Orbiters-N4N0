@@ -274,6 +274,7 @@ mod sealing {
 #[cfg(target_os = "macos")]
 mod mac {
     use super::sealing::{file_key, read_whole, KEY_FILE, KEY_LEN};
+    use crate::locks::*;
     use orbiters_i18n::tr;
     use ring::rand::{SecureRandom, SystemRandom};
     use security_framework::passwords::{delete_generic_password, get_generic_password};
@@ -306,7 +307,7 @@ mod mac {
         const REFUSAL_KEPT: std::time::Duration = std::time::Duration::from_secs(300);
         type Kept = Option<(Result<[u8; KEY_LEN], String>, std::time::Instant)>;
         static KEY: std::sync::Mutex<Kept> = std::sync::Mutex::new(None);
-        let mut kept = KEY.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut kept = KEY.locked();
         match kept.as_ref() {
             Some((Ok(key), _)) => return Ok(*key),
             Some((Err(e), at)) if at.elapsed() < REFUSAL_KEPT => return Err(anyhow::anyhow!(e.clone())),

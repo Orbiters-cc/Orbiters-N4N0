@@ -16,6 +16,8 @@
 //!   it could not be read, kept as a failure until its files change, and the worker goes on with the next job.
 //! - **The worker stops with the app**: dropping the [`Builder`] stops the job running at its next check.
 
+use orbiters_core::app_log::OrLog as _;
+use orbiters_core::locks::*;
 use super::preview_gpu::{self, Pipelines};
 use eframe::egui_wgpu::wgpu;
 use egui::ColorImage;
@@ -69,7 +71,7 @@ struct Shared {
 impl Shared {
     /// The queue, also after a panic while it was held (a job's panic is caught outside it; this is for the rest).
     fn queue(&self) -> MutexGuard<'_, Queue> {
-        self.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.queue.locked()
     }
 }
 
@@ -105,7 +107,7 @@ impl Builder {
         self.done = Some(rx);
         let shared = self.shared.clone();
         let (ctx, device, queue) = (ctx.clone(), device.clone(), queue.clone());
-        let _ = std::thread::Builder::new().name("project-preview-builds".into()).spawn(move || work(&shared, &tx, &ctx, &device, &queue));
+        std::thread::Builder::new().name("project-preview-builds".into()).spawn(move || work(&shared, &tx, &ctx, &device, &queue)).or_log("a thread could not be started");
     }
 
     /// Builds `scene` of `project` before anything else waiting (the panel or the window wants it now): the still or
@@ -186,7 +188,7 @@ fn next(shared: &Shared) -> Option<(Job, bool, Arc<AtomicBool>)> {
             q.running = Some(Running { project, guid, cancel: cancel.clone() });
             return Some((job, q.scene_light, cancel));
         }
-        q = shared.wake.wait(q).unwrap_or_else(std::sync::PoisonError::into_inner);
+        q = shared.wake.wait_locked(q);
     }
 }
 
@@ -223,12 +225,12 @@ fn work(shared: &Shared, tx: &mpsc::Sender<Done>, ctx: &egui::Context, device: &
             let what = panic.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| panic.downcast_ref::<String>().cloned()).unwrap_or_default();
             match &job {
                 Job::Build(project, scene) => {
-                    eprintln!("project preview of {}: panicked ({what})", scene.rel);
+                    log_warn!("project preview of {}: panicked ({what})", scene.rel, what = what);
                     scene::keep_failure(project, scene, CRASHED);
                     send(Done::Built { project: project.clone(), guid: scene.guid.clone(), result: Err(CRASHED.into()) });
                 }
                 Job::Still(project) => {
-                    eprintln!("project still of {}: panicked ({what})", project.display());
+                    log_warn!("project still of {}: panicked ({what})", project.display(), what = what);
                     send(Done::NoStill { project: project.clone() });
                 }
             }
@@ -271,8 +273,8 @@ fn build(project: &Path, scene: &SceneInfo, cancel: &Arc<AtomicBool>) -> Result<
     let limits = scene::Limits { background: true, cancel: Some(cancel.clone()), ..scene::Limits::new(BUILD_LIMIT) };
     let result = scene::build_scene(project, scene, &limits);
     match &result {
-        Ok(e) => eprintln!("project preview built: {} in {:.1} s ({:.1} MB)", scene.rel, start.elapsed().as_secs_f64(), e.size as f64 / 1e6),
-        Err(why) => eprintln!("project preview of {} not built in {:.1} s: {why}", scene.rel, start.elapsed().as_secs_f64()),
+        Ok(e) => log_info!("project preview built: {} in {:.1} s ({:.1} MB)", scene.rel, start.elapsed().as_secs_f64(), e.size as f64 / 1e6),
+        Err(why) => log_warn!("project preview of {} not built in {:.1} s: {why}", scene.rel, start.elapsed().as_secs_f64(), why = why),
     }
     result
 }
@@ -387,17 +389,17 @@ fn draw_still(
         return Some(None);
     }
     let start = std::time::Instant::now();
-    let mut s = preview_gpu::load(device, queue, pipelines.clone(), &entry.path).map_err(|e| eprintln!("project still: {e:#}")).ok()?;
+    let mut s = preview_gpu::load(device, queue, pipelines.clone(), &entry.path).map_err(|e| log_warn!("project still: {e:#}", e = e)).ok()?;
     pipelines.get_or_insert_with(|| s.pipelines());
     let light = preview_gpu::light_mode(scene_light, &s.header);
     let view = super::preview::home_view(&s.header, light);
-    let img = s.still(device, queue, STILL, view).map_err(|e| eprintln!("project still: {e:#}")).ok()?;
+    let img = s.still(device, queue, STILL, view).map_err(|e| log_warn!("project still: {e:#}", e = e)).ok()?;
     let rgb: Vec<u8> = img.pixels().flat_map(|p| [p[0], p[1], p[2]]).collect();
     let mut bytes = Vec::new();
     if image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 88).encode(&rgb, STILL.0, STILL.1, image::ExtendedColorType::Rgb8).is_ok() {
         keep_still(&dir, &bytes, &serde_json::to_vec(&record).unwrap_or_default());
     }
-    eprintln!("project still of {}: {:.0} ms", project.display(), start.elapsed().as_secs_f64() * 1000.0);
+    log_info!("project still of {}: {:.0} ms", project.display(), start.elapsed().as_secs_f64() * 1000.0);
     Some(Some(ColorImage::from_rgb([STILL.0 as usize, STILL.1 as usize], &rgb)))
 }
 

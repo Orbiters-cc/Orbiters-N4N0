@@ -399,12 +399,18 @@ fn run_task(args: &Args, payload: Option<&'static [u8]>, progress: &install::Pro
 /// old program would start beside new files, and hold them while the next recovery tries to end it.
 #[cfg(windows)]
 pub fn relaunch(dir: &std::path::Path, hidden: bool) {
+    relaunch_with(dir, hidden, system::launch);
+}
+
+/// [`relaunch`], with what starts a program (`launch`: Windows', or a test's that starts nothing).
+#[cfg(windows)]
+pub(crate) fn relaunch_with(dir: &std::path::Path, hidden: bool, launch: impl FnOnce(&std::path::Path, &[&str]) -> std::io::Result<()>) {
     if !swap::whole(dir) {
         eprintln!("Orbiters - N4N0 is not started again: {} holds no whole version", dir.display()); // i18n: not shown (a log line)
         return;
     }
     let args: &[&str] = if hidden { &["--hidden"] } else { &[] };
-    if let Err(e) = system::launch(&dir.join(orbiters_update::APP_EXE), args) {
+    if let Err(e) = launch(&dir.join(orbiters_update::APP_EXE), args) {
         eprintln!("Orbiters - N4N0 could not be started again: {e}");
     }
 }

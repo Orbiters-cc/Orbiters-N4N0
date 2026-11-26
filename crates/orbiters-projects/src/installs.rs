@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 struct Record {
     project: PathBuf,
     project_id: FileId,
-    /// The exact previous manifest, or its confirmed absence. The manifest is published after the package moves.
+    /// The exact previous manifest, or its confirmed absence. The manifest is published after the package moves. The older
+    /// writer (until 0.3.11-dev.17) wrote "" for an absent one: read with [`Record::before`].
     manifest: Option<String>,
     /// The packages it removes or replaces that were there.
     packages: Vec<String>,
@@ -25,6 +26,27 @@ struct Record {
 
 const MANIFEST: &str = "Packages/vpm-manifest.json";
 
+impl Record {
+    /// The manifest before the change; `None` when there was none. A present one is a JSON object, never "": that is how the
+    /// older writer said "none" (V2-3), and read as a manifest it never equals the one now, which answered "try again" for good.
+    fn before(&self) -> Option<&str> {
+        self.manifest.as_deref().filter(|m| !m.is_empty())
+    }
+
+    /// The version of `name` the manifest before the change locks, if it does.
+    fn locked(&self, name: &str) -> Option<String> {
+        let manifest: serde_json::Value = serde_json::from_str(self.before()?.trim_start_matches('\u{feff}')).ok()?;
+        manifest["locked"][name]["version"].as_str().map(str::to_owned)
+    }
+}
+
+/// The manifest as it is now: its text, none, or one that is there, read whole and steady, and is not a package list.
+enum Now {
+    Text(String),
+    Absent,
+    Damaged,
+}
+
 fn dir(root: &Path) -> PathBuf {
     repos::dir(root).join("package-changes")
 }
@@ -34,16 +56,21 @@ pub(crate) fn unreadable(path: &Path, why: std::io::Error) -> std::io::Error {
     std::io::Error::new(why.kind(), tr!("{path} cannot be read right now ({why}). Try again in a moment.", path = path.display(), why = why))
 }
 
-/// Read the commit marker without treating a failed read or invalid JSON as a committed change.
-fn manifest(path: &Path) -> std::io::Result<Option<String>> {
+/// Read the commit marker without treating a failed read as a committed change: an error only when it cannot be read now.
+fn now(path: &Path) -> std::io::Result<Now> {
     let file = path.join(MANIFEST);
-    let read = || -> std::io::Result<Option<String>> {
-        let Some(bytes) = own::steady(&file)? else { return Ok(None) };
-        let text = String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(text.trim_start_matches('\u{feff}'))?;
-        Ok(Some(text))
-    };
-    read().map_err(|e| unreadable(&file, e))
+    let Some(bytes) = own::steady(&file).map_err(|e| unreadable(&file, e))? else { return Ok(Now::Absent) };
+    let list = String::from_utf8(bytes).ok().filter(|text| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(text.trim_start_matches('\u{feff}')).is_ok());
+    Ok(list.map_or(Now::Damaged, Now::Text))
+}
+
+/// The manifest when a change begins: its text or its absence. One that is not a package list is an error (nothing is changed).
+fn manifest(path: &Path) -> std::io::Result<Option<String>> {
+    match now(path)? {
+        Now::Text(text) => Ok(Some(text)),
+        Now::Absent => Ok(None),
+        Now::Damaged => Err(unreadable(&path.join(MANIFEST), std::io::ErrorKind::InvalidData.into())),
+    }
 }
 
 /// Whether there is something at `path`; an error when that cannot be told now.
@@ -127,8 +154,16 @@ pub(crate) fn recover(root: &Path, path: &Path) -> anyhow::Result<()> {
         if file.extension().is_none_or(|e| e != "json") {
             continue;
         }
-        let record = match own::steady(&file).and_then(|bytes| bytes.map(|b| serde_json::from_slice::<Record>(&b)).transpose().map_err(Into::into)) {
-            Ok(Some(record)) => record,
+        let record = match own::steady(&file) {
+            Ok(Some(bytes)) => match serde_json::from_slice::<Record>(&bytes) {
+                Ok(record) => record,
+                // Read whole (each is written whole, then renamed) and not a record: it says nothing any recovery can act on, and
+                // as a problem it would stop every project's Open and package change for good. Kept beside, as it is.
+                Err(_) => {
+                    let _ = crate::disk::rename(&file, file.with_extension("unreadable"));
+                    continue;
+                }
+            },
             Ok(None) => continue,
             Err(e) => {
                 problems.push(unreadable(&file, e).to_string());
@@ -142,15 +177,12 @@ pub(crate) fn recover(root: &Path, path: &Path) -> anyhow::Result<()> {
             if !try_is_same(path, record.project_id).map_err(|e| unreadable(path, e))? || runs(&file)? {
                 return Ok(None);
             }
-            let now = manifest(path)?;
-            if now == record.manifest {
-                return undo(path, &file, &record).map(Some);
+            // A new list saved: the change went through. vrc-get saves it whole, in place of the old one: as it was, absent where
+            // there was one, or not a list, it did not (V2-3: none of these is "try again" for good; the next try finds the same).
+            match now(path)? {
+                Now::Text(text) if Some(text.as_str()) != record.before() => Ok(Some(vec![])),
+                _ => undo(path, &file, &record).map(Some),
             }
-            if now.is_none() {
-                let marker = path.join(MANIFEST);
-                return Err(unreadable(&marker, std::io::ErrorKind::NotFound.into()));
-            }
-            Ok(Some(vec![]))
         })();
         match undone {
             // Being made now: its own process ends it.
@@ -179,11 +211,17 @@ fn undo(path: &Path, file: &Path, record: &Record) -> std::io::Result<Vec<String
     let mut said = vec![];
     for name in record.added.iter().filter(named) {
         let at = path.join("Packages").join(name);
-        let kept = out.join(name);
+        let mut kept = out.join(name);
+        // V2-4: the version the list had locked, put back by Restore (its folder was missing), is no first addition: the list is
+        // the same because it already named it. It stays, whether or not that Restore could close its record.
+        if record.locked(name).is_some_and(|locked| version_in(&at).as_deref() == Some(locked.as_str())) {
+            continue;
+        }
         if there(&at)? {
             crate::disk::create_dir_all(&out)?;
+            // (Kept there once already: by a recovery whose record could not be removed. Never an error for good.)
             if there(&kept)? {
-                return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, kept.display().to_string()));
+                kept = out.join(format!("{name}-{}", uuid::Uuid::new_v4().simple()));
             }
             crate::disk::rename(&at, &kept)?;
         }
@@ -204,6 +242,13 @@ fn undo(path: &Path, file: &Path, record: &Record) -> std::io::Result<Vec<String
         }
     }
     Ok(said)
+}
+
+/// The version the package in the folder `at` says it is.
+fn version_in(at: &Path) -> Option<String> {
+    let bytes = std::fs::read(at.join("package.json")).ok()?;
+    let package: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    package["version"].as_str().map(str::to_owned)
 }
 
 /// The folder vrc-get moved the package `name` of the project at `path` to; an error when its folder cannot be looked through now.
@@ -324,11 +369,6 @@ mod tests {
         let said = format!("{:#}", result.unwrap_err());
         assert!(said.contains("vpm-manifest.json") && records(&root) != 0, "{said}");
         assert!(!p.join("Packages/com.a").exists());
-        std::fs::remove_file(p.join(MANIFEST)).unwrap();
-        assert!(recover(&root, &p).is_err() && records(&root) == 2);
-        std::fs::write(p.join(MANIFEST), b"{").unwrap();
-        assert!(recover(&root, &p).is_err() && records(&root) == 2);
-        std::fs::write(p.join(MANIFEST), b"{}").unwrap();
         recover(&root, &p).unwrap();
         assert_eq!(std::fs::read_to_string(p.join("Packages/com.a/package.json")).unwrap(), "mine");
         assert_eq!(records(&root), 0);
@@ -370,6 +410,82 @@ mod tests {
         drop(begun);
         recover(&root, &p).unwrap();
         assert!(p.join("Packages/com.new").is_dir() && records(&root) == 0);
+    }
+
+    /// V2-3: the older writer (until 0.3.11-dev.17) recorded a manifest that was not there as "". Its record is one of an absent
+    /// manifest: what it moved away is put back and the record goes, the first time (it answered "try again" for good).
+    #[test]
+    fn an_older_record_of_an_absent_manifest_is_put_back() {
+        let temp = tempfile::tempdir().unwrap();
+        let (root, p) = (temp.path().join("vcc"), temp.path().join("Project"));
+        project(&p);
+        std::fs::remove_file(p.join(MANIFEST)).unwrap();
+        let older = serde_json::json!({ "project": p, "project_id": id_of(&p).unwrap(), "manifest": "", "packages": ["com.a"] });
+        crate::write_json(&dir(&root).join("older.json"), &older).unwrap();
+        let away = p.join("Temp/vrc-get/x/remove");
+        std::fs::create_dir_all(&away).unwrap();
+        std::fs::rename(p.join("Packages/com.a"), away.join("com.a")).unwrap();
+        recover(&root, &p).unwrap_or_else(|e| panic!("{e:#}"));
+        assert_eq!(std::fs::read_to_string(p.join("Packages/com.a/package.json")).unwrap(), "mine");
+        assert!(records(&root) == 0 && !p.join(MANIFEST).exists());
+    }
+
+    /// V2-3, its siblings: a manifest that is gone, or there and not a list, since the change began is not one vrc-get saved (it
+    /// saves a whole list in place of the old one). The change did not go through: what it moved is put back, at once, never
+    /// "try again in a moment" for good; the manifest is left as it is.
+    #[test]
+    fn a_manifest_gone_or_damaged_since_the_change_began_ends_the_recovery() {
+        for now in [None, Some(&b"{"[..]), Some(&b""[..])] {
+            let temp = tempfile::tempdir().unwrap();
+            let (root, p) = (temp.path().join("vcc"), temp.path().join("Project"));
+            project(&p);
+            cut(&root, &p, &["com.a"]);
+            match now {
+                None => std::fs::remove_file(p.join(MANIFEST)).unwrap(),
+                Some(bytes) => std::fs::write(p.join(MANIFEST), bytes).unwrap(),
+            }
+            recover(&root, &p).unwrap_or_else(|e| panic!("{now:?}: {e:#}"));
+            assert_eq!(std::fs::read_to_string(p.join("Packages/com.a/package.json")).unwrap(), "mine");
+            assert_eq!(records(&root), 0);
+            assert_eq!(std::fs::read(p.join(MANIFEST)).ok().as_deref(), now);
+        }
+    }
+
+    /// V2-4: Restore put back the version the list locks (its folder was missing) and its record could not be removed then (another
+    /// program held it a moment). The list is the same, as it already named the package: that is no first addition, and the
+    /// next recovery leaves it in place. A folder of another version (a change cut before its list was saved) is still taken out.
+    #[test]
+    fn a_restored_package_whose_record_stayed_is_not_taken_out() {
+        let temp = tempfile::tempdir().unwrap();
+        let (root, p) = (temp.path().join("vcc"), temp.path().join("Project"));
+        project(&p);
+        std::fs::write(p.join(MANIFEST), r#"{"dependencies":{},"locked":{"com.r":{"version":"1.0.0","dependencies":{}}}}"#).unwrap();
+        for (put, stays) in [("1.0.0", true), ("2.0.0", false)] {
+            let _ = std::fs::remove_dir_all(p.join("Packages/com.r"));
+            let restore = Installing::begin(&root, &p, ["com.r"].into_iter()).unwrap();
+            std::fs::create_dir_all(p.join("Packages/com.r")).unwrap();
+            std::fs::write(p.join("Packages/com.r/package.json"), format!(r#"{{"name":"com.r","version":"{put}"}}"#)).unwrap();
+            drop(restore);
+            let result = recover(&root, &p);
+            assert_eq!(result.is_ok(), stays, "{put}: {result:?}");
+            assert_eq!(p.join("Packages/com.r/package.json").is_file(), stays, "{put}");
+            assert_eq!(records(&root), 0);
+        }
+    }
+
+    /// A record of this app's that is read whole and is not one (another version's, or damaged) is kept beside: it stops no
+    /// project's Open or package change.
+    #[test]
+    fn a_record_that_says_nothing_stops_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let (root, p) = (temp.path().join("vcc"), temp.path().join("Project"));
+        project(&p);
+        std::fs::create_dir_all(dir(&root)).unwrap();
+        std::fs::write(dir(&root).join("other.json"), b"{}").unwrap();
+        recover(&root, &p).unwrap_or_else(|e| panic!("{e:#}"));
+        assert!(!dir(&root).join("other.json").exists());
+        assert_eq!(std::fs::read(dir(&root).join("other.unreadable")).unwrap(), b"{}");
+        recover(&root, &p).unwrap();
     }
 
     fn begun_is_over_leaves_nothing(root: &Path, p: &Path) {

@@ -591,9 +591,12 @@ impl Controller {
             };
             let (tx, rx) = mpsc::channel();
             let ctl = self.clone();
-            if std::thread::Builder::new().name("shared-view-requests".into()).spawn(move || ctl.shared_requests(rx)).is_ok() {
-                let _ = tx.send(request);
-                rt.requests = Some(tx);
+            match std::thread::Builder::new().name("shared-view-requests".into()).spawn(move || ctl.shared_requests(rx)) {
+                Ok(_) => {
+                    tx.send(request).or_log("what a worker was asked did not reach it");
+                    rt.requests = Some(tx);
+                }
+                Err(error) => Err::<(), _>(error).or_log("a thread could not be started"),
             }
         }
         drop(rt);

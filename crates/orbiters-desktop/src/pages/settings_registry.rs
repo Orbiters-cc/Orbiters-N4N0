@@ -602,9 +602,11 @@ pub static ACTIONS: &[(&str, &str)] = &[
     // About: the worker's log shown, quitting.
     (mark("About"), mark("Worker log")),
     (mark("About"), mark("Quit")),
-    // The log: its file, copying it.
+    // The logs: the notices, the local diagnostics folder, and its latest errors.
     (mark("Log"), mark("Show the file")),
     (mark("Log"), mark("Copy all")),
+    (mark("Log"), mark("Open the log folder")),
+    (mark("Log"), mark("Copy the last errors")),
 ];
 
 /// Whether `key` in `card` is one of [`ACTIONS`].

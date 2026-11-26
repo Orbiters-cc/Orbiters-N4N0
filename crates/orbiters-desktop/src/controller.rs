@@ -1114,7 +1114,7 @@ impl Controller {
                 // The microphones for the settings.
                 let ctl = self.clone();
                 std::thread::spawn(move || {
-                    let _ = ctl.send(&WorkerCommand::ListSources);
+                    ctl.send(&WorkerCommand::ListSources).or_log("what a worker was asked did not reach it");
                 });
             }
             // Spout senders are watched here (`spawn_watchers`); the worker knows the microphones.
@@ -1472,7 +1472,7 @@ impl Controller {
                     osc.forwarding = true;
                     osc.pending.clear();
                     if !samples.is_empty() {
-                        let _ = self.send(&WorkerCommand::Osc { samples });
+                        self.send(&WorkerCommand::Osc { samples }).or_log("what a worker was asked did not reach it");
                     }
                 }
                 Some(sent)
@@ -3576,7 +3576,7 @@ fn spawn_watchers(ctl: Shared) {
                     }
                     // Microphones come and go (headsets): ask the worker again now and then.
                     if tick.is_multiple_of(15) && tick > 0 {
-                        let _ = ctl.send(&WorkerCommand::ListSources);
+                        ctl.send(&WorkerCommand::ListSources).or_log("what a worker was asked did not reach it");
                     }
                 }
 
@@ -3636,7 +3636,7 @@ fn spawn_watchers(ctl: Shared) {
                             }
                         }
                     } else {
-                        let _ = ctl.send(&WorkerCommand::SetWorld { world: ctl.current_world() });
+                        ctl.send(&WorkerCommand::SetWorld { world: ctl.current_world() }).or_log("what a worker was asked did not reach it");
                     }
                 }
                 ctl.check_stopping();

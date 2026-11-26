@@ -440,7 +440,7 @@ pub fn store_saved(owner: &str, group: &str, saved: &Saved) {
     if let Some(file) = saved_file(owner, group) {
         if let (Some(dir), Ok(bytes)) = (file.parent(), serde_json::to_vec_pretty(saved)) {
             std::fs::create_dir_all(dir).or_log("a folder could not be made");
-            let _ = orbiters_core::write_atomic_private(&file, &bytes);
+            orbiters_core::write_atomic_private(&file, &bytes).or_log("a file could not be written");
         }
     }
 }

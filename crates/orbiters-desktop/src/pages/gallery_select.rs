@@ -445,7 +445,7 @@ impl Selection {
                 let entries = by_keys(order, &self.carried);
                 let mut preparing = self.preparing.take().filter(|p| p.keys == self.carried);
                 let on_disk = preparing.as_mut().and_then(Preparing::made);
-                let gathered = self.gather(&entries, on_disk);
+                let gathered = self.gather(&entries, on_disk).checked(&entries);
                 if gathered.preparing || gathered.waiting > 0 {
                     // (Each picture that comes, or fails, wakes the page; so does the worker once it made the rest.)
                     self.waiting = (gathered.waiting > 0).then_some((gathered.waiting, entries.len()));
@@ -488,7 +488,7 @@ impl Selection {
         // A copy, once what it waits for came.
         if let Some(mut copying) = self.copying.take() {
             let entries = by_keys(order, &copying.keys);
-            let gathered = self.gather(&entries, copying.made());
+            let gathered = self.gather(&entries, copying.made()).checked(&entries);
             copying.waiting = gathered.waiting;
             if gathered.preparing || gathered.waiting > 0 {
                 self.copying = Some(copying);
@@ -747,6 +747,37 @@ struct Gathered {
 }
 
 /// What the bar says when nothing could be handed out.
+impl Gathered {
+    /// Once nothing is awaited any more (the hand-off: a drag to Windows, a copy to the clipboard), what was made on the
+    /// worker is looked at again on this thread (review 1124, W56-verify B4): a capture's picture goes only if it may
+    /// still leave the app and is still made from the capture's picture of now
+    /// ([`crate::capture_picture::still_handed`]: an edit saved, its redraw failed, the capture deleted since the lift
+    /// withholds it), a picture only if its file is still there. Before the worker, this was the hand-off frame's own
+    /// check; it is a look at a few files, not the encoding.
+    fn checked(mut self, entries: &[&Entry]) -> Self {
+        if self.preparing || self.waiting > 0 {
+            return self;
+        }
+        let by_key: HashMap<&str, &Entry> = entries.iter().map(|e| (e.key.as_str(), *e)).collect();
+        let keep: Vec<bool> = self
+            .keys
+            .iter()
+            .zip(&self.files)
+            .map(|(key, file)| match by_key.get(key.as_str()).and_then(|e| e.local.as_ref()) {
+                Some(Local::Session(dir)) => crate::capture_picture::still_handed(dir, file),
+                Some(Local::Picture(p)) => p.is_file(),
+                // Fetched from Orbiters: the file fetched, as before.
+                None => true,
+            })
+            .collect();
+        let mut kept = keep.iter();
+        self.keys.retain(|_| *kept.next().unwrap_or(&false));
+        let mut kept = keep.iter();
+        self.files.retain(|_| *kept.next().unwrap_or(&false));
+        self
+    }
+}
+
 fn nothing_came(g: &Gathered) -> String {
     match &g.failed {
         Some(why) => tr!("These could not be fetched from Orbiters: {why}", why = why),
@@ -1522,6 +1553,105 @@ mod tests {
             let _ = std::fs::remove_file(f);
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Review 1124, W56-verify B4: a reconstructed capture whose 3D view may leave the app (two splats, a preview).
+    fn exportable_capture() -> (PathBuf, Entry) {
+        use orbiters_core::reconstruction as rec;
+        let dir = std::env::temp_dir().join(format!("orbiters-handoff-{}", uuid::Uuid::new_v4()));
+        let result = rec::result_dir(&dir);
+        std::fs::create_dir_all(&result).unwrap();
+        let mut g = orbiters_reconstruct::gaussians::Gaussians::default();
+        g.push([0.0, 0.0, 1.0], [-3.0; 3], [1.0, 0.0, 0.0, 0.0], 1.0, [0.5; 3]);
+        g.push([1.0, 0.0, 1.0], [-3.0; 3], [1.0, 0.0, 0.0, 0.0], 1.0, [0.5; 3]);
+        orbiters_reconstruct::ply::write(&result.join(rec::PLY_FILE), &g).unwrap();
+        std::fs::write(result.join(rec::PREVIEW_FILE), orbiters_core::contracts::qoi::encode(&[99u8; 64 * 64 * 3], 64, 64, 3)).unwrap();
+        let e = entry(&dir.to_string_lossy(), false);
+        (dir, e)
+    }
+
+    /// A splat deleted and saved, the picture not drawn again for it: the capture's picture may not leave the app.
+    fn edit_without_redraw(dir: &Path) {
+        use orbiters_core::reconstruction as rec;
+        use orbiters_reconstruct::edit::{Edit, Identity, DELETED};
+        let result = rec::result_dir(dir);
+        let mut edit = Edit::new(2, Identity::read(&result.join(rec::PLY_FILE)).unwrap());
+        edit.marks[1] = DELETED;
+        edit.picture = false;
+        edit.save(&result).unwrap();
+        assert!(files(&[&entry(&dir.to_string_lossy(), false)]).is_empty(), "no longer exportable");
+    }
+
+    fn until_made(p: &mut Preparing) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while p.made().is_none() {
+            assert!(std::time::Instant::now() < until, "the worker never finished");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    fn update_frame(ctx: &egui::Context, sel: &mut Selection, order: &[Entry], t: f64, press: bool) {
+        let at = pos2(80.0, 80.0);
+        let mut events = vec![egui::Event::PointerMoved(at)];
+        if press {
+            events.push(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        }
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), events, time: Some(t), ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| {
+            if press {
+                sel.lift(ui.ctx(), &order[0], order);
+            }
+            let background = ui.interact(ui.max_rect(), Id::unique("handoff-background"), Sense::click_and_drag());
+            sel.update(ui, order, &background, false);
+        });
+        out.textures_delta.clear();
+    }
+
+    /// B4: one capture dragged; its PNG made on the worker; an edit saved before the frame that hands it to Windows.
+    /// The old picture is not handed out: the lift ends as when nothing can be dragged (before the worker, the hand-off
+    /// frame's own check refused it).
+    #[test]
+    fn a_capture_edited_after_the_lift_is_not_handed_to_the_drag() {
+        let (dir, e) = exportable_capture();
+        let order = vec![e];
+        let ctx = egui::Context::default();
+        let mut sel = Selection::default();
+        update_frame(&ctx, &mut sel, &order, 0.0, true);
+        until_made(sel.preparing.as_mut().expect("the lift prepares"));
+        edit_without_redraw(&dir);
+        update_frame(&ctx, &mut sel, &order, 1.0, false);
+        assert!(drag_out::take_pending().is_none(), "the picture made before the edit went to Windows");
+        assert!(sel.carried.is_empty(), "the lift ended");
+        assert_eq!(sel.said.as_ref().map(|s| s.0.as_str()), Some("These can't be dragged out"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// B4: two captures copied; once their PNGs are made, the first is edited (or deleted) before the copy's hand-off:
+    /// only the second goes to the clipboard.
+    #[test]
+    fn a_copy_hands_out_only_captures_that_may_still_leave() {
+        for deleted in [false, true] {
+            let (first, a) = exportable_capture();
+            let (second, b) = exportable_capture();
+            let order = vec![a, b];
+            let ctx = egui::Context::default();
+            let mut sel = Selection::default();
+            sel.copy(&ctx, order.iter().map(|e| e.key.clone()).collect(), &order);
+            until_made(sel.copying.as_mut().expect("the copy prepares"));
+            if deleted {
+                std::fs::remove_dir_all(&first).unwrap();
+            } else {
+                edit_without_redraw(&first);
+            }
+            let _ = drag_out::take_copied();
+            update_frame(&ctx, &mut sel, &order, 1.0, false);
+            let copied = drag_out::take_copied();
+            assert_eq!(copied.len(), 1, "deleted {deleted}: {copied:?}");
+            assert_eq!(copied[0].file_stem().map(|s| s.to_os_string()), second.file_name().map(|s| s.to_os_string()));
+            assert!(sel.copying.is_none());
+            let _ = std::fs::remove_dir_all(first);
+            let _ = std::fs::remove_dir_all(second);
+        }
     }
 
     #[test]

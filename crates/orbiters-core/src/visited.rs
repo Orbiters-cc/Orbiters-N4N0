@@ -561,6 +561,10 @@ pub struct Shot {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ShotIndex {
     files: BTreeMap<PathBuf, ShotEntry>,
+    /// One more each time a walk replaced or removed a picture of the index (W56-verify B5): hashes asked before are
+    /// not put in ([`ShotIndex::put_hashes`]), whatever the size and date at that path are by then.
+    #[serde(default)]
+    generation: u64,
 }
 
 pub fn shot_index_file() -> PathBuf {
@@ -594,9 +598,10 @@ impl ShotIndex {
         #[derive(Serialize)]
         struct Saved<'a> {
             files: BTreeMap<&'a Path, &'a ShotEntry>,
+            generation: u64,
         }
         let files = self.files.iter().filter(|(p, _)| p.to_str().is_some()).map(|(p, e)| (p.as_path(), e)).collect();
-        crate::write_atomic(path, &serde_json::to_vec(&Saved { files })?)?;
+        crate::write_atomic(path, &serde_json::to_vec(&Saved { files, generation: self.generation })?)?;
         Ok(())
     }
 
@@ -639,15 +644,17 @@ impl ShotIndex {
                 if !path.extension().is_some_and(|x| x.eq_ignore_ascii_case("png")) {
                     continue;
                 }
-                let size = meta.len();
-                let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos().min(u64::MAX as u128) as u64);
+                let (size, modified) = file_stamp(&meta);
                 seen.insert(path.clone());
                 if self.files.get(&path).is_some_and(|f| f.size == size && f.modified == modified) {
                     continue;
                 }
                 // What the file that was there said is not what this one says: while this one cannot be read (being written,
                 // or no picture), the path has none.
-                changed |= self.files.remove(&path).is_some();
+                if self.files.remove(&path).is_some() {
+                    changed = true;
+                    self.generation += 1;
+                }
                 if let Some(info) = read_shot(&path) {
                     self.files.insert(path, ShotEntry { size, modified, info, sha256: None, clean_sha256: None });
                     changed = true;
@@ -662,6 +669,9 @@ impl ShotIndex {
         }
         let before = self.files.len();
         self.files.retain(|p, _| seen.contains(p) || (dirs.iter().any(|d| p.starts_with(d)) && unavailable.iter().any(|d| p.starts_with(d))));
+        if self.files.len() != before {
+            self.generation += 1;
+        }
         changed | (self.files.len() != before)
     }
 
@@ -702,6 +712,11 @@ impl ShotIndex {
         self.put_hashes(hashed)
     }
 
+    /// How many times a walk replaced or removed a picture of the index.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Which of the given screenshots lack a hash, as the index knows them: what [`hash_files`] reads, with nothing of
     /// the index held meanwhile (DPG-27: the index's lock was held over reading every file whole, so the folder scan,
     /// Visited worlds and Photos & captures waited behind gigabytes of reads).
@@ -711,17 +726,21 @@ impl ShotIndex {
             .filter_map(|p| {
                 let e = self.files.get(p)?;
                 let (own, clean) = (e.sha256.is_none(), e.clean_sha256.is_none());
-                (own || clean).then(|| Unhashed { path: p.clone(), size: e.size, modified: e.modified, own, clean })
+                (own || clean).then(|| Unhashed { path: p.clone(), size: e.size, modified: e.modified, own, clean, generation: self.generation })
             })
             .collect()
     }
 
     /// Puts in the hashes [`hash_files`] read, of each screenshot the index still has as the same file (its size and
     /// date as when it was asked: one changed meanwhile is read again by the folder scan, with no hash); returns
-    /// whether any was added.
+    /// whether any was added. None asked before a walk replaced or removed a picture of the index (W56-verify B5:
+    /// that walk may have seen another file at that path meanwhile); they are asked again.
     pub fn put_hashes(&mut self, hashed: Vec<Hashed>) -> bool {
         let mut changed = false;
         for h in hashed {
+            if h.generation != self.generation {
+                continue;
+            }
             let Some(e) = self.files.get_mut(&h.path).filter(|e| e.size == h.size && e.modified == h.modified) else { continue };
             let own = h.own.filter(|_| e.sha256.is_none());
             let clean = h.clean.filter(|_| e.clean_sha256.is_none());
@@ -741,6 +760,8 @@ pub struct Unhashed {
     modified: u64,
     own: bool,
     clean: bool,
+    /// The index's generation when it was asked.
+    generation: u64,
 }
 
 /// What [`hash_files`] read of an [`Unhashed`] screenshot.
@@ -751,19 +772,34 @@ pub struct Hashed {
     modified: u64,
     own: Option<String>,
     clean: Option<String>,
+    generation: u64,
 }
 
-/// The hashes each screenshot lacked, each file read once (both from one reading when both are wanted).
+/// A file's size and date as the index keeps them.
+fn file_stamp(meta: &std::fs::Metadata) -> (u64, u64) {
+    let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos().min(u64::MAX as u128) as u64);
+    (meta.len(), modified)
+}
+
+/// The hashes each screenshot lacked, each file read once (both hashes from that one reading).
+///
+/// The hashes are of the file opened (W56-verify B5): its size and date, read from the open file before and after
+/// the reading, are the ones the index had when it asked; otherwise another file was at that path, or it was written
+/// meanwhile, and nothing is kept of it (the folder scan reads it again, and it is asked again). Read by its path
+/// after taking its size and date apart, a file swapped and swapped back during the reading kept another file's
+/// digest for good.
 pub fn hash_files(todo: Vec<Unhashed>) -> Vec<Hashed> {
     todo.into_iter()
         .map(|u| {
-            let (own, clean) = match (u.own, u.clean) {
-                (true, true) => crate::png_meta::both_sha256(&u.path),
-                (true, false) => (sha256_file(&u.path).ok(), None),
-                (false, true) => (None, crate::png_meta::clean_sha256(&u.path).ok()),
-                (false, false) => (None, None),
+            let read = || -> Option<(Option<String>, Option<String>)> {
+                let file = File::open(&u.path).ok()?;
+                let stamp = (u.size, u.modified);
+                (file_stamp(&file.metadata().ok()?) == stamp).then_some(())?;
+                let both = crate::png_meta::both_sha256_from(&file);
+                (file_stamp(&file.metadata().ok()?) == stamp).then_some(both)
             };
-            Hashed { path: u.path, size: u.size, modified: u.modified, own, clean }
+            let (own, clean) = read().unwrap_or_default();
+            Hashed { path: u.path, size: u.size, modified: u.modified, own: own.filter(|_| u.own), clean: clean.filter(|_| u.clean), generation: u.generation }
         })
         .collect()
 }
@@ -863,7 +899,8 @@ mod tests {
         for (name, bytes, _) in &cases {
             let path = dir.join(name);
             std::fs::write(&path, bytes).unwrap();
-            index.files.insert(path, ShotEntry { size: bytes.len() as u64, modified: 1, info: ShotInfo::default(), sha256: None, clean_sha256: None });
+            let (size, modified) = file_stamp(&std::fs::metadata(&path).unwrap());
+            index.files.insert(path, ShotEntry { size, modified, info: ShotInfo::default(), sha256: None, clean_sha256: None });
         }
         let paths: Vec<PathBuf> = cases.iter().map(|(name, ..)| dir.join(name)).collect();
         assert!(index.hash(&paths));
@@ -899,13 +936,14 @@ mod tests {
         let paths: Vec<PathBuf> = ["a.png", "b.png", "c.png"].iter().map(|n| dir.join(n)).collect();
         for p in &paths {
             std::fs::write(p, &png).unwrap();
-            index.files.insert(p.clone(), ShotEntry { size: png.len() as u64, modified: 1, info: ShotInfo::default(), sha256: None, clean_sha256: None });
+            let (size, modified) = file_stamp(&std::fs::metadata(p).unwrap());
+            index.files.insert(p.clone(), ShotEntry { size, modified, info: ShotInfo::default(), sha256: None, clean_sha256: None });
         }
         let todo = index.unhashed(&paths);
         assert_eq!(todo.len(), 3);
         let hashed = hash_files(todo);
         // Meanwhile: b was written again (the scan saw it), c was hashed by another job.
-        index.files.get_mut(&paths[1]).unwrap().modified = 2;
+        index.files.get_mut(&paths[1]).unwrap().modified += 1;
         index.files.get_mut(&paths[2]).unwrap().sha256 = Some("other job".into());
         assert!(index.put_hashes(hashed));
         assert_eq!(index.hashes_of(&paths[0]).0.map(str::to_owned), sha256_file(&paths[0]).ok());

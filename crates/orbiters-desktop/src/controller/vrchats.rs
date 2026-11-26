@@ -484,7 +484,8 @@ impl std::ops::Deref for TargetLog {
 // COR-1: process birth and profile identify the launch, while the account still
 // comes from its log. A world can write a framed lookalike of a sign-in record.
 // Independent confirmation needs a trusted, process-bound account source. The
-// profile number and the last account seen on it provide no such confirmation.
+// user can switch accounts within the same process, with its launch profile
+// unchanged. The last account seen on a profile is historical log data.
 pub(crate) fn shown(run: &VrchatRun, target: Option<u32>, chosen: Option<u32>) -> crate::state::VrchatRunShown {
     use crate::state::{VrchatDriverShown, VrchatRunShown};
     VrchatRunShown {

@@ -4358,6 +4358,7 @@ dependencies = [
  "serde",
  "serde_json",
  "ureq 3.4.2",
+ "uuid",
  "zune-core",
  "zune-jpeg",
 ]

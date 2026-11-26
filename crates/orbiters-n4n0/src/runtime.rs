@@ -398,6 +398,8 @@ pub(crate) struct N4n0Runtime {
     pub(crate) tracking_note: String,
     /// The last suggestion a menu other than the screen's sent, numbered, and why it failed.
     pub(crate) suggestion: Option<(u32, Option<String>)>,
+    /// The ids of the suggestions not confirmed sent (EXT-21).
+    pub(crate) suggestions_unconfirmed: orbiters_n4n0_core::suggestions::Unconfirmed,
     /// How the last Invite me of a menu other than the screen's went, numbered.
     pub(crate) invite: Option<(u32, orbiters_n4n0_core::menu::InviteAnswer)>,
     /// The QR code scanner (qr.rs): the scan running, and what the menus show of it.

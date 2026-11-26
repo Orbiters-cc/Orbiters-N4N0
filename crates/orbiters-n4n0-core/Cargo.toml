@@ -12,6 +12,7 @@ orbiters-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+uuid = { workspace = true }
 rosc = { workspace = true }
 # Its TLS is orbiters-core's, per platform (`orbiters_core::http_tls`).
 ureq = { version = "3", default-features = false, features = ["json", "gzip"] }

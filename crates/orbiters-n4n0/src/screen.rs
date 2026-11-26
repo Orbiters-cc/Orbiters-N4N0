@@ -2344,12 +2344,12 @@ impl Fence<'_> {
         let _ = std::thread::Builder::new().name("n4n0-suggestion".into()).spawn(move || {
             // As the member who sent it or not at all; and how it went is told to them only.
             let Some(fence) = later.fence() else { return };
-            let about = orbiters_n4n0_core::suggestions::About {
-                source: "menu",
-                app_version: fence.host.app_version(),
-                n4n0_version: fence.n4n0.lock().unwrap().n4n0_version.clone(),
-                voice,
+            let (n4n0_version, client_id) = {
+                let mut rt = fence.n4n0.lock().unwrap();
+                let id = rt.suggestions_unconfirmed.id(fence.epoch(), &text);
+                (rt.n4n0_version.clone(), id)
             };
+            let about = orbiters_n4n0_core::suggestions::About { source: "menu", app_version: fence.host.app_version(), n4n0_version, voice, client_id };
             // The fence is held until it is sent: as the member who sent it, or not at all.
             let result = match fence.account() {
                 Some((api, token)) => orbiters_n4n0_core::suggestions::send(&api, &token, &text, &about).map_err(|e| format!("{e:#}")),
@@ -2358,6 +2358,9 @@ impl Fence<'_> {
             let n = fence;
             {
                 let mut rt = n.n4n0.lock().unwrap();
+                if result.is_ok() {
+                    rt.suggestions_unconfirmed.sent(&about.client_id);
+                }
                 if screen {
                     rt.screen.menu.suggestion_sent(result.clone());
                     rt.screen.last_activity = Instant::now();

@@ -38,6 +38,16 @@ fn gallery_of(e: &Entry) -> Option<u64> {
     e.world_id.strip_prefix(GROUP)?.parse().ok()
 }
 
+/// The gallery an entry of a community's gallery is of.
+pub(super) fn gallery_id(e: &Entry) -> Option<u64> {
+    gallery_of(e)
+}
+
+/// Where an event's window opens from and closes into: its card, at the top of the gallery's `heading`.
+fn header_origin(heading: Rect) -> Rect {
+    Rect::from_min_size(heading.min + vec2(10.0, 10.0), vec2(128.0, 80.0))
+}
+
 fn visibility(g: Option<&Gallery>) -> (&'static str, &'static str, Color32) {
     match g.map(|g| g.visibility.as_str()) {
         Some("public") => (icons::GLOBE, tr("Public"), theme::OK),
@@ -384,7 +394,7 @@ impl State {
                 }
                 self.event = Some(w);
             }
-            self.headers.insert(gid, Rect::from_min_size(card.min + vec2(10.0, 10.0), vec2(128.0, 80.0)));
+            self.headers.insert(gid, header_origin(card));
             return;
         }
         let p = ui.painter().clone();
@@ -676,11 +686,20 @@ impl State {
         self.open(ctx, &key, origin, &keys);
     }
 
-    /// Opens the first event gallery's event as if its card was pressed (screenshots).
-    pub fn open_event(&mut self, ctx: &egui::Context) {
+    /// The first event gallery (screenshots).
+    pub fn event_gallery(&self) -> Option<u64> {
+        self.galleries.as_ref()?.all().find(|g| g.event.is_some()).map(|g| g.id)
+    }
+
+    /// Opens the first event gallery's event as if its card was pressed (screenshots), its `heading` where the list has
+    /// it (else where it was last drawn).
+    pub fn open_event(&mut self, ctx: &egui::Context, heading: Option<Rect>) {
         let Some(g) = self.galleries.as_ref().and_then(|g| g.all().find(|g| g.event.is_some()).cloned()) else { return };
         let Some(e) = g.event.clone() else { return };
-        let origin = self.headers.get(&g.id).copied().unwrap_or(Rect::from_min_size(pos2(300.0, 200.0), vec2(128.0, 80.0)));
+        let origin = heading
+            .map(header_origin)
+            .or_else(|| self.headers.get(&g.id).copied())
+            .unwrap_or(Rect::from_min_size(pos2(300.0, 200.0), vec2(128.0, 80.0)));
         let mut w = events::Window::open(ctx, e.clone(), origin, 16.0, Server::Production);
         w.gallery = Some(g.id);
         w.show_pictures = false;

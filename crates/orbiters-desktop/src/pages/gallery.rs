@@ -165,6 +165,8 @@ pub struct State {
     shared_count: usize,
     /// Where the open window's item was last found in the list.
     dialog_at: usize,
+    /// Where the list's top left was on screen at the last frame (its places are counted from there).
+    list_base: egui::Pos2,
     /// Screenshots: made-up local pictures added to this computer's (several shapes, a multi-layer picture).
     fixture_extra: Vec<Entry>,
     /// Screenshots: the made-up pictures alone, none of this computer's.
@@ -303,6 +305,17 @@ impl State {
 
     pub fn community_mut(&mut self) -> &mut super::community::State {
         &mut self.community
+    }
+
+    /// Screenshots: the first event gallery's event, opened as if its heading was pressed, from where the list has that
+    /// heading, in view or not (only those in view are drawn).
+    pub fn open_community_event(&mut self, ctx: &egui::Context) {
+        let heading = self.community.event_gallery().and_then(|gallery| {
+            let places = self.places.as_ref()?;
+            let group = places.groups.iter().find(|g| self.shown.get(g.entries.start).is_some_and(|e| super::community::gallery_id(e) == Some(gallery)))?;
+            Some(group.heading(places.key.width).translate(self.list_base.to_vec2()))
+        });
+        self.community.open_event(ctx, heading);
     }
 
     /// The entries the page shows (screenshots open their windows).
@@ -960,6 +973,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, capture: &mut super::ca
                 }
                 let at = drawn.as_ref().or(places.as_ref()).expect("just made");
                 let base = ui.cursor().min.round_ui();
+                state.list_base = base;
                 // What is in view, and a little around it (a card's shadow, a heading on its way in).
                 let (from, to) = (ui.clip_rect().top() - base.y - 24.0, ui.clip_rect().bottom() - base.y + 24.0);
                 // The first headings come in one after the other, whether they are in view or not; those after together.

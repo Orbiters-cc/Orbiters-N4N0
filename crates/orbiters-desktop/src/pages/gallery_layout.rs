@@ -151,7 +151,7 @@ pub struct Group {
 impl Group {
     /// Its heading, in a list `width` wide, from the list's top left.
     pub fn heading(&self, width: f32) -> Rect {
-        Rect::from_min_size(pos2(0.0, self.top), vec2(width, self.head))
+        Rect::from_min_size(pos2(0.0, self.top), vec2(width.round_ui(), self.head))
     }
 }
 
@@ -193,7 +193,8 @@ impl Places {
             let tallest = cells.iter().map(Rect::height).fold(0.0, f32::max);
             out.cells.extend(cells.into_iter().map(|c| c.translate(vec2(0.0, area))));
             out.groups.push(Group { entries: entries.clone(), top, head, bottom: area + height, tallest });
-            y = area + height + key.spacing + UNDER_GROUP;
+            // egui advances from the rounded bottom of the allocated area, including for fractional row heights.
+            y = (area + height).round_ui() + key.spacing + UNDER_GROUP;
         }
         out.height = y;
         out

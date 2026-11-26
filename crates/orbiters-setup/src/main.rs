@@ -210,8 +210,11 @@ pub fn install_dir(args: &Args) -> Option<PathBuf> {
     if let Some(dir) = &args.dir {
         return Some(dir.clone());
     }
-    let beside = std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)).filter(|d| InstallRecord::read(d).is_some());
-    beside.or_else(system::registered_dir).filter(|d| InstallRecord::read(d).is_some())
+    // A record there that cannot be read now still marks the install (W1-1): what is done with it then says it cannot be read,
+    // and a recovery at sign-in is scheduled again, instead of "not installed".
+    let holds = |d: &PathBuf| !matches!(InstallRecord::load(d), Ok(None));
+    let beside = std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)).filter(holds);
+    beside.or_else(system::registered_dir).filter(holds)
 }
 
 /// The folder a new install goes to, unless the person picks another: where it already is, or the default.
@@ -219,7 +222,7 @@ pub fn install_dir(args: &Args) -> Option<PathBuf> {
 pub fn target_dir(args: &Args) -> PathBuf {
     args.dir
         .clone()
-        .or_else(|| system::registered_dir().filter(|d| orbiters_update::InstallRecord::read(d).is_some()))
+        .or_else(|| system::registered_dir().filter(|d| !matches!(orbiters_update::InstallRecord::load(d), Ok(None))))
         .unwrap_or_else(orbiters_update::default_install_dir)
 }
 
@@ -283,7 +286,16 @@ fn silent(args: &Args, payload: Option<&'static [u8]>) -> i32 {
     // or the same version (the app updated meanwhile) is never installed again, and the retry is dropped.
     if args.retry && args.mode == Mode::Update {
         let holds = payload.and_then(|p| orbiters_update::payload::read_index(p).ok()).map(|i| i.version);
-        let installed = install_dir(args).and_then(|d| orbiters_update::InstallRecord::read(&d)).map(|r| r.version);
+        let dir = install_dir(args);
+        let installed = match dir.as_deref().map(orbiters_update::InstallRecord::load) {
+            Some(Ok(record)) => record.map(|r| r.version),
+            Some(Err(e)) => {
+                eprintln!("the install record cannot be read now: {e}"); // i18n: not shown (a log line)
+                retry_update_at_sign_in(args);
+                return 1;
+            }
+            None => None,
+        };
         if !retry_is_due(holds.as_deref(), installed.as_deref()) {
             system::cancel_update_retry();
             return 0;
@@ -312,15 +324,18 @@ fn after_update(args: &Args, result: &anyhow::Result<()>) {
     }
     match result {
         // The app kept running: nothing changed, and the same update is tried again at the next sign-in.
-        Err(e) if e.downcast_ref::<install::StillRunning>().is_some() => {
-            if let (Ok(me), Some(dir)) = (std::env::current_exe(), install_dir(args)) {
-                if let Err(e) = system::schedule_update_retry(&retry_command(&me, &dir, args)) {
-                    eprintln!("the update could not be scheduled again: {e:#}"); // i18n: not shown (a log line)
-                }
-            }
-        }
+        Err(e) if e.downcast_ref::<install::StillRunning>().is_some() => retry_update_at_sign_in(args),
         Ok(()) => system::cancel_update_retry(),
         Err(_) => {}
+    }
+}
+
+#[cfg(windows)]
+fn retry_update_at_sign_in(args: &Args) {
+    if let (Ok(me), Some(dir)) = (std::env::current_exe(), install_dir(args)) {
+        if let Err(e) = system::schedule_update_retry(&retry_command(&me, &dir, args)) {
+            eprintln!("the update could not be scheduled again: {e:#}"); // i18n: not shown (a log line)
+        }
     }
 }
 
@@ -351,7 +366,9 @@ fn run_task(args: &Args, payload: Option<&'static [u8]>, progress: &install::Pro
                 start_with_steamvr: false,
                 channel: orbiters_update::STABLE.into(),
             };
-            let fresh = orbiters_update::InstallRecord::read(&options.dir).is_none();
+            let fresh = orbiters_update::InstallRecord::load(&options.dir)
+                .map_err(|e| swap::unreadable(&options.dir.join(orbiters_update::RECORD_FILE), e))?
+                .is_none();
             install::install(bytes, &options, progress, silent, fresh).map(|_| options.dir)
         }
         Mode::Update => {
@@ -369,7 +386,7 @@ fn run_task(args: &Args, payload: Option<&'static [u8]>, progress: &install::Pro
     for note in progress.status().notes {
         eprintln!("{note}");
     }
-    // After an update that did not finish too: it closed the app, and what is there is the version it was.
+    // After a failed update, relaunch checks that recovery left a complete installation.
     if args.mode == Mode::Update && args.relaunch {
         if let Some(dir) = install_dir(args).filter(|d| result.is_ok() || !system::app_runs_from(d)) {
             relaunch(&dir, args.hidden);
@@ -378,9 +395,14 @@ fn run_task(args: &Args, payload: Option<&'static [u8]>, progress: &install::Pro
     result.map(drop)
 }
 
-/// The app again, after an update.
+/// The app again, after an update: only from a folder holding one version whole (W1-4). After a put-back that could not end, the
+/// old program would start beside new files, and hold them while the next recovery tries to end it.
 #[cfg(windows)]
 pub fn relaunch(dir: &std::path::Path, hidden: bool) {
+    if !swap::whole(dir) {
+        eprintln!("Orbiters - N4N0 is not started again: {} holds no whole version", dir.display()); // i18n: not shown (a log line)
+        return;
+    }
     let args: &[&str] = if hidden { &["--hidden"] } else { &[] };
     if let Err(e) = system::launch(&dir.join(orbiters_update::APP_EXE), args) {
         eprintln!("Orbiters - N4N0 could not be started again: {e}");

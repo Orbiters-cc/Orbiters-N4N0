@@ -125,9 +125,10 @@ impl Builder {
 
     /// A still for `project`'s card, after the builds (once a session).
     pub fn still(&mut self, project: &Path) {
-        if !self.stills_asked.insert(project.to_path_buf()) {
+        if self.stills_asked.contains(project) {
             return;
         }
+        self.stills_asked.insert(project.to_path_buf());
         let mut q = self.shared.queue();
         q.stills.push_back(project.to_path_buf());
         self.shared.wake.notify_one();

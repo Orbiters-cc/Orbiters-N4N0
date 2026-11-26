@@ -254,8 +254,9 @@ fn keep_places(list: &mut [&Project], places: &mut std::collections::HashMap<std
         places.clear();
     }
     for p in list.iter() {
-        let next = places.len();
-        places.entry(p.path.clone()).or_insert(next);
+        if !places.contains_key(&p.path) {
+            places.insert(p.path.clone(), places.len());
+        }
     }
     list.sort_by_key(|p| places.get(&p.path).copied().unwrap_or(usize::MAX));
 }
@@ -801,7 +802,9 @@ mod order_tests {
                 unity: "2022.3.22f1".into(),
                 registered: true,
                 modified: 100_000 - i,
-                avatars: (0..avatars).map(|a| Avatar { id: format!("avtr_{i}_{a}"), name: format!("Avatar {a}"), ..Default::default() }).collect(),
+                // Both fixtures render the same project covers and the same first project's details. Additional
+                // avatars sit on offscreen projects so their cloning is measured separately from rendering them.
+                avatars: (0..if i < 16 { 3 } else { avatars }).map(|a| Avatar { id: format!("avtr_{i}_{a}"), name: format!("Avatar {a}"), ..Default::default() }).collect(),
                 ..Default::default()
             })
             .collect();

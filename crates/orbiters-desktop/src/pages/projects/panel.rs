@@ -26,7 +26,8 @@ const AVAILABLE_FIRST: usize = 8;
 #[allow(clippy::too_many_arguments)]
 pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, content_top: f32, split: Split, dock: f32, panel_w: f32) {
     let ctx = ui.ctx().clone();
-    let Some(project) = state.scan.projects.iter().find(|p| Some(&p.path) == state.selected.as_ref()).cloned() else { return };
+    let scan = state.scan.arc();
+    let Some(project) = scan.projects.iter().find(|p| Some(&p.path) == state.selected.as_ref()) else { return };
     let rect = if split.docked {
         state.panel_closing = false;
         let out = (1.0 - dock) * (panel_w + PAD_X + 24.0);
@@ -102,37 +103,37 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
             ui.add_space(10.0 * (1.0 - k).max(0.0));
             ui.spacing_mut().item_spacing = vec2(0.0, 10.0);
             let top = ui.cursor().top();
-            hero(ui, cx, state, &project, !split.docked);
+            hero(ui, cx, state, project, !split.docked);
             // What Open in Unity came to, right under it.
             super::opening::card(ui, cx, state, &project.path, "panel");
-            only_here(ui, cx, state, &project);
-            super::storage_card::card(ui, state, &project);
+            only_here(ui, cx, state, project);
+            super::storage_card::card(ui, state, project);
             ctx.data_mut(|d| d.insert_temp(unity6_y, ui.cursor().top() - top));
-            super::unity6_card::card(ui, cx, state, &project);
+            super::unity6_card::card(ui, cx, state, project);
             if state.modal.is_none() {
                 super::ui::errors(ui, state, "panel");
             }
             // Which of their pictures the member can change on VRChat, and those changing.
             super::vrchat_picture::poll(&ctx, cx, state);
             // A world project has its worlds where an avatar project has its avatars.
-            if world_project(&project) {
-                super::world_card::card(ui, cx, state, &project);
+            if world_project(project) {
+                super::world_card::card(ui, cx, state, project);
             } else {
-                avatars(ui, cx, state, &project);
+                avatars(ui, cx, state, project);
             }
             ctx.data_mut(|d| d.insert_temp(mixer_y, ui.cursor().top() - top));
             // A trial waiting for Creator Companion's migration: no package change from here (its Unity 6 card says why).
             let waiting = state.u6.waiting(&project.path);
             if !waiting {
-                mixer(ui, cx, state, &project);
+                mixer(ui, cx, state, project);
             }
             ctx.data_mut(|d| d.insert_temp(packages_y, ui.cursor().top() - top));
             if !waiting {
-                super::packages_card::packages(ui, state, &project);
-                available(ui, state, &project);
+                super::packages_card::packages(ui, state, project);
+                available(ui, state, project);
             }
             ctx.data_mut(|d| d.insert_temp(commits_y, ui.cursor().top() - top));
-            commits(ui, cx, state, &project);
+            commits(ui, cx, state, project);
             ui.add_space(8.0);
         });
     });
@@ -141,7 +142,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
     // gutter beyond holds the scroll bar and no content).
     let cut = Rect::from_min_max(rect.min + vec2(8.0, 8.0), pos2(rect.right() - 3.0 - 11.0, rect.bottom() - 8.0));
     paint::round_clipped_corners(ui.painter(), rect, theme::squircle(24.0), cut, theme::ink_900());
-    sticky_bar(ui, cx, state, &project, rect, from, out.state.offset().y, !split.docked);
+    sticky_bar(ui, cx, state, project, rect, from, out.state.offset().y, !split.docked);
 }
 
 /// Once the hero card scrolled away, the project's name and Open in Unity stay at the panel's top over the cards

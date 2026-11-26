@@ -30,6 +30,29 @@ pub fn jpeg(session: &Path) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// When the picture a PNG of the capture is made from was last written (its 3D view, else its thumbnail).
+fn source_written(session: &Path) -> Option<std::time::SystemTime> {
+    [
+        orbiters_core::reconstruction::result_dir(session).join(orbiters_core::reconstruction::PREVIEW_FILE),
+        session.join(orbiters_core::bundle::PICTURE_THUMBNAIL_FILE),
+    ]
+    .into_iter()
+    .find_map(|p| std::fs::metadata(p).ok()?.modified().ok())
+}
+
+/// Whether `file`, the PNG [`png_file`] made of `session`, may still be handed out now: the capture's picture may still
+/// leave the app (no edit since that it is not drawn for), and `file` is made from the picture there is now (none
+/// written after it; the capture still there). What a drag or a copy looks at as it hands out a PNG made earlier on
+/// a worker (review 1124, W56-verify B4).
+pub fn still_handed(session: &Path, file: &Path) -> bool {
+    let state = orbiters_reconstruct::edit::picture_state(&orbiters_core::reconstruction::result_dir(session));
+    if !state.preview_ok() {
+        return false;
+    }
+    let made = std::fs::metadata(file).and_then(|m| m.modified());
+    matches!((source_written(session), made), (Some(source), Ok(made)) if made >= source)
+}
+
 /// As a PNG file named after the capture (`<name>.png`) in `dir`, written again only when the capture's picture
 /// changed since (a new reconstruction): what a capture dragged out of the app is.
 pub fn png_file(session: &Path, dir: &Path, name: &str) -> Option<PathBuf> {
@@ -38,12 +61,7 @@ pub fn png_file(session: &Path, dir: &Path, name: &str) -> Option<PathBuf> {
     if !state.preview_ok() {
         return None;
     }
-    let source = [
-        orbiters_core::reconstruction::result_dir(session).join(orbiters_core::reconstruction::PREVIEW_FILE),
-        session.join(orbiters_core::bundle::PICTURE_THUMBNAIL_FILE),
-    ]
-    .into_iter()
-    .find_map(|p| std::fs::metadata(p).ok()?.modified().ok());
+    let source = source_written(session);
     let file = dir.join(format!("{name}.png"));
     let fresh = std::fs::metadata(&file).and_then(|m| m.modified()).is_ok_and(|made| source.is_some_and(|s| made >= s));
     if fresh {

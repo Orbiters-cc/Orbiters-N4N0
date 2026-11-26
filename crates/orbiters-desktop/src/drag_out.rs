@@ -50,6 +50,18 @@ pub fn take_pending() -> Option<Drag> {
     PENDING.locked().take()
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests: the files [`copy_files`] was last given on this thread.
+    static COPIED: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Tests: the files last copied on this thread, taken.
+#[cfg(test)]
+pub fn take_copied() -> Vec<PathBuf> {
+    COPIED.with(|c| std::mem::take(&mut *c.borrow_mut()))
+}
+
 /// How the last drag ended, once.
 pub fn take_outcome() -> Option<Outcome> {
     LAST.locked().take()
@@ -58,15 +70,21 @@ pub fn take_outcome() -> Option<Outcome> {
 /// Puts these files on the clipboard as Explorer's Copy does (the same shell data object as a drag): pasted in a
 /// folder, Discord or a browser, they are copied there. On the window's thread.
 pub fn copy_files(files: &[PathBuf]) -> Result<(), String> {
-    #[cfg(windows)]
+    // Tests never write the person's clipboard: what would have been put there is kept for the test's thread.
+    #[cfg(test)]
+    {
+        COPIED.with(|c| *c.borrow_mut() = files.to_vec());
+        Ok(())
+    }
+    #[cfg(all(windows, not(test)))]
     {
         win::copy(files)
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(test)))]
     {
         mac::copy(files)
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(not(any(windows, target_os = "macos", test)))]
     {
         let _ = files;
         Err(orbiters_i18n::tr("Copying files is for Windows").into())

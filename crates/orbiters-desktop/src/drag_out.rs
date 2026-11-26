@@ -44,6 +44,12 @@ pub fn start(drag: Drag) {
     *PENDING.locked() = Some(drag);
 }
 
+/// Tests: the drag asked for, taken as the window's next frame would.
+#[cfg(test)]
+pub fn take_pending() -> Option<Drag> {
+    PENDING.locked().take()
+}
+
 /// How the last drag ended, once.
 pub fn take_outcome() -> Option<Outcome> {
     LAST.locked().take()

@@ -1008,10 +1008,18 @@ fn profile_fetch(backend: &crate::backend::Ctl, scope: &crate::controller::vrcha
 /// A picture on this computer (a screenshot, from its kept thumbnail, or a session's thumbnail) decoded on the calling
 /// thread, for the drag image of Photos & captures' cards; None for pictures from the network.
 pub fn decode_local(picture: &Picture) -> Option<ColorImage> {
+    #[cfg(test)]
+    DECODED_HERE.with(|n| n.set(n.get() + 1));
     match picture {
         Picture::Shot { .. } | Picture::Layer { .. } | Picture::Session(_) => decode(&Api::new(Server::Production), true, picture),
         _ => None,
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: the pictures [`decode_local`] decoded on this thread.
+    pub static DECODED_HERE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Thumbnails are this wide (kept on disk).

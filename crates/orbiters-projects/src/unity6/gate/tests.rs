@@ -581,6 +581,8 @@ const READS: &[&str] = &[
     "crate::templates::Keep", "crate::templates::Keep::", "crate::templates::left_out", "crate::templates::retarget_with", "crate::templates::packages_only_in_library", "crate::templates::installed_dependencies_complete",
     "crate::templates::dependencies_complete", "crate::templates::Marker", "crate::templates::Marker::", "crate::templates::INCOMPLETE", "crate::templates::Progress", "crate::templates::SharedProgress", "crate::templates::validate_name",
     "crate::builtin_templates::", "crate::copying", "crate::copying::", "crate::copies::", "crate::unity6::", "crate::find_editors", "crate::network::", "orbiters_core::app_version", "orbiters_core::account::", "orbiters_update::",
+    // Taking a lock, also after a panic (XCT-31): what it writes is a line of the app's own log, nothing of theirs.
+    "orbiters_core::locks::",
 ];
 
 /// What one file alone may use besides, and why.

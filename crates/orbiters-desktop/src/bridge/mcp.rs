@@ -651,6 +651,34 @@ fn tool_result(name: &str, answer: Result<Answer, super::game::Failure>) -> Valu
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    fn a_quiet_listener_waits_for_its_housekeeping_deadline() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let every = Duration::from_millis(100);
+        let sample = |wait: &dyn Fn(Duration)| {
+            let mut ticked = Instant::now();
+            let end = ticked + every * 6;
+            let mut waits = 0;
+            while Instant::now() < end {
+                assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+                wait(every.saturating_sub(ticked.elapsed()));
+                waits += 1;
+                if ticked.elapsed() >= every {
+                    ticked = Instant::now();
+                }
+            }
+            waits
+        };
+        let before = sample(&|_| std::thread::sleep(Duration::from_millis(15)));
+        let after = sample(&|until| wait_for_one(&listener, until));
+        println!("BRG-7, quiet listener waits in 600 ms: {before} -> {after}");
+        // Windows may round a wait short of the deadline. Allow extra
+        // waits at those boundaries while detecting the old 15 ms cadence.
+        assert!(after <= 18, "a quiet listener completed {after} waits");
+    }
+
     #[test]
     fn answers_carrying_vrchat_s_text_say_it_is_data() {
         // N4N0-7: a world's name or a sign is a stranger's text, beside every tool's answer that can carry it.

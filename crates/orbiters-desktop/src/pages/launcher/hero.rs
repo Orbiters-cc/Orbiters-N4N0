@@ -467,10 +467,9 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
         let c = pos2(x + chip * 0.5, r.center().y - 2.0 * hover);
         p.circle_filled(c, chip * 0.5, if primary { theme::black(0.12) } else { theme::white(0.06) });
         if starting {
-            let t = anim::clock(&ctx, 60.0) as f32;
+            let t = anim::working(&ctx) as f32;
             paint::ring(&p, c, 12.0, 2.5, theme::alpha(fg, 0.25));
             paint::arc(&p, c, 12.0, t * 6.0, 1.9, 2.5, fg);
-            ctx.request_repaint();
         } else if running {
             widgets::icon(&p, c, glyph, 24.0, theme::accent());
             widgets::status_dot(&p, c + vec2(17.0, 15.0), widgets::Tone::Ok, true);
@@ -511,9 +510,8 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
         let w = widgets::text_size(ui, &txt).x + 26.0;
         let x0 = r.center().x - w * 0.5;
         if starting {
-            let t = anim::clock(&ctx, 60.0) as f32;
+            let t = anim::working(&ctx) as f32;
             paint::arc(&p, pos2(x0 + 9.0, r.center().y), 7.0, t * 6.0, 1.9, 2.0, fg);
-            ctx.request_repaint();
         } else {
             widgets::icon(&p, pos2(x0 + 9.0, r.center().y), glyph, 17.0, fg);
         }

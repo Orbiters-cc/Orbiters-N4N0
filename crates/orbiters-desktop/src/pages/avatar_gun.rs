@@ -373,8 +373,9 @@ fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, chosen: Option<&str>) -> Op
             ui.add_space(8.0);
         }
     });
-    if state.pictures.as_ref().is_some_and(|p| p.loading()) || !state.store.settled() {
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    // (Its pictures wake the page; the lists are read by a thread of a store the headset's panel has too.)
+    if !state.store.settled() {
+        orbiters_ui::anim::working_read(&ctx);
     }
     pressed
 }

@@ -272,21 +272,29 @@ fn mine_of<'a>(mine: &'a Option<crate::state::MapsMine>, id: &str) -> Option<&'a
     mine.as_ref()?.worlds.iter().find(|w| w.world_id == id)
 }
 
-pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
-    let ctx = ui.ctx().clone();
-    let page = ui.max_rect();
+/// What the page shows on its first frame, read before it (`App::prepare`).
+pub fn prepare(ui: &Ui, cx: &Cx, state: &mut State) {
+    follow_list(ui.ctx(), cx, state);
+}
 
-    // Reload when the library changes, the folder changes, or the page is entered again.
+/// Reads the worlds again when the library changes, the folder changes, or the page is entered again.
+fn follow_list(ctx: &egui::Context, cx: &Cx, state: &mut State) {
     let key = (cx.ctl.library_version(), cx.snap.settings.sessions_dir.clone(), cx.visit);
     if state.loaded.as_ref() != Some(&key) {
         let entered = state.loaded.as_ref().is_none_or(|k| k.2 != key.2);
         state.loaded = Some(key);
         let dir = cx.snap.settings.sessions_dir.clone();
-        state.list = Job::spawn(&ctx, move || worlds::load(&dir));
+        state.list = Job::spawn(ctx, move || worlds::load(&dir));
         if entered {
             cx.ctl.request_maps();
         }
     }
+}
+
+pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
+    let ctx = ui.ctx().clone();
+    let page = ui.max_rect();
+    follow_list(&ctx, cx, state);
     if let Some(list) = state.list.take() {
         state.worlds = Some(list.into_iter().map(Arc::new).collect());
         state.shown = None;
@@ -414,12 +422,13 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
                     clicked = Some((world.id.clone(), cover_r));
                 }
                 // A right press: what the world offers.
-                let sharable = (world.reconstructed() > 0 || !world.shots.is_empty()) && !state.share_prepare.running();
-                let acts = if interactive && !open_here { card_acts(world, sharable) } else { Vec::new() };
-                let items: Vec<orbiters_ui::popup::Item> = acts.iter().map(|(i, _)| *i).collect();
-                if let Some(k) = orbiters_ui::popup::context_menu(ui, &resp, "world-card", &items) {
+                let acts = || {
+                    let sharable = (world.reconstructed() > 0 || !world.shots.is_empty()) && !state.share_prepare.running();
+                    if interactive && !open_here { card_acts(world, sharable) } else { Vec::new() }
+                };
+                if let Some((_, act)) = orbiters_ui::popup::context_menu(ui, &resp, "world-card", acts, |(i, _)| *i) {
                     let thumb = Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0));
-                    match acts[k].1 {
+                    match act {
                         CardAct::Open => clicked = Some((world.id.clone(), thumb)),
                         CardAct::Share(public) => share_clicked = Some((share_paths(world), public, thumb)),
                         act => menu_picked = Some((act, world.clone())),
@@ -934,6 +943,7 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                 // Pictures.
                 let (title_r, _) = ui.allocate_exact_size(vec2(w, 44.0), Sense::hover());
                 let title_r = title_r.translate(vec2(0.0, dy));
+                let new: Vec<&Shot> = world.shots.iter().filter(|s| !sharing.shared(s)).collect();
                 let shared_n = world.shots.iter().filter(|s| sharing.shared(s)).count();
                 let pictures_sub = if world.shots.is_empty() {
                     tr("Pictures you take here in VRChat show up here.").to_string()
@@ -943,7 +953,6 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                     tr!("{count} on this computer · pick the ones to show on the Map explorer", count = world.shots.len())
                 };
                 section_title(&cu, title_r, tr("Pictures"), &pictures_sub);
-                let new: Vec<&Shot> = world.shots.iter().filter(|s| !sharing.shared(s)).collect();
                 if !new.is_empty() && sharing.blocked.is_none() {
                     let label = if selecting { tr("Clear selection") } else { tr("Select all new") };
                     let b = Button::new(label).variant(Variant::Ghost).size(Size::Sm);

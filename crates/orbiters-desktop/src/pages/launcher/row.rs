@@ -14,8 +14,9 @@ use orbiters_ui::{paint, widgets};
 
 /// The account itself at the top: picture, name, status; Read again (and Close over the page).
 pub(super) fn me(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, drawer: bool, clock: f64) {
-    let me = state.data.me.clone();
-    if let Some(me) = &me {
+    let data = state.data.clone();
+    let me = &data.me;
+    if let Some(me) = me {
         super::backdrop(ui.painter(), rect, 14.0, state, &me.look, column_fill(), 0.15, 0.85);
     }
     let pic = Rect::from_min_size(pos2(rect.left() + 6.0, rect.center().y - 21.0), vec2(42.0, 42.0));
@@ -23,7 +24,7 @@ pub(super) fn me(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, drawer
     let right_room = if drawer { 76.0 } else { 42.0 };
     let max_w = rect.right() - text_x - right_room;
     let p = ui.painter().clone();
-    match &me {
+    match me {
         Some(me) => {
             let picture = state.picture(&me.look.icon);
             let frame = state.picture(&me.look.icon_frame);
@@ -77,7 +78,6 @@ pub(super) fn sign_in_note(ui: &mut Ui, cx: &mut Cx, state: &mut State, inner: R
         widgets::frame(&p, row, 12.0, theme::white(0.04));
         orbiters_ui::feedback::spinner(&p, pos2(row.left() + 18.0, row.center().y), 6.0, 2.0, theme::fg_3());
         widgets::text_truncated(&p, pos2(row.left() + 34.0, row.center().y), Align2::LEFT_CENTER, &Txt::new(&text, 12.5).color(theme::fg_2()), row.width() - 44.0);
-        anim::request_frame(ui.ctx());
         return y + row.height() + 10.0;
     }
     let text = match (states::live(&state.data), &state.data.source) {
@@ -430,7 +430,8 @@ fn header(ui: &mut Ui, state: &mut State, rect: Rect, group: &str, section: Sect
 /// A person's row: picture and status, name in their rank's colour, where they are or their status line, their
 /// profile's banner behind; on hover, Boop and Request invite at its end. A press opens their profile.
 fn person(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, group: &str, index: usize, clock: f64) {
-    let Some(friend) = state.data.friends.get(index).cloned() else { return };
+    let data = state.data.clone();
+    let Some(friend) = data.friends.get(index) else { return };
     let ctx = ui.ctx().clone();
     let card = rect.shrink2(vec2(4.0, 2.0));
     let id = Id::unique(("launcher-person", group, &friend.id));
@@ -450,16 +451,16 @@ fn person(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, group: &str, 
         faded.multiply_opacity(0.55);
     }
     let frame = state.picture(&friend.look.icon_frame);
-    person_picture(&faded, pic, picture.as_ref(), frame.as_ref(), &friend, fill);
+    person_picture(&faded, pic, picture.as_ref(), frame.as_ref(), friend, fill);
 
     // The buttons at the end, on hover: their room comes off the text's.
     let now = state.now();
-    let request = states::request(&state.data, &friend, state.requested.get(&friend.id).copied(), clock, now);
+    let request = states::request(&state.data, friend, state.requested.get(&friend.id).copied(), clock, now);
     let booped = state.booped.get(&friend.id).cloned();
-    let boop = states::boop(&state.data, &friend, booped.as_ref().map(|b| b.0), clock, now);
+    let boop = states::boop(&state.data, friend, booped.as_ref().map(|b| b.0), clock, now);
     // An instance that takes the account without asking: Select (into Where) in Request's place (REQUEST23); both words
     // get the wider one's room, so a row never jumps between them.
-    let select = (request == Reach::Ready).then(|| super::previous::friend_selectable(state, &friend)).flatten();
+    let select = (request == Reach::Ready).then(|| super::previous::friend_selectable(state, friend)).flatten();
     let request_w = match request {
         Reach::Ready | Reach::Waiting => pill_width(ui, tr_ctx("request invite, short", "Request")).max(pill_width(ui, tr_ctx("choose an instance", "Select"))),
         Reach::Sent => pill_width(ui, tr_ctx("sent", "Sent")),
@@ -476,7 +477,7 @@ fn person(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, group: &str, 
     let name_color = if offline { theme::mix(rank_color(friend.look.rank), theme::fg_3(), 0.45) } else { rank_color(friend.look.rank) };
     widgets::text_truncated(&p, pos2(x, card.center().y - 9.0), Align2::LEFT_CENTER, &Txt::new(&friend.name, 13.5).weight(weight::SEMIBOLD).color(name_color), room);
     let seen = friend.last_seen.filter(|_| friend.presence == Presence::Offline).map(|at| super::super::ago(&ctx, at.max(0) as u64, now.max(0) as u64));
-    second_line(&p, &friend, pos2(x, card.center().y + 10.0), room, booped.as_ref().filter(|b| clock - b.0 < states::SENT_FOR).is_some(), seen);
+    second_line(&p, friend, pos2(x, card.center().y + 10.0), room, booped.as_ref().filter(|b| clock - b.0 < states::SENT_FOR).is_some(), seen);
 
     if reveal > 0.01 {
         let mut right = card.right() - 10.0 + 8.0 * (1.0 - reveal);

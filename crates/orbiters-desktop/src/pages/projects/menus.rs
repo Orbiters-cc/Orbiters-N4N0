@@ -170,6 +170,37 @@ enum RowAct {
 /// its Blender files.
 pub(super) fn row_menu(ui: &Ui, cx: &mut Cx, state: &mut State, project: &Project, a: &Avatar, row: &egui::Response) {
     let world = a.is_world();
+    let rows = || row_acts(cx, state, project, a);
+    let Some((_, _, act)) = popup::context_menu(ui, row, ("row", &a.id), rows, |(label, g, _)| Item::new(label).icon(g)) else { return };
+    let ctx = ui.ctx().clone();
+    match act {
+        RowAct::OpenVrchat => {
+            let url = format!("https://vrchat.com/home/{}/{}", if world { "world" } else { "avatar" }, a.id);
+            if let Err(e) = crate::controller::open_url(&url) {
+                cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Error, tr!("The page could not open: {error}", error = e));
+            }
+        }
+        RowAct::CopyId => {
+            ctx.copy_text(a.id.clone());
+            cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Success, tr("ID copied"));
+        }
+        RowAct::ChangePicture => super::vrchat_picture::change(&ctx, cx, state, a),
+        RowAct::AddN4n0 | RowAct::MyAvatar => {
+            let n4n0 = act == RowAct::AddN4n0;
+            state.modal_fill = if n4n0 { theme::control() } else { theme::ink_850() };
+            state.install(&ctx, project.clone(), a.clone(), n4n0, server(cx), row.rect);
+        }
+        RowAct::Blender(i) => {
+            if let Some(link) = super::blend::links(state, a).get(i) {
+                super::blend::open(&ctx, state, link);
+            }
+        }
+    }
+}
+
+/// What [`row_menu`] offers: each row's label, glyph and act.
+fn row_acts(cx: &Cx, state: &State, project: &Project, a: &Avatar) -> Vec<(String, &'static str, RowAct)> {
+    let world = a.is_world();
     let links = super::blend::links(state, a);
     let mut acts: Vec<(String, &'static str, RowAct)> = vec![
         (tr("Open on VRChat").into(), icons::ARROW_SQUARE_OUT, RowAct::OpenVrchat),
@@ -191,28 +222,7 @@ pub(super) fn row_menu(ui: &Ui, cx: &mut Cx, state: &mut State, project: &Projec
             acts.push((label, icons::BLENDER, RowAct::Blender(k)));
         }
     }
-    let items: Vec<Item> = acts.iter().map(|(label, g, _)| Item::new(label).icon(g)).collect();
-    let Some(k) = popup::context_menu(ui, row, ("row", &a.id), &items) else { return };
-    let ctx = ui.ctx().clone();
-    match acts[k].2 {
-        RowAct::OpenVrchat => {
-            let url = format!("https://vrchat.com/home/{}/{}", if world { "world" } else { "avatar" }, a.id);
-            if let Err(e) = crate::controller::open_url(&url) {
-                cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Error, tr!("The page could not open: {error}", error = e));
-            }
-        }
-        RowAct::CopyId => {
-            ctx.copy_text(a.id.clone());
-            cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Success, tr("ID copied"));
-        }
-        RowAct::ChangePicture => super::vrchat_picture::change(&ctx, cx, state, a),
-        RowAct::AddN4n0 | RowAct::MyAvatar => {
-            let n4n0 = acts[k].2 == RowAct::AddN4n0;
-            state.modal_fill = if n4n0 { theme::control() } else { theme::ink_850() };
-            state.install(&ctx, project.clone(), a.clone(), n4n0, server(cx), row.rect);
-        }
-        RowAct::Blender(i) => super::blend::open(&ctx, state, &links[i]),
-    }
+    acts
 }
 
 #[cfg(test)]

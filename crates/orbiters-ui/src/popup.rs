@@ -212,28 +212,53 @@ fn menu_width(ui: &Ui, items: &[Item<'_>]) -> f32 {
     (label + detail + 2.0 * PAD + 24.0 + 30.0).max(180.0)
 }
 
-/// A context menu of `items` for `response` (a card, a row): a right press on it opens the list at the pointer, which
-/// closes like the other lists. Returns the index picked this frame. `id_salt` tells apart several menus of one
-/// response; the items may change while it is open (they are read every frame), an empty list never opens.
-pub fn context_menu(ui: &Ui, response: &egui::Response, id_salt: impl std::hash::Hash + std::fmt::Debug, items: &[Item<'_>]) -> Option<usize> {
+/// A context menu for `response` (a card, a row): a right press on it opens the list at the pointer, which closes like
+/// the other lists. `rows` makes what it offers, `item` is how a row of it reads: both only as a press opens it and while
+/// it shows (a page has a menu on every card and draws none of them). Returns the row picked this frame. `id_salt` tells
+/// apart several menus of one response; the rows may change while it is open (they are made every frame then), an empty
+/// list never opens.
+pub fn context_menu<R>(
+    ui: &Ui,
+    response: &egui::Response,
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
+    rows: impl FnOnce() -> Vec<R>,
+    item: impl for<'r> Fn(&'r R) -> Item<'r>,
+) -> Option<R> {
     let ctx = ui.ctx().clone();
     let id = response.id.with(("context-menu", id_salt));
     let at_id = id.with("at");
+    let at = ctx.data(|d| d.get_temp::<egui::Pos2>(at_id));
     let secondary = ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary));
-    if secondary && !items.is_empty() && response.contains_pointer() {
-        if let Some(p) = ctx.input(|i| i.pointer.interact_pos()) {
+    let press = if secondary && response.contains_pointer() { ctx.input(|i| i.pointer.interact_pos()) } else { None };
+    if press.is_none() && at.is_none() {
+        return None;
+    }
+    let rows = rows();
+    let items: Vec<Item<'_>> = rows.iter().map(&item).collect();
+    let at = match press.filter(|_| !items.is_empty()) {
+        Some(p) => {
             ctx.data_mut(|d| d.insert_temp(at_id, p));
             set_open(&ctx, id, true);
+            p
         }
+        None => at?,
+    };
+    let (picked, gone) = list_at(&ctx, id, Rect::from_center_size(at, vec2(2.0, 2.0)), &items, None, || menu_width(ui, &items), true);
+    // Its point is kept until the list shrank back into it.
+    if gone {
+        ctx.data_mut(|d| d.remove_temp::<egui::Pos2>(at_id));
     }
-    // Kept once opened: the list shrinks back into that point after closing.
-    let at = ctx.data(|d| d.get_temp::<egui::Pos2>(at_id))?;
-    list(&ctx, id, Rect::from_center_size(at, vec2(2.0, 2.0)), items, None, || menu_width(ui, items), true)
+    rows.into_iter().nth(picked?)
 }
 
 /// The list of the control `id` under (or over, near the window's bottom) `anchor`, while it is open or closing. `at_point`:
 /// a context menu, from the pointer's corner rather than the control's edge. `width` is asked only then: a menu's is measured, and most menus of a page are closed.
 fn list(ctx: &egui::Context, id: Id, anchor: Rect, items: &[Item<'_>], selected: Option<usize>, width: impl FnOnce() -> f32, at_point: bool) -> Option<usize> {
+    list_at(ctx, id, anchor, items, selected, width, at_point).0
+}
+
+/// [`list`], and whether it is closed and back in its anchor.
+fn list_at(ctx: &egui::Context, id: Id, anchor: Rect, items: &[Item<'_>], selected: Option<usize>, width: impl FnOnce() -> f32, at_point: bool) -> (Option<usize>, bool) {
     let open = is_open(ctx, id);
     let travel = morph::travel(ctx, id.with("list"), open, Spring::BOUNCY);
     if travel.landed {
@@ -241,7 +266,7 @@ fn list(ctx: &egui::Context, id: Id, anchor: Rect, items: &[Item<'_>], selected:
     }
     let k = travel.t;
     if !open && k < 0.02 {
-        return None;
+        return (None, travel.done);
     }
     if open {
         // The pass is read first: the context cannot be read while its memory is locked for writing.
@@ -347,7 +372,7 @@ fn list(ctx: &egui::Context, id: Id, anchor: Rect, items: &[Item<'_>], selected:
             set_open(ctx, id, false);
         }
     }
-    picked
+    (picked, false)
 }
 
 #[cfg(test)]
@@ -434,6 +459,60 @@ mod tests {
         }
         assert!(texts >= 8, "the rows' texts are drawn ({texts})");
         assert!(cut.is_empty(), "cut: {cut:?}");
+    }
+
+    /// DPG-5: a card's menu is made when a right press opens it and while it shows, never for a card at rest, before or
+    /// after. It made its rows, translated them and measured them for every card in view at every frame.
+    #[test]
+    fn a_context_menu_is_made_only_while_it_shows() {
+        let ctx = egui::Context::default();
+        crate::install(&ctx);
+        let made = std::cell::Cell::new(0);
+        let card = Rect::from_min_size(pos2(40.0, 40.0), vec2(200.0, 120.0));
+        let at = pos2(90.0, 90.0);
+        let mut t = 0.0;
+        let mut frame = |events: Vec<egui::Event>| {
+            t += 1.0 / 60.0;
+            let input = egui::RawInput { time: Some(t), events, screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 600.0))), ..Default::default() };
+            let mut picked = None;
+            let mut out = ctx.run_ui(input, |ui| {
+                let resp = ui.interact(card, Id::unique("a-card"), Sense::click());
+                let rows = || {
+                    made.set(made.get() + 1);
+                    vec![(1, "Open".to_string()), (2, "Copy".to_string())]
+                };
+                picked = context_menu(ui, &resp, "menu", rows, |(_, label)| Item::new(label));
+            });
+            out.textures_delta.clear();
+            picked
+        };
+        let button = |pos, button, pressed| egui::Event::PointerButton { pos, button, pressed, modifiers: Default::default() };
+        for _ in 0..30 {
+            frame(vec![egui::Event::PointerMoved(at)]);
+        }
+        assert_eq!(made.get(), 0, "a card at rest, the pointer on it, makes no menu");
+        frame(vec![button(at, egui::PointerButton::Secondary, true)]);
+        assert_eq!(made.get(), 1, "a right press makes it, on that frame");
+        frame(vec![button(at, egui::PointerButton::Secondary, false)]);
+        for _ in 0..60 {
+            frame(vec![]);
+        }
+        assert_eq!(made.get(), 62, "and it is made while it is open");
+        // Its second row, pressed.
+        let row = at + vec2(40.0, 2.0 + PAD + ROW_H * 1.5);
+        frame(vec![egui::Event::PointerMoved(row)]);
+        frame(vec![egui::Event::PointerMoved(row)]);
+        let picked = frame(vec![button(row, egui::PointerButton::Primary, true)]);
+        assert_eq!(picked, Some((2, "Copy".to_string())), "the row itself comes back");
+        frame(vec![button(row, egui::PointerButton::Primary, false)]);
+        for _ in 0..240 {
+            frame(vec![]);
+        }
+        let closed = made.get();
+        for _ in 0..60 {
+            frame(vec![egui::Event::PointerMoved(at)]);
+        }
+        assert_eq!(made.get(), closed, "closed, it is made no more");
     }
 
     /// Request16 1: a row with a dot shows it filled in its own colour once the list is open (it was an outline glyph in the row's grey).

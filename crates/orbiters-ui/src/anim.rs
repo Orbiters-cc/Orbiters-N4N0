@@ -243,11 +243,38 @@ pub fn time(ctx: &Context) -> f64 {
     now(ctx)
 }
 
-/// One frame for something that changed outside the interface (the service's news). `request_repaint` runs two, to let
-/// layouts settle: a window told of changes 30 times a second drew 60 frames, each one GPU time and, on the processor's
-/// integrated GPU, a copy to the graphics card that drives the monitor.
-pub fn request_frame(ctx: &Context) {
-    ctx.request_repaint_after(Duration::from_millis(1));
+/// How long a [`wake`] waits for others: what lands within it shares one frame.
+pub const WAKE: Duration = Duration::from_millis(8);
+
+/// One frame, once, for something that changed outside the interface (the service's news, a picture a worker decoded),
+/// shared with what else lands within [`WAKE`]. `request_repaint` runs two, to let layouts settle: a window told of
+/// changes 30 times a second drew 60 frames, each one GPU time and, on the processor's integrated GPU, a copy to the
+/// graphics card that drives the monitor. Never an animation's way to its next frame: that is [`clock`], a spring, or,
+/// for something in progress, [`working`].
+pub fn wake(ctx: &Context) {
+    ctx.request_repaint_after(WAKE);
+}
+
+/// Something is in progress, and the one rule for every spot that says so (a spinner, a sweep, a waiting card): what
+/// moves there reads this clock, at the decorations' shared low rate while the window is live and in use, standing
+/// still with no frame asked for otherwise. What ends it, or moves it on, brings its own frame ([`wake`]): no spot
+/// draws to look for that ([`working_read`] where nothing can say it).
+pub fn working(ctx: &Context) -> f64 {
+    clock(ctx, DECOR_FPS)
+}
+
+/// How often something in progress that has to be looked at is ([`working_read`]): in a window in use, and in one that
+/// only shows.
+pub const READ_EVERY: Duration = Duration::from_millis(200);
+pub const READ_AWAY: Duration = Duration::from_secs(1);
+
+/// [`working`], for what is known only by looking at it (a worker's percentage, a list read by a thread that has no
+/// window to wake): looked at now and then while the window shows.
+pub fn working_read(ctx: &Context) {
+    let used = is_live(ctx) && !is_resting(ctx);
+    if ctx.input(|i| i.viewport().visible()) != Some(false) {
+        ctx.request_repaint_after(if used { READ_EVERY } else { READ_AWAY });
+    }
 }
 
 /// Easing curves.
@@ -348,6 +375,60 @@ mod tests {
         // A first value that is not a number starts at the target.
         frame(&ctx, 5.2, vec![], |ctx| v = spring_from(ctx, Id::unique("fresh"), [f32::NAN, 3.0], [0.5, 3.0], Spring::SOFT));
         assert_eq!(v, [0.5, 3.0]);
+    }
+
+    /// DPG-15: what a worker lands is one frame, and what lands together the same one. `request_repaint` is two.
+    #[test]
+    fn what_lands_from_outside_is_one_frame() {
+        let ctx = Context::default();
+        let mut t = 0.0;
+        let mut frames = |land: &dyn Fn(&Context)| {
+            for _ in 0..5 {
+                t += 0.01;
+                frame(&ctx, t, vec![], |_| {});
+            }
+            land(&ctx);
+            let mut drawn = 1;
+            t += 0.01;
+            while frame(&ctx, t, vec![], |_| {}) < Duration::from_secs(1) {
+                t += 0.01;
+                drawn += 1;
+            }
+            drawn
+        };
+        assert_eq!(frames(&|ctx| ctx.request_repaint()), 2);
+        assert_eq!(frames(&wake), 1);
+        assert_eq!(frames(&|ctx| (0..10).for_each(|_| wake(ctx))), 1);
+    }
+
+    /// DPG-2: something in progress moves at the decorations' rate in a window in use, and asks for nothing in one that
+    /// is not; what has to be looked at is, once a second, while the window shows.
+    #[test]
+    fn something_in_progress_keeps_to_the_shared_rate_and_rests() {
+        let ctx = Context::default();
+        for k in 0..5 {
+            frame(&ctx, k as f64 * 0.01, vec![], |ctx| set_live(ctx, true));
+        }
+        let shared = Duration::from_secs_f32(1.0 / DECOR_FPS);
+        let at = |t: f64, live: bool, read: bool| {
+            frame(&ctx, t, vec![], |ctx| {
+                set_live(ctx, live);
+                if read {
+                    working_read(ctx);
+                } else {
+                    working(ctx);
+                }
+            })
+        };
+        // (egui takes a predicted frame off what is asked.)
+        let about = |asked: Duration, wanted: Duration| asked <= wanted && asked + Duration::from_millis(40) > wanted;
+        let (moves, reads) = (at(1.0, true, false), at(1.1, true, true));
+        assert!(about(moves, shared) && about(reads, READ_EVERY), "in use: {moves:?}, {reads:?}");
+        for (t, live) in [(2.0, false), (2.0 + REST_AFTER + 1.0, true)] {
+            assert_eq!(at(t, live, false), Duration::MAX, "no frame, live {live}");
+            let looked = at(t + 0.1, live, true);
+            assert!(about(looked, READ_AWAY), "{looked:?}, live {live}");
+        }
     }
 
     #[test]

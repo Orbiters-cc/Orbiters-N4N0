@@ -472,8 +472,7 @@ pub(super) fn card(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Path, 
             }
             // No end in sight: a piece that goes along it.
             None => {
-                let t = (anim::time(&ctx) * 0.6).rem_euclid(1.0) as f32;
-                anim::request_frame(&ctx);
+                let t = (anim::working(&ctx) * 0.6).rem_euclid(1.0) as f32;
                 let piece = r.width() * 0.25;
                 let x = r.left() + (r.width() + piece) * t - piece;
                 Rect::from_min_max(pos2(x.max(r.left()), r.top()), pos2((x + piece).min(r.right()), r.bottom()))

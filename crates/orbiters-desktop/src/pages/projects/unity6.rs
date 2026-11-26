@@ -450,6 +450,14 @@ pub(crate) fn phase_label(phase: &str) -> &'static str {
 }
 
 #[cfg(test)]
+impl U6 {
+    /// Nothing of this computer is looked at.
+    pub(super) fn stand_in_for_tests(&mut self) {
+        self.fixture = Some(Fixture::default());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

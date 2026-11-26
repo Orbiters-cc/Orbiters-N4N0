@@ -3,6 +3,7 @@ use super::thumb_cache;
 use crate::pages::{Cx, Job};
 use egui::{ColorImage, Id, Rect, TextureHandle};
 use orbiters_core::account::Server;
+use orbiters_core::slice::Slice;
 use orbiters_projects::{
     avatars::Avatar,
     blender,
@@ -105,7 +106,7 @@ const ICON_BATCH: usize = 12;
 pub(super) type ThumbBatch = (HashMap<String, (ColorImage, u64)>, Vec<String>, Vec<String>, HashMap<String, u64>);
 
 pub struct State {
-    pub(super) scan: Scan,
+    pub(super) scan: Slice<Scan>,
     pub(super) started: bool,
     pub(super) fixture: bool,
     pub(super) visit: u64,
@@ -128,7 +129,7 @@ pub struct State {
     pub(super) all_packages: bool,
     /// The package an action changes (its row shows it working).
     pub(super) busy_package: Option<String>,
-    pub(super) view: vpm::View,
+    pub(super) view: Slice<vpm::View>,
     pub(super) view_job: Job<ViewResult>,
     /// The selected project's Git repository (its branch, changes, last commits, remote page), when it is one.
     pub(super) git: Option<git::Repo>,
@@ -158,6 +159,8 @@ pub struct State {
     pub(super) thumb_ids: HashSet<String>,
     pub(super) thumb_versions: Arc<Mutex<HashMap<String, u64>>>,
     thumb_preload_waited: bool,
+    /// The preload was started.
+    thumb_warmed: bool,
     /// Pictures checked less than [`thumb_cache::FRESH`] ago: never asked for again meanwhile, whatever the account,
     /// VRChat session or update (only Refresh asks for them).
     pub(super) thumb_fresh: HashSet<String>,
@@ -321,6 +324,8 @@ pub struct State {
     pub(super) places: [std::collections::HashMap<PathBuf, usize>; 2],
     /// Each card's and row's place in the gallery this frame (its layout place, before any spring), in screen points.
     pub(super) row_places: Vec<(PathBuf, egui::Rect)>,
+    /// How many of them this frame placed so far ([`State::place_row`]).
+    pub(super) rows_placed: usize,
     /// The first project in view and its place in the gallery's content, kept while a scan adds rows (verifier, point 8).
     pub(super) scroll_anchor: Option<(PathBuf, f32)>,
     /// A one-time scroll that keeps that project where it was.
@@ -335,7 +340,7 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
-            scan: Scan::default(),
+            scan: Slice::new(Scan::default()),
             started: false,
             fixture: false,
             visit: 0,
@@ -351,7 +356,7 @@ impl Default for State {
             all_proposals: false,
             all_packages: false,
             busy_package: None,
-            view: vpm::View::default(),
+            view: Slice::new(vpm::View::default()),
             view_job: Job::default(),
             git: None,
             commit_open: HashSet::new(),
@@ -366,7 +371,8 @@ impl Default for State {
             thumb_before: HashMap::new(),
             thumb_swaps: 0,
             // Read at the window's start, so that the page's first visit shows them; never in unit tests.
-            thumb_preload: (!cfg!(test)).then(thumb_cache::preload),
+            thumb_preload: None,
+            thumb_warmed: false,
             thumb_ids: HashSet::new(),
             thumb_versions: Arc::default(),
             thumb_preload_waited: false,
@@ -475,6 +481,7 @@ impl Default for State {
             bridge_changes: None,
             places: Default::default(),
             row_places: vec![],
+            rows_placed: 0,
             scroll_anchor: None,
             scroll_fix: None,
             was_scanning: false,
@@ -568,7 +575,29 @@ impl State {
     pub(super) fn anchor(&self, name: &str) -> Rect {
         self.anchors.get(name).copied().unwrap_or(Rect::NOTHING)
     }
+    /// The frame's next row or card is `path`'s, at `rect`: the same ones as the frame before, most of the time, whose
+    /// paths are kept.
+    pub(super) fn place_row(&mut self, path: &std::path::Path, rect: egui::Rect) {
+        match self.row_places.get_mut(self.rows_placed) {
+            Some((was, at)) => {
+                if was.as_path() != path {
+                    *was = path.to_path_buf();
+                }
+                *at = rect;
+            }
+            None => self.row_places.push((path.to_path_buf(), rect)),
+        }
+        self.rows_placed += 1;
+    }
+    /// Starts reading the pictures the last window kept, once (every core decodes them: not beside the window's first
+    /// frame, where the page's making started it).
+    pub fn warm(&mut self) {
+        if !std::mem::replace(&mut self.thumb_warmed, true) && !cfg!(test) {
+            self.thumb_preload = Some(thumb_cache::preload());
+        }
+    }
     pub(super) fn ensure(&mut self, ctx: &egui::Context) {
+        self.warm();
         if !self.started {
             self.started = true;
             self.refresh(ctx, false);
@@ -588,10 +617,10 @@ impl State {
         // The window's first look shows the projects the last one knew at once (a small file), so their covers are
         // there on the first frame; the scan then goes on from them.
         if self.scan.projects.is_empty() {
-            self.scan = discovery::cached();
+            self.scan = Slice::new(discovery::cached());
         }
         // A revisit must not replace live discoveries with an older (or temporarily unreadable) disk snapshot.
-        let retained = (!self.scan.projects.is_empty()).then(|| self.scan.clone());
+        let retained = (!self.scan.projects.is_empty()).then(|| (*self.scan).clone());
         // Work of the window (it writes the projects' list it keeps): the window does not close to the tray meanwhile.
         let working = super::super::Working::begin();
         let hidden_saved = self.hidden_saved.clone();
@@ -604,7 +633,7 @@ impl State {
             ctx.request_repaint();
             let result = discovery::discover(scan, force, &cancel, |s| {
                 let _ = tx.send(ScanEvent::Update(s.clone()));
-                ctx.request_repaint();
+                orbiters_ui::anim::wake(&ctx);
             })
             .map_err(|e| format!("{e:#}"));
             let _ = tx.send(ScanEvent::Done(result));
@@ -741,13 +770,13 @@ impl State {
                     ScanEvent::Hidden(list, saved) if saved == self.hidden_changes => self.hidden = list,
                     ScanEvent::Hidden(..) => {}
                     ScanEvent::Update(scan) => {
-                        self.scan = scan;
+                        self.scan = Slice::new(scan);
                         self.scan_serial += 1;
                     }
                     ScanEvent::Done(result) => {
                         done = true;
                         match result {
-                            Ok(scan) => self.scan = scan,
+                            Ok(scan) => self.scan = Slice::new(scan),
                             Err(e) => self.error = Some(e),
                         }
                     }
@@ -765,7 +794,7 @@ impl State {
                     if self.new_location.is_empty() {
                         self.new_location = view.default_path.display().to_string();
                     }
-                    self.view = view;
+                    self.view = Slice::new(view);
                     self.templates = templates;
                     self.git = repo;
                     self.load_banners(ctx);
@@ -988,9 +1017,10 @@ impl State {
         self.scan
             .projects
             .iter()
-            .flat_map(|p| p.avatars.iter().chain(&p.worlds).map(|a| a.id.clone()))
-            .filter(|id| !self.thumb_ids.contains(id) && seen.insert(id.clone()))
+            .flat_map(|p| p.avatars.iter().chain(&p.worlds).map(|a| &a.id))
+            .filter(|id| !self.thumb_ids.contains(*id) && seen.insert(*id))
             .take(8)
+            .cloned()
             .collect()
     }
     /// Shows `image` (its sum `sum`) as the picture of `id`. Nothing changes when it is the picture shown already; a

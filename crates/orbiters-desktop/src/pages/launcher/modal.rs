@@ -207,7 +207,7 @@ fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, f: Rect, profile: &Profile,
             section(ui, 104.0, &mut |ui, r| place_card(ui, cx, state, r, friend, clock));
             section(ui, 44.0, &mut |ui, r| boop_row(ui, cx, state, r, friend, clock));
             if profile.loading {
-                section(ui, 58.0, &mut |ui, r| shimmer(ui, r, clock));
+                section(ui, 58.0, &mut shimmer);
             }
             if !profile.bio.trim().is_empty() {
                 let txt = Txt::new(profile.bio.trim(), 13.5).color(theme::fg_2()).line_height(20.0);
@@ -317,8 +317,7 @@ fn place_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Fri
     // Join where the instance takes the account without asking (the rule Where and Select use, REQUEST23: public,
     // friends+, friends-only of a friend, a group's public one; a group's plus one no longer, its membership not known
     // here): the Play path with that instance (the running VRChat's own way when one runs). Private ones: ask.
-    let friends: std::collections::HashSet<&str> = state.data.friends.iter().map(|f| f.id.as_str()).collect();
-    let me = state.places.desk.asker().account.clone().unwrap_or_default();
+    let me = state.places.desk.asker().account.as_deref().unwrap_or_default();
     // Where one VRChat runs at a time (a Mac), one that is not up yet starts on the profile chosen: not into another
     // account's place (the rule Where has).
     let idle = state.data.game == orbiters_core::launcher::Game::NotRunning;
@@ -332,7 +331,7 @@ fn place_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Fri
                 // (nor into a private one where whose the VRChat started is could not be told)
                 && !(idle && state.places.previous.log.is_some() && !orbiters_core::vrchat_launch::is_public_instance(&place.instance_id))
                 && !matches!(state.data.game, orbiters_core::launcher::Game::NotInstalled | orbiters_core::launcher::Game::NoEngine)
-                && super::destinations::joinable_without_asking(&place.instance_id, &me, &|id| friends.contains(id)) =>
+                && super::destinations::joinable_without_asking(&place.instance_id, me, &|id| state.has_friend(id)) =>
         {
             Some(place.clone())
         }
@@ -451,15 +450,14 @@ fn emoji_tint(id: &str) -> Color32 {
     palette[id.bytes().map(usize::from).sum::<usize>() % palette.len()]
 }
 
-fn shimmer(ui: &Ui, r: Rect, clock: f64) {
+fn shimmer(ui: &mut Ui, r: Rect) {
     let p = ui.painter();
-    let t = ((clock * 0.8) % 1.0) as f32;
+    let t = ((anim::working(ui.ctx()) * 0.8) % 1.0) as f32;
     for (i, w) in [0.9f32, 0.75, 0.5].iter().enumerate() {
         let bar = Rect::from_min_size(r.left_top() + vec2(0.0, 6.0 + i as f32 * 18.0), vec2(r.width() * w, 10.0));
         let a = 0.05 + 0.04 * ((t * std::f32::consts::TAU + i as f32).sin() * 0.5 + 0.5);
         p.rect_filled(bar, theme::radius(5.0), theme::white(a));
     }
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
 }
 
 fn links(ui: &mut Ui, r: Rect, links: &[String]) {

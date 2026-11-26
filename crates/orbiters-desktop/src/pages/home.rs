@@ -235,6 +235,26 @@ fn go_home(host: &mut MenuHost) -> Vec<Effect> {
     effects
 }
 
+/// What Home shows on its first frame, read before it (`App::prepare`).
+pub fn prepare(ui: &Ui, cx: &mut Cx, state: &mut State) {
+    let State { host, launcher, .. } = state;
+    wired(ui.ctx(), cx, host, launcher);
+    super::launcher::destinations::prepare(ui.ctx(), cx, launcher);
+}
+
+/// The launcher and the menu's host, following what the service says.
+fn wired<'h>(ctx: &egui::Context, cx: &Cx, host: &'h mut Option<MenuHost>, launcher: &mut super::launcher::State) -> &'h mut MenuHost {
+    launcher.wire(ctx, cx);
+    let host = host.get_or_insert_with(|| {
+        // What it fetches (YouTube's answers, thumbnails) asks for a frame when it arrives.
+        let mut host = MenuHost::waking(ctx.clone()).holding(orbiters_n4n0::MenuHolder::Window);
+        host.open(cx.snap);
+        host
+    });
+    host.follow(cx.snap);
+    host
+}
+
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     // A group's page (or the banner studio) takes Home's place (REQUEST22).
     if state.groups.page_open() {
@@ -243,14 +263,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
     let snap = cx.snap;
     let State { host, shown, since, opened, focus, copied, states, pending, network, all_tools, music: music_watch, launcher, groups } = state;
-    launcher.wire(&ctx, cx);
-    let host = host.get_or_insert_with(|| {
-        // What it fetches (YouTube's answers, thumbnails) asks for a frame when it arrives.
-        let mut host = MenuHost::waking(ctx.clone()).holding(orbiters_n4n0::MenuHolder::Window);
-        host.open(snap);
-        host
-    });
-    host.follow(snap);
+    let host = wired(&ctx, cx, host, launcher);
     // The music card names what plays, and the music page shows it: read while one of them shows. The watch keeps
     // the readings coming between frames, and asks for one when what the page shows of them changed.
     if matches!(host.menu.page, Page::Home | Page::Music) {
@@ -1920,6 +1933,19 @@ mod tests {
             crate::pages::rest::asked(&output)
         }
 
+        /// What the next frame writes, a line each.
+        fn texts(&mut self) -> String {
+            self.time += 1.0 / 60.0;
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1048.0, 780.0))), time: Some(self.time), ..Default::default() };
+            let (ctl, snap, toasts, state) = (&self.ctl, &self.snap, &mut self.toasts, &mut self.state);
+            let mut output = self.ctx.run_ui(input, |ui| {
+                let mut cx = Cx { ctl, snap, toasts: &mut *toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 40.0, go: None };
+                show(ui, &mut cx, state);
+            });
+            output.textures_delta.clear();
+            crate::pages::rest::texts(&output)
+        }
+
         /// Frames until what entered stands still.
         fn settle(&mut self) {
             for _ in 0..90 {
@@ -1978,6 +2004,161 @@ mod tests {
         let frames = crate::pages::rest::frames_a_minute(from, |t| h.frame_at(t, Vec::new()));
         println!("YouTube's page at rest: {frames} frames a minute");
         assert!(frames <= 300, "YouTube's page, untouched: {frames} frames a minute");
+    }
+
+    /// DPG-29: under the splash nothing of the page is drawn, and what its first frame takes is there already.
+    #[test]
+    fn home_is_made_ready_under_the_splash() {
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        widgets::watch_controls();
+        let ctl: Ctl = Arc::new(Recorder::default());
+        let mut app = crate::app::App::offline(ctl);
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 820.0))), time: Some(0.0), ..Default::default() };
+        let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+        output.textures_delta.clear();
+        println!("Home menu host after first frame: {}", app.home_mut().menu_host().is_some());
+        assert!(app.home_mut().menu_host().is_some(), "the menu's host is made at the window's first frame");
+        assert!(widgets::control(&ctx, "All tools").is_none(), "and nothing of Home is drawn yet");
+    }
+
+    /// What a frame of Home allocates at rest, and how long it takes (microseconds).
+    fn a_frame(h: &mut Harness) -> (u64, f64) {
+        for _ in 0..240 {
+            h.frame(Vec::new());
+        }
+        let from = std::time::Instant::now();
+        let made = crate::test_alloc::count(|| (0..60).for_each(|_| h.frame(Vec::new())));
+        (made / 60, from.elapsed().as_secs_f64() * 1e6 / 60.0)
+    }
+
+    /// DPG-6: a frame of Home costs the rows in view, however many friends: each row that could be joined made a set of
+    /// all of them.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_frame_of_home_costs_the_friends_in_view() {
+        let frame = |friends: usize| {
+            let (mut h, place, _) = friends_in_instances(false);
+            let mut data = (*h.state.launcher_mut().data_for_tests()).clone();
+            let like = data.friends.iter().find(|f| f.name == "Nova Sample").unwrap().clone();
+            // (In a friends' instance of one of them: asked whether its owner is a friend.)
+            let place = orbiters_core::launcher::Place { instance_id: "5~friends(usr_many_7)~region(eu)".into(), access: orbiters_core::launcher::InstanceAccess::Friends, ..place };
+            data.friends = (0..friends)
+                .map(|i| {
+                    let mut f = like.clone();
+                    (f.id, f.name) = (format!("usr_many_{i}"), format!("Friend {i}"));
+                    f.whereabouts = orbiters_core::launcher::Whereabouts::World(place.clone());
+                    f
+                })
+                .collect();
+            h.state.launcher_mut().set_data(Arc::new(data));
+            a_frame(&mut h)
+        };
+        let ((few, few_us), (many, many_us)) = (frame(40), frame(1500));
+        println!("Home, 40 friends: {few} allocations, {few_us:.0} us a frame; 1500 friends: {many}, {many_us:.0} us");
+        assert!(many <= few + few / 10 + 20, "{many} allocations a frame with 1500 friends, {few} with 40");
+    }
+
+    /// DPG-8: the previous instances' sheet copied the whole history twice a frame, to draw some eight rows of it.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_frame_of_the_previous_instances_costs_the_rows_in_view() {
+        widgets::watch_controls();
+        let frame = |visits: usize| {
+            let (mut h, _, _) = friends_in_instances(false);
+            let rows = (0..visits)
+                .map(|i| crate::pages::launcher::previous::Visit { world_id: format!("wrld_00000000-0000-4000-8000-{i:012}"), instance: format!("{i}~region(eu)"), name: format!("World {i}"), at: 1_794_990_000 - i as u64 })
+                .collect();
+            h.state.launcher_mut().places.previous.stand_in_rows(rows);
+            h.settle();
+            click(&mut h, "Previous instances");
+            a_frame(&mut h)
+        };
+        let ((few, few_us), (many, many_us)) = (frame(40), frame(4000));
+        println!("40 visits: {few} allocations, {few_us:.0} us a frame; 4000 visits: {many}, {many_us:.0} us");
+        assert!(many <= few + few / 10 + 20, "{many} allocations a frame over 4000 visits, {few} over 40");
+    }
+
+    /// DPG-7: events past their end do not render a card. Keeping six of them in the published input should not
+    /// allocate more per frame than an empty event list.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_frame_of_where_does_not_copy_events() {
+        use crate::pages::launcher::destinations::{EventSoon, HistoryView, SUGGESTION_BUILDS};
+        let frame = |events| {
+            let mut h = where_signed_in(Vec::new());
+            h.state.launcher_mut().places.stand_in(Some(HistoryView::default()), events, None, true);
+            for _ in 0..240 {
+                h.frame(Vec::new());
+            }
+            SUGGESTION_BUILDS.with(|count| count.set(0));
+            let allocations = crate::test_alloc::count(|| (0..60).for_each(|_| h.frame(Vec::new()))) / 60;
+            let builds = SUGGESTION_BUILDS.with(std::cell::Cell::get);
+            assert_eq!(builds, 0, "unchanged Where inputs built {builds} lists across 60 frames");
+            (allocations, builds)
+        };
+        let (empty, empty_builds) = frame(Vec::new());
+        let (ended, ended_builds) = frame((0..6).map(|i| EventSoon {
+            id: format!("ended-{i}"),
+            title: format!("An ended event {i}"),
+            starts_at: 1_794_990_000,
+            ends_at: Some(1_794_991_000),
+            ..Default::default()
+        }).collect());
+        println!("Where allocations per frame: empty events {empty}, six ended events {ended}. Builds over 60 frames: {empty_builds}, {ended_builds}");
+        assert!(ended <= empty + 5, "empty {empty}, ended {ended}");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn where_refreshes_suggestions_when_events_arrive_or_expire() {
+        use crate::pages::launcher::destinations::{EventSoon, HistoryView};
+        let mut h = where_signed_in(Vec::new());
+        assert!(!h.texts().contains("A new event"));
+        let event = EventSoon { id: "test-event".into(), title: "A new event".into(), starts_at: 1_795_000_001, ends_at: Some(1_795_000_900), ..Default::default() };
+        h.state.launcher_mut().places.stand_in(Some(HistoryView::default()), vec![event], None, true);
+        assert!(h.texts().contains("A new event"));
+        h.state.launcher_mut().stand_in(1_795_000_900, "");
+        assert!(!h.texts().contains("A new event"));
+    }
+
+    /// DPG-2: Home drew itself at the monitor's rate for as long as it said "Connecting to VRChat…", which lasts until
+    /// Orbiters answers: a whole evening offline, in use or behind VRChat. It stands still at rest, and behind another
+    /// window; in use its spinner moves at the decorations' rate.
+    #[test]
+    fn home_connecting_to_vrchat_rests_too() {
+        for (live, focused) in [(true, "at rest"), (false, "behind another window")] {
+            let mut h = Harness::new();
+            let mut data = orbiters_core::launcher::LauncherState::default();
+            data.possible.play = true;
+            h.state.launcher_mut().set_data(Arc::new(data));
+            h.snap.vrchat_login.waiting = true;
+            h.snap.vrchat_login.known = Some(orbiters_core::vrchat_api::User { id: "usr_test".into(), display_name: "Tester".into(), ..Default::default() });
+            h.settle();
+            let texts = h.texts();
+            assert!(texts.contains("Connecting to VRChat as Tester…"), "{texts}");
+            orbiters_ui::anim::set_live(&h.ctx, live);
+            if live {
+                // Renew the activity clock once. Supplying input to each frame would also schedule egui's own
+                // input repaints, which do not come from the connecting state.
+                h.frame(vec![Event::PointerGone]);
+                let from = h.time + 1.0;
+                let mut t = from;
+                let mut frames = 0;
+                while t < from + 10.0 {
+                    let delay = h.frame_at(t, Vec::new());
+                    assert!(delay < Duration::MAX, "the spinner advances while the window is in use");
+                    t += delay.as_secs_f64().max(1.0 / 60.0);
+                    frames += 1;
+                }
+                println!("Connecting on active Home: {frames} scheduled frames in 10 s");
+                assert!(frames <= 10 * (orbiters_ui::anim::DECOR_FPS as usize + 3) + 30, "in use: {frames} frames in 10 s");
+            }
+            let from = h.time;
+            let frames = crate::pages::rest::frames_a_minute(from, |t| h.frame_at(t, Vec::new()));
+            println!("Connecting {focused}: {frames} scheduled frames in a minute");
+            assert_eq!(frames, 0, "{focused}");
+        }
     }
 
     /// Home's card names what plays and no more: a song going on is no change there, and is one on the music page.

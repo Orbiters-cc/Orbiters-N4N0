@@ -81,8 +81,12 @@ struct Modal {
     closing: Option<f64>,
 }
 
+#[cfg(test)]
+thread_local!(static ROSTER_IDS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+
 pub struct State {
     pub(in crate::pages) data: Arc<LauncherState>,
+    friend_ids: std::cell::RefCell<Option<(Arc<LauncherState>, HashSet<String>)>>,
     query: String,
     /// Sections closed by the person, kept between runs.
     folded: HashSet<String>,
@@ -142,6 +146,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             data: Arc::new(LauncherState::default()),
+            friend_ids: Default::default(),
             query: String::new(),
             folded: HashSet::new(),
             folded_read: false,
@@ -179,8 +184,20 @@ impl Default for State {
 }
 
 impl State {
+    /// A friends-only instance checks its owner's membership against the current roster.
+    fn has_friend(&self, id: &str) -> bool {
+        let mut ids = self.friend_ids.borrow_mut();
+        if ids.as_ref().is_none_or(|(from, _)| !Arc::ptr_eq(from, &self.data)) {
+            #[cfg(test)]
+            ROSTER_IDS_READ.with(|count| count.set(count.get() + self.data.friends.len()));
+            *ids = Some((self.data.clone(), self.data.friends.iter().map(|friend| friend.id.clone()).collect()));
+        }
+        ids.as_ref().is_some_and(|(_, ids)| ids.contains(id))
+    }
+
     /// What the controller knows now (the page keeps where the person was in the list).
     pub fn set_data(&mut self, data: Arc<LauncherState>) {
+        *self.friend_ids.get_mut() = None;
         self.data = data;
         self.staged = true;
     }
@@ -190,6 +207,7 @@ impl State {
     pub fn wire(&mut self, ctx: &egui::Context, cx: &Cx) {
         let data = cx.snap.launcher.arc();
         if !self.staged && !Arc::ptr_eq(&data, &self.data) {
+            *self.friend_ids.get_mut() = None;
             self.data = data;
             self.take_back_failed();
         }
@@ -878,6 +896,38 @@ fn column(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, drawer: bool)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn friend_only_destinations_reuse_the_published_roster() {
+        let mut state = State::default();
+        state.places.showing = true;
+        state.places.desk.set_asker(selection::Asker { account: Some("usr_self".into()), profile: Some(0) });
+        let n = 1500;
+        let roster = (0..n).map(|i| Friend { id: format!("usr_friend_{i}"), ..Default::default() }).collect();
+        state.set_data(Arc::new(LauncherState { friends: roster, ..Default::default() }));
+        let friend = Friend {
+            presence: Presence::InGame,
+            whereabouts: Whereabouts::World(orbiters_core::launcher::Place {
+                world_id: "wrld_00000000-0000-4000-8000-000000000001".into(),
+                world_name: "Sample world".into(),
+                world_picture: String::new(),
+                instance_id: "5~friends(usr_friend_1499)~region(eu)".into(),
+                access: InstanceAccess::Friends,
+                region: "eu".into(),
+            }),
+            ..Default::default()
+        };
+        assert!(previous::friend_selectable(&state, &friend).is_some());
+        ROSTER_IDS_READ.with(|count| count.set(0));
+        for _ in 0..60 {
+            assert!(previous::friend_selectable(&state, &friend).is_some());
+        }
+        let visited = ROSTER_IDS_READ.with(std::cell::Cell::get);
+        println!("Friend roster ID visits for 60 visible-row checks: {visited}");
+        assert_eq!(visited, 0);
+        state.set_data(Arc::new(LauncherState::default()));
+        assert!(previous::friend_selectable(&state, &friend).is_none());
+    }
 
     #[test]
     fn a_narrow_page_gets_the_rail_and_a_wide_one_the_column() {

@@ -377,6 +377,28 @@ fn n4n0_settings_left_the_n4n0_page() {
 
 /// The search lists what matches with its sub-tab; the arrows and Enter open one: its sub-tab shows, the search
 /// clears, the setting comes into view and is lit. Escape clears the search.
+/// DPG-10: with a search typed, every frame folded the words of every setting again: the search is made once for its text.
+#[test]
+fn a_search_is_made_once_for_its_text() {
+    let mut h = Harness::new();
+    h.settle();
+    let frames = |h: &mut Harness| {
+        for _ in 0..120 {
+            h.frame(Vec::new());
+        }
+        let from = std::time::Instant::now();
+        let made = crate::test_alloc::count(|| (0..60).for_each(|_| drop(h.frame(Vec::new()))));
+        (made / 60, from.elapsed().as_secs_f64() * 1e6 / 60.0)
+    };
+    let (still, still_us) = frames(&mut h);
+    h.state.stage_search("qqqq zzzz");
+    let (searched, searched_us) = frames(&mut h);
+    println!("Settings: {still} allocations, {still_us:.0} us a frame; a search that finds nothing: {searched}, {searched_us:.0} us");
+    let one = crate::test_alloc::count(|| drop(registry::search("qqqq zzzz", &HERE)));
+    println!("one search: {one} allocations");
+    assert!(searched + one / 2 < still.max(one), "a frame with a search typed: {searched} allocations; without: {still}; a search: {one}");
+}
+
 #[test]
 fn the_search_opens_a_setting_and_lights_it() {
     let mut h = Harness::new();

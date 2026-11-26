@@ -1207,8 +1207,6 @@ fn field_mut<'v>(value: &'v mut serde_json::Value, path: &[String]) -> Option<&'
 /// The key N4N0's section was saved under before the companion took its name (0.3.4-dev.8 and earlier).
 const LEGACY_N4N0_KEY: &str = "orb";
 
-/// The settings' text with N4N0's section moved from its earlier key to `n4n0` (today's wins when both are there),
-/// or `None` when the text has no earlier key (or is not a JSON object: [`crate::json_lenient`] deals with that).
 /// The settings files this process could not read when it loaded them ([`Settings::load_from`]): it holds defaults for
 /// them, which must never be saved over the real ones.
 /// For the life of the process (whatever is read afterwards): the settings it started from are not the file's. The
@@ -1222,7 +1220,7 @@ fn loaded_unreadable(path: &Path) {
 /// What this process last knew each settings file to hold: what it read while the file could still be read, then what
 /// it saved. What a save after a failed read puts on the file is what changed since then (night4, verify2: never "since
 /// the start-up defaults", which turned a switch the person turned back off on again).
-static KNOWN: std::sync::Mutex<std::collections::BTreeMap<PathBuf, serde_json::Value>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+static KNOWN: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Settings>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 /// A read that worked: what the file holds, while it never failed to read in this process (a read after a failure is
 /// no knowledge of what this process holds).
@@ -1230,21 +1228,18 @@ fn known_until_unreadable(path: &Path, settings: &Settings) {
     if was_loaded_unreadable(path).is_some() {
         return;
     }
-    if let Ok(value) = serde_json::to_value(settings) {
-        KNOWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(path.to_path_buf(), value);
-    }
+    saved(path, settings);
 }
 
 fn saved(path: &Path, settings: &Settings) {
-    if let Ok(value) = serde_json::to_value(settings) {
-        KNOWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(path.to_path_buf(), value);
-    }
+    KNOWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(path.to_path_buf(), settings.clone());
 }
 
 /// What a save onto the file as it reads puts what changed from: what this process last knew it to hold, else the
 /// defaults it started from.
 fn baseline(path: &Path) -> serde_json::Value {
-    KNOWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(path).cloned().unwrap_or_else(|| serde_json::to_value(Settings::unread()).unwrap_or_default())
+    let known = KNOWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(path).cloned();
+    serde_json::to_value(known.unwrap_or_else(Settings::unread)).unwrap_or_default()
 }
 
 fn set_kept_aside(path: &Path) {
@@ -1288,6 +1283,23 @@ fn earlier_render_default(launch: &mut serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// COR-28: a load parses its file once, whatever it holds: today's settings, an earlier key, a field that does not fit.
+    #[test]
+    fn a_load_parses_its_file_once() {
+        let dir = std::env::temp_dir().join(format!("orbiters-settings-parses-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let today = serde_json::to_string_pretty(&Settings { storage_limit_gb: 7.0, ..Default::default() }).unwrap();
+        let earlier = format!("{{\"storage_limit_gb\": 7, \"{LEGACY_N4N0_KEY}\": {{\"wake_word\": true}}}}");
+        for text in [today, earlier, r#"{"storage_limit_gb": 7, "capture_mode": 12}"#.into()] {
+            std::fs::write(&path, &text).unwrap();
+            let before = crate::DOCUMENT_PARSES.get();
+            assert_eq!(Settings::load_from(&path).storage_limit_gb, 7.0);
+            assert_eq!(crate::DOCUMENT_PARSES.get() - before, 1, "{text}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// Anyone's gun changes the avatar unless the person chose otherwise, the gun has no avatar until one is chosen, and no
     /// change happened yet; what was chosen is read back as saved.

@@ -35,6 +35,13 @@ fn now() -> u64 {
     orbiters_projects::discovery::now()
 }
 
+/// What the page shows on its first frame, read before it (`App::prepare`).
+pub fn prepare(ui: &Ui, cx: &Cx, state: &mut State) {
+    state.ensure(ui.ctx());
+    // This visit's look is the one just started.
+    state.visit = cx.visit;
+}
+
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
     state.ensure(&ctx);
@@ -105,7 +112,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     } else if let Some(y) = state.scroll_fix.take() {
         scroll = scroll.vertical_scroll_offset(y);
     }
-    state.row_places.clear();
+    state.rows_placed = 0;
     let out = scroll.show(&mut gu, |ui| {
         egui::Frame::NONE.inner_margin(egui::Margin { left: PAD_X as i8, right: edge.round() as i8, top: 0, bottom: 104 }).show(ui, |ui| {
             ui.add_space(placed.content_top - page.top());
@@ -113,19 +120,20 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             gallery(ui, cx, state);
         });
     });
+    state.row_places.truncate(state.rows_placed);
     // While a scan adds rows (and when it ends and sorts), the first project in view stays where it is on screen: what
     // grows above it scrolls the gallery by as much (AGENTS.md: progressive galleries keep the visible item).
     let (offset, top) = (out.state.clamped_offset().y, out.inner_rect.top());
-    let places: Vec<(PathBuf, f32)> = state.row_places.iter().map(|(p, r)| (p.clone(), r.top() - top + offset)).collect();
     let scanning = state.scanning();
     if scanning || state.was_scanning {
+        let places: Vec<(PathBuf, f32)> = state.row_places.iter().map(|(p, r)| (p.clone(), r.top() - top + offset)).collect();
         if let Some(dy) = anchor_shift(state.scroll_anchor.as_ref(), &places) {
             state.scroll_fix = Some((offset + dy).max(0.0));
             ctx.request_repaint();
         }
     }
     state.was_scanning = scanning;
-    state.scroll_anchor = first_in_view(&state.row_places, top).and_then(|path| places.iter().find(|(p, _)| *p == path).cloned());
+    state.scroll_anchor = first_in_view(&state.row_places, top).and_then(|path| state.row_places.iter().find(|(p, _)| *p == path).map(|(_, r)| (path, r.top() - top + offset)));
     // Across the whole page, not the cards' width only: the docked panel starts lower, and the cards blurred under the
     // header would otherwise stop at a hard edge above the gap between them and the panel.
     pages::under_top(ui, cx, "unity-projects", from, placed.band_bottom);
@@ -236,14 +244,19 @@ fn first_in_view(places: &[(PathBuf, Rect)], top: f32) -> Option<PathBuf> {
 /// The order of a list of projects: newest first, except while a scan runs (PROJECTS-18, Enzo 2026-11-19: "Yes please"):
 /// then every row keeps the place it had and what the scan finds goes at the end, so nothing moves under the pointer.
 /// The date order comes back when the scan ends.
-fn keep_places(list: &mut [Project], places: &mut std::collections::HashMap<std::path::PathBuf, usize>, scanning: bool) {
+fn keep_places(list: &mut [&Project], places: &mut std::collections::HashMap<std::path::PathBuf, usize>, scanning: bool) {
     if !scanning {
         list.sort_by_key(|p| std::cmp::Reverse(p.modified));
+        // As they were at the frame before, most of the time.
+        if places.len() == list.len() && list.iter().enumerate().all(|(i, p)| places.get(&p.path) == Some(&i)) {
+            return;
+        }
         places.clear();
     }
     for p in list.iter() {
-        let next = places.len();
-        places.entry(p.path.clone()).or_insert(next);
+        if !places.contains_key(&p.path) {
+            places.insert(p.path.clone(), places.len());
+        }
     }
     list.sort_by_key(|p| places.get(&p.path).copied().unwrap_or(usize::MAX));
 }
@@ -258,7 +271,8 @@ fn gallery(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         }
         errors(ui, state, "gallery");
     }
-    for (i, w) in state.scan.warnings.clone().iter().enumerate() {
+    let scan = state.scan.arc();
+    for (i, w) in scan.warnings.iter().enumerate() {
         feedback::banner(ui, Id::unique(("projects-warning", i, w)), Tone::Warn, w, false);
         ui.add_space(12.0);
     }
@@ -270,11 +284,11 @@ fn gallery(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     // Hidden projects only when asked for (dimmed and marked then).
     let hidden_n = state.scan.projects.iter().filter(|p| state.is_hidden(&p.path)).count();
     let shown = |p: &&Project| state.show_hidden || !state.is_hidden(&p.path);
-    let mut registered: Vec<Project> = state.scan.projects.iter().filter(|p| p.registered).filter(matches).filter(shown).cloned().collect();
+    let mut registered: Vec<&Project> = scan.projects.iter().filter(|p| p.registered).filter(matches).filter(shown).collect();
     keep_places(&mut registered, &mut registered_places, scanning);
-    let mut proposals: Vec<Project> = state.scan.projects.iter().filter(|p| !p.registered).filter(matches).filter(shown).cloned().collect();
+    let mut proposals: Vec<&Project> = scan.projects.iter().filter(|p| !p.registered).filter(matches).filter(shown).collect();
     keep_places(&mut proposals, &mut found_places, scanning);
-    let counted = |list: &[Project]| list.iter().filter(|p| !state.is_hidden(&p.path)).count();
+    let counted = |list: &[&Project]| list.iter().filter(|p| !state.is_hidden(&p.path)).count();
     let (registered_n, proposals_n) = (counted(&registered), counted(&proposals));
     state.places = [registered_places, found_places];
 
@@ -308,7 +322,7 @@ fn gallery(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     super::unity6_card::copy_rows(ui, state);
 }
 
-fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &[Project]) {
+fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &[&Project]) {
     let ctx = ui.ctx().clone();
     let w = ui.available_width();
     let (cols, card_w) = layout::columns(w, CARD_MIN, GAP);
@@ -323,32 +337,30 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &[Project]) {
     if let Some(gpu) = cx.gpu {
         state.preview.start(&ctx, gpu);
     }
-    let unpictured: Vec<&Project> = projects.iter().filter(|p| pictures_settled && !state.is_hidden(&p.path) && art::pictured(state, p).is_empty()).collect();
+    let unpictured: Vec<&Project> = projects.iter().copied().filter(|p| pictures_settled && !state.is_hidden(&p.path) && !art::has_picture(state, p)).collect();
     for p in unpictured {
         state.preview.want_still(&ctx, cx.gpu, &p.path);
     }
-    for (i, p) in projects.iter().enumerate() {
+    for (i, &p) in projects.iter().enumerate() {
         // Each card springs to its place (in the grid's own coordinates, so scrolling never animates): when the panel
         // takes room or gives it back, the cards reflow instead of jumping.
         // Only the place springs: a card's size is set at once (AGENTS.md: no spring on layout dimensions).
         let target = [(i % cols) as f32 * (card_w + GAP), (i / cols) as f32 * (card_h + GAP)];
-        state.row_places.push((p.path.clone(), Rect::from_min_size(area.min + vec2(target[0], target[1]), vec2(card_w, card_h))));
+        state.place_row(&p.path, Rect::from_min_size(area.min + vec2(target[0], target[1]), vec2(card_w, card_h)));
         let [x, y] = anim::spring(&ctx, Id::unique(("project-card-place", &p.path)), target, Spring::SOFT);
         let cw = card_w;
         let r = Rect::from_min_size(area.min + vec2(x, y), vec2(cw, (cw * 0.5625).round() + CARD_BODY));
-        state.anchors.insert(format!("card-{i}"), r);
         if !ui.is_rect_visible(r.expand(12.0)) {
             continue;
         }
+        state.anchors.insert(format!("card-{i}"), r);
         let resp = card(ui, cx, state, i, p, r);
         if widgets::activated(&resp) {
             opened = Some(p.path.clone());
         }
         // A right press: what the project offers (`menus`).
-        let acts = menus::project_items(state, p, true);
-        let items: Vec<popup::Item> = acts.iter().map(|(i, _)| *i).collect();
-        if let Some(k) = popup::context_menu(ui, &resp, "project-card", &items) {
-            picked = Some((p.clone(), acts[k].1, r));
+        if let Some((_, act)) = popup::context_menu(ui, &resp, "project-card", || menus::project_items(state, p, true), |(i, _)| *i) {
+            picked = Some((p.clone(), act, r));
         }
     }
     if let Some(path) = opened {
@@ -542,7 +554,7 @@ fn quiet_empty(ui: &mut Ui, cx: &Cx, title: &str, text: &str) {
 }
 
 /// Projects found on the computer that are not in the list yet: compact rows, the first few until "Show all".
-fn found(ui: &mut Ui, cx: &mut Cx, state: &mut State, list: &[Project]) {
+fn found(ui: &mut Ui, cx: &mut Cx, state: &mut State, list: &[&Project]) {
     let ctx = ui.ctx().clone();
     let w = ui.available_width();
     let (cols, row_w) = layout::columns(w, 300.0, 12.0);
@@ -553,9 +565,9 @@ fn found(ui: &mut Ui, cx: &mut Cx, state: &mut State, list: &[Project]) {
     let mut open = None;
     let mut add = None;
     let mut picked = None;
-    for (i, p) in list.iter().take(shown).enumerate() {
+    for (i, &p) in list.iter().take(shown).enumerate() {
         let target = [(i % cols) as f32 * (row_w + 12.0), (i / cols) as f32 * (row_h + 12.0)];
-        state.row_places.push((p.path.clone(), Rect::from_min_size(area.min + vec2(target[0], target[1]), vec2(row_w, row_h))));
+        state.place_row(&p.path, Rect::from_min_size(area.min + vec2(target[0], target[1]), vec2(row_w, row_h)));
         let [x, y] = anim::spring(&ctx, Id::unique(("found-place", &p.path)), target, Spring::SOFT);
         let rw = row_w;
         let r = Rect::from_min_size(area.min + vec2(x, y), vec2(rw, row_h));
@@ -568,10 +580,8 @@ fn found(ui: &mut Ui, cx: &mut Cx, state: &mut State, list: &[Project]) {
             Some(false) => open = Some(p.path.clone()),
             None => {}
         }
-        let acts = menus::project_items(state, p, true);
-        let items: Vec<popup::Item> = acts.iter().map(|(i, _)| *i).collect();
-        if let Some(k) = popup::context_menu(ui, &resp, "found-row", &items) {
-            picked = Some((p.clone(), acts[k].1, r));
+        if let Some((_, act)) = popup::context_menu(ui, &resp, "found-row", || menus::project_items(state, p, true), |(i, _)| *i) {
+            picked = Some((p.clone(), act, r));
         }
     }
     if let Some((p, act, r)) = picked {
@@ -753,7 +763,7 @@ mod order_tests {
     fn project(name: &str, modified: u64) -> Project {
         Project { path: std::path::PathBuf::from(format!("C:/P/{name}")), name: name.into(), modified, ..Default::default() }
     }
-    fn names(list: &[Project]) -> Vec<String> {
+    fn names(list: &[&Project]) -> Vec<String> {
         list.iter().map(|p| p.name.clone()).collect()
     }
 
@@ -774,19 +784,79 @@ mod order_tests {
         assert_eq!(anchor_shift(Some(&anchor), &[(p("b"), 50.0)]), None);
     }
 
+    /// A frame of the gallery over `n` projects of which each has `avatars`, its panel showing the first with `packages`
+    /// offered, at rest: what it allocates, and how long it takes (microseconds).
+    fn frame_over(n: u64, avatars: usize, packages: usize) -> (u64, f64) {
+        use orbiters_projects::{avatars::Avatar, vpm};
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let ctl: crate::backend::Ctl = std::sync::Arc::new(crate::backend::Local::new(crate::controller::Controller::new(orbiters_core::settings::Settings::default())));
+        let snap = (*ctl.view()).clone();
+        let mut state = State::default();
+        state.fixture = true;
+        state.u6.stand_in_for_tests();
+        state.scan.projects = (0..n)
+            .map(|i| Project {
+                path: PathBuf::from(format!("Q:/Not/Here/P{i}")),
+                name: format!("Project {i}"),
+                unity: "2022.3.22f1".into(),
+                registered: true,
+                modified: 100_000 - i,
+                // Both fixtures render the same project covers and the same first project's details. Additional
+                // avatars sit on offscreen projects so their cloning is measured separately from rendering them.
+                avatars: (0..if i < 16 { 3 } else { avatars }).map(|a| Avatar { id: format!("avtr_{i}_{a}"), name: format!("Avatar {a}"), ..Default::default() }).collect(),
+                ..Default::default()
+            })
+            .collect();
+        state.selected = Some(PathBuf::from("Q:/Not/Here/P0"));
+        state.view.packages = (0..packages)
+            .map(|i| vpm::Package { name: format!("com.sample.package{i}"), display_name: format!("Package {i}"), versions: (0..40).map(|v| format!("1.{v}.0")).collect(), ..Default::default() })
+            .collect();
+        let mut time = 0.0;
+        let mut draw = |state: &mut State| {
+            time += 1.0 / 60.0;
+            let input = egui::RawInput { time: Some(time), screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 900.0))), ..Default::default() };
+            let mut toasts = orbiters_ui::toast::Toasts::default();
+            let mut output = ctx.run_ui(input, |ui| {
+                let mut cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                show(ui, &mut cx, state);
+            });
+            output.textures_delta.clear();
+        };
+        (0..240).for_each(|_| draw(&mut state));
+        assert_eq!(state.row_places.len(), n as usize);
+        let from = std::time::Instant::now();
+        let made = crate::test_alloc::count(|| (0..60).for_each(|_| draw(&mut state)));
+        (made / 60, from.elapsed().as_secs_f64() * 1e6 / 60.0)
+    }
+
+    /// DPG-9: a frame of Unity projects copied every project (twice, with all its avatars) and every package of every
+    /// repository with all its versions, whatever was in view.
+    #[test]
+    fn a_frame_of_projects_costs_what_is_in_view() {
+        let (few, few_us) = frame_over(30, 3, 20);
+        let (many, many_us) = frame_over(300, 30, 20);
+        println!("30 projects: {few} allocations, {few_us:.0} us a frame; 300 projects: {many}, {many_us:.0} us");
+        assert!(many <= few + few / 10 + 60, "{many} allocations a frame over 300 projects, {few} over 30");
+        let (offered, offered_us) = frame_over(30, 3, 400);
+        println!("400 packages offered: {offered} allocations, {offered_us:.0} us a frame");
+        assert!(offered <= few + few / 10 + 120, "{offered} allocations a frame with 400 packages offered, {few} with 20");
+    }
+
     /// PROJECTS-18: while a scan runs, a newer project found later goes at the end and no row moves; once it ends, the
     /// newest is first again.
     #[test]
     fn rows_stay_in_place_while_a_scan_runs() {
         let mut places = std::collections::HashMap::new();
-        let mut list = vec![project("old", 1), project("mid", 5)];
+        let (old, mid, new, newer) = (project("old", 1), project("mid", 5), project("new", 9), project("newer", 10));
+        let mut list = vec![&old, &mid];
         keep_places(&mut list, &mut places, false);
         assert_eq!(names(&list), ["mid", "old"]);
         // The scan's next update: a newer one, given in date order as the scan sends them.
-        let mut list = vec![project("new", 9), project("mid", 5), project("old", 1)];
+        let mut list = vec![&new, &mid, &old];
         keep_places(&mut list, &mut places, true);
         assert_eq!(names(&list), ["mid", "old", "new"]);
-        let mut list = vec![project("newer", 10), project("new", 9), project("mid", 5), project("old", 1)];
+        let mut list = vec![&newer, &new, &mid, &old];
         keep_places(&mut list, &mut places, true);
         assert_eq!(names(&list), ["mid", "old", "new", "newer"]);
         // The scan ended.

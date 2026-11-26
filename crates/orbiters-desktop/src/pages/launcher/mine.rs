@@ -125,10 +125,6 @@ impl Mine {
     }
 }
 
-fn shown_mine(state: &State) -> Option<MyProfile> {
-    state.data.mine.clone()
-}
-
 /// The account whose card this is: the launcher's signed-in account, and only while the sign-in says the same. Signing
 /// out (or into another account) masks the card at once, before the launcher's next look replaces its list.
 fn signed_in(state: &State) -> Option<String> {
@@ -149,7 +145,7 @@ fn height(ui: &Ui, state: &State, width: f32) -> f32 {
     let bio_h = match &state.mine.editing {
         Some(Editing::Bio(_)) => BIO_EDIT_H + 8.0 + BUTTONS_H,
         _ => {
-            let bio = shown_mine(state).map(|m| m.bio).unwrap_or_default();
+            let bio = state.data.mine.as_ref().map(|m| m.bio.clone()).unwrap_or_default();
             if bio.trim().is_empty() {
                 BIO_LINE
             } else {
@@ -331,7 +327,6 @@ fn connecting(ui: &mut Ui, rect: Rect, name: Option<&str>, face: Option<&egui::T
     let line = if signed_in { tr("Reading your VRChat profile…") } else { waits };
     widgets::text_truncated(&p, pos2(x, rect.center().y + 11.0), Align2::LEFT_CENTER, &Txt::new(line, 12.5).color(theme::fg_3()), room);
     orbiters_ui::feedback::spinner(&p, pos2(rect.right() - PAD - 12.0, rect.center().y), 8.0, 2.0, theme::fg_3());
-    orbiters_ui::anim::request_frame(ui.ctx());
 }
 
 /// What a part shows while its change is on the way: the change, at once.
@@ -342,8 +337,9 @@ fn pending_of<'a>(state: &'a State, part: ProfilePart) -> Option<&'a ProfileEdit
 fn draw(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect) {
     let ctx = ui.ctx().clone();
     let clock = anim::time(&ctx);
-    let mine = shown_mine(state).unwrap_or_default();
-    let Some(me) = state.data.me.clone() else {
+    let (data, none) = (state.data.clone(), MyProfile::default());
+    let mine = data.mine.as_ref().unwrap_or(&none);
+    let Some(me) = &data.me else {
         let p = ui.painter();
         widgets::frame(p, rect, theme::CARD_RADIUS, theme::surface());
         feedback::shimmer(p, rect, theme::CARD_RADIUS);
@@ -469,7 +465,7 @@ fn draw(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect) {
         }
     }
     status_resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tr("Choose your status"));
-    saving_line(ui, state, &mine, Rect::from_min_max(pos2(status_rect.right() + 12.0, name_y - 14.0), pos2(right, name_y + 14.0)), cx, clock);
+    saving_line(ui, state, mine, Rect::from_min_max(pos2(status_rect.right() + 12.0, name_y - 14.0), pos2(right, name_y + 14.0)), cx, clock);
 
     // The status text, pressed to type another.
     let text_y = banner.bottom() + TEXT_DY;
@@ -692,7 +688,6 @@ fn saving_line(ui: &mut Ui, state: &mut State, mine: &MyProfile, rect: Rect, cx:
             let t = Txt::new(tr("Saving…"), 12.5).color(theme::fg_3());
             let r = widgets::text(&p, at, Align2::RIGHT_CENTER, &t);
             feedback::spinner(&p, pos2(r.left() - 12.0, at.y), 6.0, 2.0, theme::fg_3());
-            ui.ctx().request_repaint();
         }
         Some(Saving::Saved(_)) => {
             let Some((_, seen)) = state.mine.saved_seen else { return };
@@ -757,7 +752,8 @@ fn picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let Some((kind, anchor, opened)) = state.mine.picker else { return };
     let ctx = ui.ctx().clone();
     let clock = anim::time(&ctx);
-    let mine = shown_mine(state).unwrap_or_default();
+    let (data, none) = (state.data.clone(), MyProfile::default());
+    let mine = data.mine.as_ref().unwrap_or(&none);
     let w: f32 = 384.0;
     let screen = ctx.content_rect();
     // Towards the card: from what opened it, on its side of the page.
@@ -954,7 +950,6 @@ fn picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             if listing {
                 let c = if shown.is_empty() { body.center() } else { pos2(body.left() + (shown.len() % per_row) as f32 * (cell + gap) + cell * 0.5, body.top() + cell_h * 0.5) };
                 feedback::spinner(&p, c, 9.0, 2.5, theme::fg_3());
-                ctx.request_repaint();
             }
         }
     }

@@ -182,7 +182,7 @@ impl Thumbs {
                     .and_then(|jpeg| orbiters_n4n0_core::picture::rgb_jpeg(&jpeg).ok())
                     .map(|rgb| ColorImage::from_rgb([rgb.width, rgb.height], &rgb.pixels));
                 let _ = tx.send((id, image));
-                ctx.request_repaint();
+                orbiters_ui::anim::wake(&ctx);
             });
         }
     }
@@ -456,6 +456,11 @@ fn by_day(rows: Vec<Row>, now: u64) -> Vec<(String, Vec<Row>)> {
         }
     }
     groups.into_iter().map(|(_, name, rows)| (name, rows)).collect()
+}
+
+/// What the page shows on its first frame, read before it (`App::prepare`).
+pub fn prepare(ui: &Ui, cx: &Cx, state: &mut State) {
+    state.refresh(ui.ctx(), cx.visit);
 }
 
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {

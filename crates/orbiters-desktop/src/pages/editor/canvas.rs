@@ -50,7 +50,6 @@ pub(super) fn show(ed: &mut Editor, ui: &mut Ui, rect: Rect) {
             None => {
                 feedback::spinner(&p, rect.center() - vec2(0.0, 18.0), 12.0, 2.5, theme::accent());
                 widgets::text(&p, rect.center() + vec2(0.0, 14.0), Align2::CENTER_CENTER, &Txt::new(if ed.source.remote.is_some() { tr("Downloading the picture at its full size…") } else { tr("Reading the picture…") }, 13.0).color(theme::fg_3()));
-                ctx.request_repaint();
             }
         }
         return;
@@ -107,7 +106,6 @@ fn picture(ed: &mut Editor, ui: &mut Ui, rect: Rect, full: (u32, u32)) {
     // Making the preview of the latest change: a quiet spinner in the corner.
     if ed.preview.as_ref().is_some_and(|pv| pv.busy()) {
         feedback::spinner(&p, pos2(rect.right() - 20.0, rect.top() + 20.0), 7.0, 2.0, theme::fg_3());
-        ctx.request_repaint();
     }
     if ed.comparing {
         let t = Txt::new(tr("Original"), 11.5).color(theme::fg());

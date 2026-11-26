@@ -414,7 +414,7 @@ impl Worlds {
             me: None,
             accounts: 0,
             infos: crate::worlds::Infos::new(&ctx),
-            pictures: crate::worlds::Pictures::new(&ctx),
+            pictures: crate::worlds::Pictures::new(&ctx).within(super::PICTURES_HOLD),
             finder: finder::Finder::default(),
             visited: finder::Visited::default(),
             found_seen: (0, 0),
@@ -537,7 +537,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             me: None,
             accounts: 0,
             infos: crate::worlds::Infos::new(&ctx),
-            pictures: crate::worlds::Pictures::new(&ctx),
+            pictures: crate::worlds::Pictures::new(&ctx).within(super::PICTURES_HOLD),
             finder: finder::Finder::default(),
             visited: finder::Visited::default(),
             found_seen: (0, 0),
@@ -1742,6 +1742,11 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     }
 
     /// Whether what shows can be taken in a hand.
+    /// What its caches hold, in bytes ([`super::held_bytes`]).
+    pub fn held_bytes(&self) -> Vec<(&'static str, u64)> {
+        vec![("captures", self.captures.bytes()), ("small capture", self.view.small_bytes()), ("world pictures", self.pictures.bytes() as u64)] // i18n: not shown (names in a log)
+    }
+
     pub fn small_showing(&self) -> bool {
         self.view.small()
     }

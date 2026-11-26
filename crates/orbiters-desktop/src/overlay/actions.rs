@@ -597,6 +597,11 @@ impl Actions {
         }
     }
 
+    /// Two taps are being timed ([`Taps::timing`]).
+    pub fn timing_taps(&self, now: Instant) -> bool {
+        self.taps.timing(now)
+    }
+
     /// Reads every set for this frame (before reading any action).
     pub fn update(&self, steamvr: &vr::Client) -> bool {
         if self.sets.is_empty() {
@@ -859,6 +864,11 @@ pub const TAP_GAP: Duration = Duration::from_millis(400);
 pub const TAP_FLICKER: Duration = Duration::from_millis(40);
 
 impl Taps {
+    /// A touch or the gap after one is being timed: the sensor is read at every short turn meanwhile.
+    pub fn timing(&self, now: Instant) -> bool {
+        self.touch.is_some() || self.off.is_some() || self.tapped.is_some_and(|t| now.duration_since(t) <= TAP_GAP)
+    }
+
     /// The sensor `touched` at `now` (read once a turn); true as the second tap starts.
     pub fn step(&mut self, touched: bool, now: Instant) -> bool {
         if let Some((off, lasted)) = self.off {

@@ -34,7 +34,9 @@ pub mod install;
 #[cfg(windows)]
 pub mod win;
 
-pub use control::{Control, Mapping, WalkLink};
+#[cfg(feature = "install")]
+pub use control::words;
+pub use control::{Control, Mapping, Refused, WalkLink};
 #[cfg(feature = "install")]
 pub use install::{install, installed, uninstall, AddOnState, Installation};
 

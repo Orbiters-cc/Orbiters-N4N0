@@ -14,8 +14,26 @@ use orbiters_n4n0_core::menu::Effect;
 use orbiters_n4n0_core::picture::Rgb;
 use std::sync::Arc;
 
-/// Thumbnails as textures of the context that draws the menu: the picture, and the same as the retro look's green dots
-/// (crisp, so drawn with nearest pixels).
+/// A thumbnail as textures of the context that draws the menu: the picture, and the same as the retro look's green dots (crisp, so drawn with nearest pixels), made the first time
+/// that look draws it.
+pub struct Thumbnail {
+    name: String,
+    image: Arc<ColorImage>,
+    photo: TextureHandle,
+    dots: std::sync::OnceLock<TextureHandle>,
+    textures: crate::overlay::PaintTextures,
+}
+
+impl Thumbnail {
+    fn shown(&self, retro: bool) -> TextureId {
+        if !retro {
+            return self.photo.id();
+        }
+        self.dots.get_or_init(|| self.textures.load_texture(format!("{}-dots", self.name), menu_retro::phosphor(&self.image), TextureOptions::LINEAR)).id()
+    }
+}
+
+/// Where thumbnails' textures are made.
 pub struct Textures {
     textures: crate::overlay::PaintTextures,
     /// A copy of what was fetched, by name: other canvases (a panel's own context) make their textures from it.
@@ -26,7 +44,7 @@ pub struct Textures {
 /// the 65th before, the page's newest thumbnails with them, OVERLAY-16).
 #[derive(Default)]
 struct Kept {
-    images: std::collections::HashMap<String, ColorImage>,
+    images: std::collections::HashMap<String, Arc<ColorImage>>,
     /// Names, oldest first.
     order: std::collections::VecDeque<String>,
 }
@@ -34,7 +52,7 @@ struct Kept {
 impl Kept {
     const MOST: usize = 64;
 
-    fn insert(&mut self, name: &str, image: ColorImage) {
+    fn insert(&mut self, name: &str, image: Arc<ColorImage>) {
         if self.images.insert(name.to_string(), image).is_some() {
             self.order.retain(|n| n != name);
         }
@@ -46,7 +64,7 @@ impl Kept {
         }
     }
 
-    fn get(&self, name: &str) -> Option<&ColorImage> {
+    fn get(&self, name: &str) -> Option<&Arc<ColorImage>> {
         self.images.get(name)
     }
 
@@ -57,17 +75,19 @@ impl Kept {
 }
 
 impl Textures {
-    fn of(&self, name: &str, image: ColorImage) -> (TextureHandle, TextureHandle) {
+    /// One copy of its pixels, whoever keeps it: the copies for other canvases, the texture and what paints it share it.
+    fn of(&self, name: &str, image: ColorImage) -> Thumbnail {
+        let image = Arc::new(image);
         if let Ok(mut images) = self.images.lock() {
             images.insert(name, image.clone());
         }
-        let green = menu_retro::phosphor(&image);
-        (self.textures.load_texture(name, image, TextureOptions::LINEAR), self.textures.load_texture(format!("{name}-dots"), green, TextureOptions::LINEAR))
+        let photo = self.textures.load_texture(name, image.clone(), TextureOptions::LINEAR);
+        Thumbnail { name: name.to_string(), image, photo, dots: Default::default(), textures: self.textures.clone() }
     }
 }
 
 impl Pictures for Textures {
-    type Picture = (TextureHandle, TextureHandle);
+    type Picture = Thumbnail;
 
     fn make(&self, name: &str, image: &Rgb) -> Self::Picture {
         let rgba: Vec<u8> = image.pixels.as_chunks::<3>().0.iter().flat_map(|&[r, g, b]| [r, g, b, 255]).collect();
@@ -153,13 +173,13 @@ impl MenuHost {
     }
 
     /// A fetched picture's pixels by its name, for a canvas of another context.
-    pub fn image(&self, key: &str) -> Option<ColorImage> {
+    pub fn image(&self, key: &str) -> Option<Arc<ColorImage>> {
         self.0.pictures().images.lock().ok()?.get(key).cloned()
     }
 
     /// A thumbnail by its key once loaded, as the look draws it (`retro`: in its green).
     pub fn picture(&self, key: &str, retro: bool) -> Option<TextureId> {
-        self.0.picture(key).map(|(photo, dots)| if retro { dots.id() } else { photo.id() })
+        self.0.picture(key).map(|picture| picture.shown(retro))
     }
 
     /// Keeps a picture fetched elsewhere (the screenshot review's stand-ins) under `key`, as a fetched one.
@@ -187,13 +207,30 @@ mod kept_tests {
     fn the_oldest_picture_goes_first() {
         let mut kept = Kept::default();
         for n in 0..64 {
-            kept.insert(&format!("p{n}"), ColorImage::filled([1, 1], egui::Color32::BLACK));
+            kept.insert(&format!("p{n}"), ColorImage::filled([1, 1], egui::Color32::BLACK).into());
         }
-        kept.insert("p0", ColorImage::filled([1, 1], egui::Color32::WHITE));
-        kept.insert("p64", ColorImage::filled([1, 1], egui::Color32::BLACK));
+        kept.insert("p0", ColorImage::filled([1, 1], egui::Color32::WHITE).into());
+        kept.insert("p64", ColorImage::filled([1, 1], egui::Color32::BLACK).into());
         assert!(kept.get("p1").is_none(), "the oldest went");
         assert!(kept.get("p0").is_some() && kept.get("p2").is_some() && kept.get("p64").is_some());
         assert_eq!(kept.names().count(), 64);
         assert_eq!(kept.names().last().map(String::as_str), Some("p64"));
+    }
+
+    /// DOV-7: a thumbnail made three copies of itself (its texture, the retro look's, one for other canvases), that look chosen or not.
+    #[test]
+    fn a_thumbnail_is_kept_once_and_its_dots_are_made_when_drawn() {
+        let ctx = egui::Context::default();
+        let textures = super::Textures { textures: crate::overlay::PaintTextures::of(&ctx), images: Default::default() };
+        let before = ctx.tex_manager().read().num_allocated();
+        let thumb = textures.of("video", ColorImage::filled([320, 180], egui::Color32::RED));
+        assert_eq!(ctx.tex_manager().read().num_allocated(), before + 1);
+        let kept = textures.images.lock().unwrap().get("video").unwrap().clone();
+        assert!(std::sync::Arc::ptr_eq(&kept, &thumb.image), "one copy of its pixels");
+        assert_eq!(thumb.shown(false), thumb.photo.id());
+        assert_eq!(ctx.tex_manager().read().num_allocated(), before + 1, "nothing of the retro look yet");
+        let dots = thumb.shown(true);
+        assert!(dots != thumb.photo.id() && dots == thumb.shown(true));
+        assert_eq!(ctx.tex_manager().read().num_allocated(), before + 2);
     }
 }

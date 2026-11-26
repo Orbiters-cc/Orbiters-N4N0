@@ -2096,18 +2096,25 @@ mod tests {
             assert!(texts.contains("Connecting to VRChat as Tester…"), "{texts}");
             orbiters_ui::anim::set_live(&h.ctx, live);
             if live {
-                // Someone there: the spinner's frames, no more.
-                let from = h.time;
+                // Renew the activity clock once. Supplying input to each frame would also schedule egui's own
+                // input repaints, which do not come from the connecting state.
+                h.frame(vec![Event::PointerGone]);
+                let from = h.time + 1.0;
                 let mut t = from;
                 let mut frames = 0;
                 while t < from + 10.0 {
-                    t += h.frame_at(t, vec![Event::PointerMoved(pos2(500.0, 700.0 + (frames % 2) as f32))]).as_secs_f64().clamp(1.0 / 60.0, 0.5);
+                    let delay = h.frame_at(t, Vec::new());
+                    assert!(delay < Duration::MAX, "the spinner advances while the window is in use");
+                    t += delay.as_secs_f64().max(1.0 / 60.0);
                     frames += 1;
                 }
-                assert!(frames <= 10 * (orbiters_ui::anim::DECOR_FPS as usize + 2) + 60, "in use: {frames} frames in 10 s");
+                println!("Connecting on active Home: {frames} scheduled frames in 10 s");
+                assert!(frames <= 10 * (orbiters_ui::anim::DECOR_FPS as usize + 3) + 30, "in use: {frames} frames in 10 s");
             }
             let from = h.time;
-            assert_eq!(crate::pages::rest::frames_a_minute(from, |t| h.frame_at(t, Vec::new())), 0, "{focused}");
+            let frames = crate::pages::rest::frames_a_minute(from, |t| h.frame_at(t, Vec::new()));
+            println!("Connecting {focused}: {frames} scheduled frames in a minute");
+            assert_eq!(frames, 0, "{focused}");
         }
     }
 

@@ -1300,7 +1300,6 @@ fn chrome(
                 match &ch.state {
                     ChipState::Building => {
                         feedback::spinner(&p, pos2(tx + 5.0, r.center().y), 5.0, 1.6, theme::fg_3());
-                        ui.ctx().request_repaint();
                         tx += 18.0;
                     }
                     ChipState::Failed(_) => {

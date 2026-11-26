@@ -1056,13 +1056,15 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     #[cfg(test)]
     pub fn draft_for_test(&self) -> &str { &self.panel.draft }
 
-    /// A test's world chosen: its page open on `id`, from `entries` as the listing.
+    /// Choose a world in a fixture listing. An earlier background refresh may still write to the old catalog.
     #[cfg(test)]
-    pub(crate) fn chosen_for_test(&mut self, entries: Vec<Entry>, id: u64) {
+    pub(crate) fn chosen_for_test(&mut self, entries: Vec<Entry>, id: u64) -> catalog::Catalog {
+        let earlier = std::mem::take(&mut self.catalog);
         self.listing_for_test(entries);
         self.open = true;
         self.panel.page = panel::Page::Detail;
         self.panel.selected = Some(id);
+        earlier
     }
 
     /// The world whose capture turns on the side panel now, and whether something reads one.

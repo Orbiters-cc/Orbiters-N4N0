@@ -68,8 +68,9 @@ impl Journal {
     }
 
     /// The journal a swap left in `dir`: none when it is confirmed not there (or is a folder, or a link: not ours). One that is
-    /// there but cannot be looked at now is an error, never "none" (W1-1).
-    fn left(dir: &Path) -> anyhow::Result<Option<(Self, Plan)>> {
+    /// there but cannot be looked at now is an error, never "none" (W1-1). Its plan is `None` when it holds no whole one: an
+    /// older setup wrote it in place and was cut while writing it (V2-2).
+    fn left(dir: &Path) -> anyhow::Result<Option<(Self, Option<Plan>)>> {
         const SHARING_VIOLATION: i32 = 32;
         let path = dir.join(JOURNAL);
         match std::fs::symlink_metadata(&path) {
@@ -84,7 +85,7 @@ impl Journal {
         };
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).map_err(|e| unreadable(&path, e))?;
-        Ok(Plan::read(&bytes).map(|plan| (Self { file: Some(file), path }, plan)))
+        Ok(Some((Self { file: Some(file), path }, Plan::read(&bytes))))
     }
 
     /// What it was for is over. An error when it could not be removed: it then still says what it said.
@@ -185,6 +186,15 @@ fn put_back(dir: &Path, staging: &Path, backup: &Path, plan: &Plan) -> Vec<Strin
 /// Whether there was one. An error when the previous version could not be put back whole: its files and the journal stay.
 pub fn recover(dir: &Path) -> anyhow::Result<bool> {
     let Some((journal, plan)) = Journal::left(dir)? else { return Ok(false) };
+    let Some(plan) = plan else {
+        // V2-2: this app's journal, at its own name in the install folder, that says no whole plan: an older setup wrote it in
+        // place and was cut while it did, before its first move. It is kept beside under a name of its own (whatever it holds
+        // stays), never left at its name, where every later setup would refuse to write its own and stop there for good.
+        let journal_path = journal.path.clone();
+        drop(journal);
+        crate::install::keep_aside(dir, &journal_path).with_context(|| tr!("{path} cannot be written", path = journal_path.display()))?;
+        return Ok(true);
+    };
     let (staging, backup) = (dir.join(STAGING), dir.join(BACKUP));
     // Whether the swap ended is what its record says: one that cannot be read now decides nothing, before any file moves (W1-1).
     let record = dir.join(RECORD_FILE);
@@ -217,7 +227,7 @@ pub fn recover(dir: &Path) -> anyhow::Result<bool> {
 pub(crate) fn whole(dir: &Path) -> bool {
     let Ok(journal) = Journal::left(dir) else { return false };
     let Ok(Some(record)) = InstallRecord::load(dir) else { return false };
-    if journal.as_ref().is_some_and(|(_, plan)| record != plan.to) {
+    if journal.as_ref().and_then(|(_, plan)| plan.as_ref()).is_some_and(|plan| record != plan.to) {
         return false;
     }
     let available = |path: &str| contained(dir, path).is_some_and(|file| file.is_file());
@@ -226,7 +236,7 @@ pub(crate) fn whole(dir: &Path) -> bool {
 
 /// The programs a cut swap in `dir` was about, which must not run while it is put back.
 pub(crate) fn left_programs(dir: &Path) -> anyhow::Result<Vec<String>> {
-    Ok(Journal::left(dir)?.map(|(_, plan)| plan.paths().map(str::to_string).collect()).unwrap_or_default())
+    Ok(Journal::left(dir)?.and_then(|(_, plan)| plan).map(|plan| plan.paths().map(str::to_string).collect()).unwrap_or_default())
 }
 
 /// The command that puts back what a cut swap in `dir` leaves: `setup`, with its folder named where Windows' 260 characters
@@ -353,7 +363,9 @@ mod tests {
         remove_tree(&dir);
     }
 
-    /// A journal another setup holds is a swap under way; one that cannot be read, or is a person's file, is none.
+    /// A journal another setup holds is a swap under way. One at its name that holds no whole plan (V2-2: what an older setup,
+    /// which wrote it in place, left when cut while writing it) moves nothing: it is kept beside as it is, and its name is free.
+    /// A folder at its name is none.
     #[test]
     fn only_a_swap_that_was_cut_is_recovered() {
         let dir = scratch("held");
@@ -362,11 +374,20 @@ mod tests {
         let said = format!("{:#}", recover(&dir).unwrap_err());
         assert!(said.contains("Another setup is at work"), "{said}");
         drop(held);
+        let unplanned = tree(&dir).into_iter().filter(|(p, _)| p != JOURNAL).collect::<Vec<_>>();
         for text in [&b"{\"product\":\"orbiters-desktop\",\"aside\":[\"mine.txt\"]"[..], b"{}", b"a person's", b""] {
             std::fs::write(dir.join(JOURNAL), text).unwrap();
-            assert!(!recover(&dir).unwrap());
-            assert!(dir.join("mine.txt").is_file());
+            assert!(recover(&dir).unwrap());
+            assert!(!dir.join(JOURNAL).exists() && !recover(&dir).unwrap());
+            let (kept, rest): (Vec<_>, Vec<_>) = tree(&dir).into_iter().partition(|(p, _)| p.starts_with(&format!("{JOURNAL}-")));
+            assert_eq!(rest, unplanned, "nothing of the install moved");
+            assert_eq!(kept.len(), 1);
+            assert_eq!(kept[0].1.as_bytes(), text);
+            std::fs::remove_file(dir.join(&kept[0].0)).unwrap();
         }
+        std::fs::create_dir(dir.join(JOURNAL)).unwrap();
+        assert!(!recover(&dir).unwrap() && dir.join(JOURNAL).is_dir());
+        std::fs::remove_dir(dir.join(JOURNAL)).unwrap();
         std::fs::write(dir.join(JOURNAL), b"a person's").unwrap();
         let (_, old, to) = before(&dir);
         assert!(Journal::begin(&dir, &Plan { aside: old.files, fresh: vec![], to }).is_err());

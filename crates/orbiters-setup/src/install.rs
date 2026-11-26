@@ -253,17 +253,24 @@ fn recover_leftovers(dir: &Path, staging: &Path, backup: &Path, previous: Option
                 continue;
             }
         }
-        let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let stamp = time::OffsetDateTime::now_utc().unix_timestamp();
-        let free = (0..100).map(|n| dir.join(format!("{name}-{stamp}-{n}"))).find(|p| std::fs::symlink_metadata(p).is_err());
-        let kept = free.map(|to| rename(folder, &to));
         anyhow::ensure!(
-            matches!(kept, Some(Ok(()))),
+            keep_aside(dir, folder).is_ok(),
             "{}",
             tr!("{folder} is left from an earlier install and could not be set aside: nothing was changed.", folder = folder.display())
         );
     }
     Ok(())
+}
+
+/// What an earlier install left at `path` in `dir`, which says nothing that can be acted on, moved beside it under a name of its
+/// own (`<name>-<time>-<n>`): kept as it is, never removed, and its name free for this install. Where it went.
+pub(crate) fn keep_aside(dir: &Path, path: &Path) -> std::io::Result<PathBuf> {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let stamp = time::OffsetDateTime::now_utc().unix_timestamp();
+    let free = (0..100).map(|n| dir.join(format!("{name}-{stamp}-{n}"))).find(|p| std::fs::symlink_metadata(p).is_err());
+    let to = free.ok_or_else(|| std::io::Error::from(std::io::ErrorKind::AlreadyExists))?;
+    rename(path, &to)?;
+    Ok(to)
 }
 
 /// Removes the empty folders of `folder` (and it, once empty), deepest first; never a file, never through a link.
@@ -342,12 +349,17 @@ fn install_with(bytes: &[u8], options: &Options, progress: &Progress, silent: bo
     // Nothing is changed when a file of the payload would replace one of the person's, or would be reached through a
     // folder redirected elsewhere.
     let mut taken = collisions(dir, &index, previous.as_ref());
-    // The record's own names (PROJECTS-34): without a record of ours, a file there is the person's.
+    // The record's own names (PROJECTS-34): without a record of ours, a file there is the person's. Except the record's draft:
+    // a plain file at that exact name is what an older setup, which wrote it in place, left when it was cut before renaming it
+    // (V2-2); it is kept beside below, never a reason to refuse the folder for good. (The journal's, the same, is kept beside
+    // by the recovery above: what is still at its name is a folder or a link.)
+    let mut drafts = vec![];
     if previous.is_none() {
-        for name in [RECORD_FILE.to_string(), format!("{RECORD_FILE}.tmp"), crate::swap::JOURNAL.to_string()] {
-            let file = dir.join(&name);
+        for name in [RECORD_FILE, crate::swap::RECORD_DRAFT, crate::swap::JOURNAL] {
+            let file = dir.join(name);
             match std::fs::symlink_metadata(&file) {
-                Ok(_) => taken.push(name),
+                Ok(m) if name == crate::swap::RECORD_DRAFT && m.is_file() && std::os::windows::fs::MetadataExt::file_attributes(&m) & 0x400 == 0 => drafts.push(file),
+                Ok(_) => taken.push(name.to_string()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(crate::swap::unreadable(&file, e)),
             }
@@ -358,6 +370,9 @@ fn install_with(bytes: &[u8], options: &Options, progress: &Progress, silent: bo
         "{}",
         tr!("These files are already in {folder} and are not Orbiters - N4N0's: {files}. Nothing was changed: choose another folder.", folder = dir.display(), files = taken.join(", "))
     );
+    for draft in drafts {
+        keep_aside(dir, &draft).with_context(|| tr!("{path} cannot be written", path = draft.display()))?;
+    }
     let new_and_old = index.files.iter().map(|f| f.path.as_str()).chain(previous.iter().flat_map(|r| r.files.iter().map(String::as_str)));
     let linked = redirected(dir, new_and_old);
     anyhow::ensure!(
@@ -1260,12 +1275,49 @@ pub(crate) mod tests {
             assert!(!dir.join(crate::swap::JOURNAL).exists() && !dir.join(&tmp).exists());
             remove_tree(&dir);
         }
+        // What is at the journal's name and is not a file this app writes (a folder) still stops a first install.
         let dir = scratch("first-persons-journal");
-        std::fs::write(dir.join(crate::swap::JOURNAL), b"").unwrap();
+        std::fs::create_dir(dir.join(crate::swap::JOURNAL)).unwrap();
         let said = format!("{:#}", install_with(&bytes, &options(&dir), &Progress::default(), true, true, &Quiet).unwrap_err());
-        assert!(said.contains(crate::swap::JOURNAL) && !dir.join(APP_EXE).exists(), "{said}");
+        assert!(said.contains(crate::swap::JOURNAL) && !dir.join(APP_EXE).exists() && dir.join(crate::swap::JOURNAL).is_dir(), "{said}");
         remove_tree(&dir);
         remove_tree(&source);
+    }
+
+    /// The files kept beside under `name`'s own name in `dir` (`<name>-<time>-<n>`), and what each holds.
+    fn kept_beside(dir: &Path, name: &str) -> Vec<Vec<u8>> {
+        let prefix = format!("{name}-");
+        std::fs::read_dir(dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&prefix)).map(|e| std::fs::read(e.path()).unwrap()).collect()
+    }
+
+    /// V2-2: an older setup wrote its journal and its record's draft in place, at their names in the install folder; cut while it
+    /// did, it left one empty or half written. That marker is this app's: the next update and the next first install keep it
+    /// beside, as it is, and go on (they refused the folder every time, for good). Nothing of the person's is taken for one.
+    #[test]
+    fn an_older_setups_half_written_marker_is_kept_beside_and_the_setup_goes_on() {
+        let dir = scratch("old-marker-update");
+        install_with(&one_program("1.0.0", "first"), &options(&dir), &Progress::default(), true, true, &Quiet).unwrap();
+        std::fs::write(dir.join("mine.txt"), "the person's").unwrap();
+        for (version, left) in [("2.0.0", &b""[..]), ("3.0.0", br#"{"product":"orbiters-desktop","aside":["#)] {
+            std::fs::write(dir.join(crate::swap::JOURNAL), left).unwrap();
+            install_with(&one_program(version, version), &options(&dir), &Progress::default(), true, false, &Quiet).unwrap_or_else(|e| panic!("{version}: {e:#}"));
+            assert_eq!(InstallRecord::load(&dir).unwrap().unwrap().version, version);
+            assert_eq!(std::fs::read_to_string(dir.join(APP_EXE)).unwrap(), version);
+            assert!(!dir.join(crate::swap::JOURNAL).exists() && crate::swap::whole(&dir));
+            assert!(kept_beside(&dir, crate::swap::JOURNAL).iter().any(|kept| kept == left), "kept as it was");
+        }
+        assert_eq!(std::fs::read_to_string(dir.join("mine.txt")).unwrap(), "the person's");
+        remove_tree(&dir);
+        for marker in [crate::swap::JOURNAL, crate::swap::RECORD_DRAFT] {
+            for left in [&b""[..], b"{"] {
+                let dir = scratch("old-marker-first");
+                std::fs::write(dir.join(marker), left).unwrap();
+                install_with(&one_program("1.0.0", "first"), &options(&dir), &Progress::default(), true, true, &Quiet).unwrap_or_else(|e| panic!("{marker}: {e:#}"));
+                assert_eq!(InstallRecord::load(&dir).unwrap().unwrap().version, "1.0.0");
+                assert!(!dir.join(marker).exists() && kept_beside(&dir, marker) == vec![left.to_vec()], "{marker}");
+                remove_tree(&dir);
+            }
+        }
     }
 
     /// PROJECTS-15: a program of someone else's running from the install folder (a folder in it) is neither waited for

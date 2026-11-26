@@ -705,10 +705,7 @@ impl ShotIndex {
             let (own, clean) = match (e.sha256.is_none(), e.clean_sha256.is_none()) {
                 (false, false) => continue,
                 // Both from one reading: of one and the same file.
-                (true, true) => match crate::png_meta::both_sha256(p) {
-                    Ok((own, clean)) => (Some(own), clean),
-                    Err(_) => continue,
-                },
+                (true, true) => crate::png_meta::both_sha256(p),
                 (true, false) => (sha256_file(p).ok(), None),
                 (false, true) => (None, crate::png_meta::clean_sha256(p).ok()),
             };
@@ -902,7 +899,7 @@ mod tests {
         std::fs::write(&file, [png_with_text("Description", "x"), vec![3u8; 8 << 20]].concat()).unwrap();
         let (f, g) = (file.clone(), file.clone());
         let before = middle(Box::new(move || { sha256_file(&f).unwrap(); crate::png_meta::clean_sha256(&f).unwrap(); }), 9);
-        let after = middle(Box::new(move || { crate::png_meta::both_sha256(&g).unwrap(); }), 9);
+        let after = middle(Box::new(move || { assert!(crate::png_meta::both_sha256(&g).0.is_some()); }), 9);
         println!("COR-10, both hashes of a picture whose bytes follow its end (8 MB): {before:.2} ms -> {after:.2} ms");
         let mut whole = png_with_text("Description", "x");
         let at = whole.windows(4).position(|w| w == b"IDAT").unwrap() - 4;
@@ -911,7 +908,7 @@ mod tests {
         std::fs::write(&file, whole).unwrap();
         let (f, g) = (file.clone(), file.clone());
         let before = middle(Box::new(move || { sha256_file(&f).unwrap(); crate::png_meta::clean_sha256(&f).unwrap(); }), 9);
-        let after = middle(Box::new(move || { crate::png_meta::both_sha256(&g).unwrap(); }), 9);
+        let after = middle(Box::new(move || { assert!(crate::png_meta::both_sha256(&g).0.is_some()); }), 9);
         println!("COR-10, both hashes of a picture (8 MB): {before:.2} ms -> {after:.2} ms; opened and read {} -> 1", 2);
         std::fs::remove_file(&file).unwrap();
         // COR-28: the settings as they are saved.

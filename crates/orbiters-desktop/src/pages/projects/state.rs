@@ -1197,9 +1197,9 @@ impl State {
         });
     }
     /// What this member added to Orbiters' Map explorer (a stand-in in screenshots).
-    pub(super) fn maps(&self, cx: &Cx) -> Option<Arc<crate::state::MapsMine>> {
+    pub(super) fn maps(&self, cx: &Cx) -> Option<crate::state::MapsMine> {
         if self.fixture {
-            self.fixture_maps.clone().map(Arc::new)
+            self.fixture_maps.clone()
         } else {
             cx.ctl.maps()
         }

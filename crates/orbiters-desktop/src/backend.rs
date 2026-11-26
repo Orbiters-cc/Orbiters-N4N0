@@ -181,7 +181,7 @@ pub trait Backend: Send + Sync {
     fn upload_preview(&self, world_id: String, world_name: String, session: PathBuf);
     /// Asks what this member added to the Map explorer; [`Backend::maps`] has it once it arrived.
     fn request_maps(&self);
-    fn maps(&self) -> Option<Arc<MapsMine>>;
+    fn maps(&self) -> Option<MapsMine>;
     fn capture_share(&self, _request: controller::shares::Request) {}
     /// Share to … opened on a 3D capture not uploaded yet: the tray makes its upload files while friends are chosen.
     fn prepare_share(&self, _session: PathBuf) {}
@@ -433,7 +433,7 @@ impl Backend for Remote {
         self.0.send(&ToService::Maps);
     }
 
-    fn maps(&self) -> Option<Arc<MapsMine>> {
+    fn maps(&self) -> Option<MapsMine> {
         self.0.maps()
     }
 
@@ -708,7 +708,7 @@ impl Backend for Local {
         self.ctl.refresh_maps();
     }
 
-    fn maps(&self) -> Option<Arc<MapsMine>> {
+    fn maps(&self) -> Option<MapsMine> {
         self.ctl.maps()
     }
 

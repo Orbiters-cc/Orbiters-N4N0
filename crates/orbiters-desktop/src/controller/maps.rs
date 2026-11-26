@@ -12,7 +12,6 @@ use orbiters_core::{bundle, reconstruction, visited};
 use orbiters_i18n::tr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Instant;
 
 /// What Orbiters takes per picture, and per request.
@@ -27,14 +26,14 @@ fn iso(unix: u64) -> String {
 
 impl Controller {
     /// What this member added to the Map explorer, as last fetched.
-    pub fn maps(&self) -> Option<Arc<MapsMine>> {
+    pub fn maps(&self) -> Option<MapsMine> {
         let identity = self.maps_identity();
         self.maps_mine.lock().unwrap().as_ref().filter(|(of, _)| *of == identity).map(|(_, mine)| mine.clone())
     }
 
     /// Replaces what this member added (screenshots).
     pub fn set_maps(&self, mine: MapsMine) {
-        *self.maps_mine.lock().unwrap() = Some((self.maps_identity(), Arc::new(mine)));
+        *self.maps_mine.lock().unwrap() = Some((self.maps_identity(), mine));
     }
 
     /// Whose "My maps" a list is: the server and credential signed in now (`None` signed out).
@@ -49,7 +48,7 @@ impl Controller {
         if self.maps_turn.load(Ordering::Acquire) != turn || self.maps_identity() != identity {
             return false;
         }
-        *stored = Some((identity, Arc::new(mine.clone())));
+        *stored = Some((identity, mine.clone()));
         true
     }
 
@@ -71,7 +70,7 @@ impl Controller {
                 Some((api, token)) => match api.mine(&token) {
                     Ok(m) => MapsMine { worlds: m.worlds, error: None },
                     // What was shown stays beside the error, when it is this account's.
-                    Err(e) => MapsMine { worlds: c.maps().map(|m| m.worlds.clone()).unwrap_or_default(), error: Some(e.to_string()) },
+                    Err(e) => MapsMine { worlds: c.maps().map(|m| m.worlds).unwrap_or_default(), error: Some(e.to_string()) },
                 },
             };
             if !c.store_maps(turn, identity, &mine) {

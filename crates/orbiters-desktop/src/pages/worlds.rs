@@ -35,7 +35,7 @@ struct Open {
     closing: bool,
     /// The flight's progress (0 the card, 1 the page), as the last frame drew it.
     progress: f32,
-    hashes: Job<Arc<HashMap<PathBuf, Vec<String>>>>,
+    hashes: Job<HashMap<PathBuf, Vec<String>>>,
     selected: BTreeSet<PathBuf>,
     /// Pictures just handed to the tray service (shown as sending until its upload shows up).
     handed: Option<(f64, BTreeSet<PathBuf>)>,
@@ -203,7 +203,7 @@ impl State {
             serial: self.serial,
             closing: false,
             progress: 0.0,
-            hashes: Job::spawn(ctx, move || Arc::new(worlds::map_hashes(paths))),
+            hashes: Job::spawn(ctx, move || worlds::map_hashes(paths)),
             selected: BTreeSet::new(),
             handed: None,
             viewer: None,
@@ -782,7 +782,7 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
         signing_in: cx.snap.account.state == crate::state::AccountState::SigningIn,
         blocked,
         mine: mine_of(&mine, &world.id),
-        hashes: hashes.as_deref(),
+        hashes: hashes.as_ref(),
         uploads: cx.snap.uploads.iter().filter(|u| u.world_id == world.id).collect(),
     };
     // Handed pictures show as sending until the service lists their upload (or for three seconds).
@@ -944,7 +944,7 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                 let (title_r, _) = ui.allocate_exact_size(vec2(w, 44.0), Sense::hover());
                 let title_r = title_r.translate(vec2(0.0, dy));
                 let new: Vec<&Shot> = world.shots.iter().filter(|s| !sharing.shared(s)).collect();
-                let shared_n = world.shots.len() - new.len();
+                let shared_n = world.shots.iter().filter(|s| sharing.shared(s)).count();
                 let pictures_sub = if world.shots.is_empty() {
                     tr("Pictures you take here in VRChat show up here.").to_string()
                 } else if shared_n > 0 {

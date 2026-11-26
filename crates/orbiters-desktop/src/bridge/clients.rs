@@ -264,6 +264,17 @@ struct Ran {
 /// Runs a client's command, without a window and without a shell, from the home folder: a server added for one folder is that
 /// folder's, and this is about this user's.
 fn run(exe: &Path, args: &[&str], home: Option<&Path>, environment: &[(&str, &std::ffi::OsStr)], limit: Duration) -> Result<Ran, String> {
+    run_with_clock(exe, args, home, environment, limit, Instant::now)
+}
+
+fn run_with_clock(
+    exe: &Path,
+    args: &[&str],
+    home: Option<&Path>,
+    environment: &[(&str, &std::ffi::OsStr)],
+    limit: Duration,
+    now: impl Fn() -> Instant,
+) -> Result<Ran, String> {
     use std::io::Read;
     use std::process::{Command, Stdio};
     let mut command = Command::new(exe);
@@ -293,11 +304,11 @@ fn run(exe: &Path, args: &[&str], home: Option<&Path>, environment: &[(&str, &st
     };
     let out = read(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
     let err = read(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
-    let begin = Instant::now();
+    let begin = now();
     let success = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.success(),
-            Ok(None) if begin.elapsed() > limit => {
+            Ok(None) if now().saturating_duration_since(begin) > limit => {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(tr!("It did not answer within {seconds} s.", seconds = limit.as_secs()));
@@ -308,8 +319,8 @@ fn run(exe: &Path, args: &[&str], home: Option<&Path>, environment: &[(&str, &st
     };
     // A helper it left behind may hold a pipe open: what was said by the one deadline (the limit, and a moment after the
     // program ended) is what counts.
-    let until = (begin + limit).max(Instant::now() + Duration::from_millis(200)).min(Instant::now() + Duration::from_secs(2));
-    let text = |receiver: std::sync::mpsc::Receiver<Vec<u8>>| String::from_utf8_lossy(&receiver.recv_timeout(until.saturating_duration_since(Instant::now())).unwrap_or_default()).into_owned();
+    let until = (begin + limit).max(now() + Duration::from_millis(200)).min(now() + Duration::from_secs(2));
+    let text = |receiver: std::sync::mpsc::Receiver<Vec<u8>>| String::from_utf8_lossy(&receiver.recv_timeout(until.saturating_duration_since(now())).unwrap_or_default()).into_owned();
     Ok(Ran { success, out: text(out), err: text(err) })
 }
 
@@ -1202,18 +1213,30 @@ mod tests {
         assert_eq!(fake.entry.lock().unwrap().as_ref().unwrap().token.as_deref(), Some(WANTED.1), "the new token reached it");
     }
 
+    #[cfg(windows)]
     #[test]
     fn a_program_that_hangs_is_given_up_on() {
-        if !cfg!(windows) {
-            return;
-        }
-        let begin = Instant::now();
-        let said = run(Path::new("cmd"), &["/c", "ping -n 30 127.0.0.1 >nul"], None, &[], Duration::from_millis(300));
+        let start = Instant::now();
+        let time = std::cell::Cell::new(start);
+        let said = run_with_clock(
+            &std::env::current_exe().unwrap(),
+            &["--exact", "bridge::clients::tests::a_client_waiting_for_its_answer", "--ignored"],
+            None,
+            &[],
+            Duration::from_secs(1),
+            || time.replace(start + Duration::from_secs(2)),
+        );
         assert!(said.is_err_and(|e| e.contains("did not answer")));
-        assert!(begin.elapsed() < Duration::from_secs(5));
         let said = run(Path::new("cmd"), &["/c", "echo hello & echo there 1>&2 & exit 3"], None, &[], Duration::from_secs(20)).unwrap();
         assert!(!said.success && said.out.contains("hello") && said.err.contains("there"));
         assert!(run(Path::new("no-such-program-here"), &[], None, &[], Duration::from_secs(1)).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "child process for the command deadline test"]
+    fn a_client_waiting_for_its_answer() {
+        std::thread::park_timeout(Duration::from_secs(30));
     }
 
     /// The real programs, with their files in a folder of the test: run by hand when either of them updates

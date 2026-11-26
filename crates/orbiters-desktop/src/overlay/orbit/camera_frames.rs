@@ -489,7 +489,7 @@ mod tests {
     fn retired_readers_are_joined_before_the_owner_finishes() {
         use super::*;
         let (release,wait)=std::sync::mpsc::channel();
-        let thread=std::thread::spawn(move || { let _=wait.recv_timeout(Duration::from_secs(1)); });
+        let thread=std::thread::spawn(move || { let _=wait.recv(); });
         let mut watch=CameraWatch { health:Arc::new(Mutex::new(Health::default())),began:Instant::now(),seen:Arc::new(Mutex::new(Looks::default())),stop:Arc::new(AtomicBool::new(false)),hint:Arc::new(Mutex::new(None)),thread:Some(thread) };
         watch.stop();
         assert!(!watch.finished());
@@ -501,12 +501,20 @@ mod tests {
     fn closing_does_not_wait_for_a_reader() {
         use super::*;
         let (release, wait) = std::sync::mpsc::channel();
-        let thread = std::thread::spawn(move || { let _ = wait.recv_timeout(Duration::from_secs(1)); });
-        let watch = CameraWatch { health: Arc::new(Mutex::new(Health::default())), began: Instant::now(), seen: Arc::new(Mutex::new(Looks::default())), stop: Arc::new(AtomicBool::new(false)), hint:Arc::new(Mutex::new(None)),thread: Some(thread) };
-        let began = Instant::now();
-        drop(watch);
-        assert!(began.elapsed() < Duration::from_millis(150));
+        let thread = std::thread::spawn(move || { let _ = wait.recv(); });
+        let stop = Arc::new(AtomicBool::new(false));
+        let watch = CameraWatch { health: Arc::new(Mutex::new(Health::default())), began: Instant::now(), seen: Arc::new(Mutex::new(Looks::default())), stop: stop.clone(), hint: Arc::new(Mutex::new(None)), thread: Some(thread) };
+        let (closed, wait_for_close) = std::sync::mpsc::channel();
+        let closer = std::thread::spawn(move || {
+            drop(watch);
+            let _ = closed.send(());
+        });
+        // Successful close must precede the reader's release. This deadline only bounds a failed test.
+        let close = wait_for_close.recv_timeout(Duration::from_secs(30));
         release.send(()).unwrap();
+        closer.join().unwrap();
+        close.expect("closing waited for the blocked reader");
+        assert!(stop.load(Ordering::Relaxed));
     }
     use super::*;
     use std::time::Duration;

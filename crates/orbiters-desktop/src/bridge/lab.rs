@@ -412,6 +412,9 @@ impl LabGame {
         {
             *window.size.lock().unwrap() = (plan.width, plan.height);
         }
+        // Pollers can deliver the arrival as soon as it is scheduled. Open its log first.
+        self.new_log();
+        self.write_line("Launching with args"); // i18n: not shown
         let mut state = self.state.lock().unwrap();
         state.window = Some(window);
         state.pid = Some(std::process::id());
@@ -419,10 +422,6 @@ impl LabGame {
         state.args = Some(plan.args());
         state.player_from = Some(Instant::now() + state.behaviour.load + state.behaviour.player_after);
         state.joining = (!state.behaviour.never_arrives).then(|| (Instant::now() + state.behaviour.load, plan.world_id.clone(), plan.instance.clone()));
-        drop(state);
-        self.new_log();
-        // Like VRChat, its log names the start's own arguments first.
-        self.write_line("Launching with args"); // i18n: not shown
         Ok(())
     }
 

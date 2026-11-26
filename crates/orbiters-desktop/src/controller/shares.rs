@@ -2547,18 +2547,18 @@ pub(crate) mod tests {
         };
         let (a, b) = (item("a"), item("b"));
         let held = Changing::of(&a, &|_| {});
-        let other = std::time::Instant::now();
         drop(Changing::of(&b, &|_| panic!("another item never waits")));
-        assert!(other.elapsed().as_millis() < 500);
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (waiting, announced) = std::sync::mpsc::channel();
+        let (entered, complete) = std::sync::mpsc::channel();
         let waiter = std::thread::spawn(move || {
-            let said = Mutex::new(Vec::new());
-            let _second = Changing::of(&a, &|s| said.lock().unwrap().push(s));
-            tx.send(said.into_inner().unwrap()).unwrap();
+            let _second = Changing::of(&a, &|stage| waiting.send(stage).unwrap());
+            entered.send(()).unwrap();
         });
-        assert!(rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(), "the same item waits");
+        let guard = std::time::Duration::from_secs(30);
+        assert_eq!(announced.recv_timeout(guard).unwrap(), Stage::Waiting);
+        assert_eq!(complete.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty), "the same item waits");
         drop(held);
-        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap(), [Stage::Waiting]);
+        complete.recv_timeout(guard).unwrap();
         waiter.join().unwrap();
     }
 

@@ -1254,6 +1254,15 @@ pub(crate) mod tests {
         done()
     }
 
+    /// The client dispatches replies after all earlier messages on the same stream.
+    fn wait_for_dispatch(client: &Client, writer: &mut TcpStream) {
+        let id = "state-test-barrier".to_string();
+        let (send, recv) = std::sync::mpsc::channel();
+        assert!(client.translated.lock().unwrap().insert(id.clone(), send).is_none());
+        write_line(writer, &ToClient::Translated { id, result: Ok(Vec::new()) }).unwrap();
+        recv.recv_timeout(Duration::from_secs(60)).expect("the client dispatched the barrier").unwrap();
+    }
+
     /// A snapshot as a value that compares whole, whatever order a map of its settings is walked in.
     fn json(snapshot: &Snapshot) -> serde_json::Value {
         serde_json::to_value(snapshot).unwrap()
@@ -1302,7 +1311,8 @@ pub(crate) mod tests {
             write_state(&mut writer, Some(&sent), &published).unwrap();
             sent = published.clone();
             let wanted = json(&published);
-            assert!(until(|| json(&client.snapshot()) == wanted), "round {round}: the client holds\n{}\nnot\n{wanted}", json(&client.snapshot()));
+            wait_for_dispatch(&client, &mut writer);
+            assert_eq!(json(&client.snapshot()), wanted, "round {round}");
             let after = client.snapshot();
             assert!(!Arc::ptr_eq(&before, &after), "a new snapshot for every state told");
             // What these rounds never touch was sent once, with the first snapshot.
@@ -1312,8 +1322,9 @@ pub(crate) mod tests {
         // every part.
         let before = client.snapshot();
         write_state(&mut writer, Some(&sent), &published).unwrap();
-        assert!(until(|| !Arc::ptr_eq(&before, &client.snapshot())));
+        wait_for_dispatch(&client, &mut writer);
         let after = client.snapshot();
+        assert!(!Arc::ptr_eq(&before, &after));
         assert!(orbiters_core::slice::Slice::same(&before.settings, &after.settings) && orbiters_core::slice::Slice::same(&before.vrchat.world, &after.vrchat.world));
         assert_eq!(json(&after), json(&published));
     }
@@ -1332,14 +1343,16 @@ pub(crate) mod tests {
         next.n4n0.afk = true;
         let next = Arc::new(next);
         write_state(&mut writer, Some(&first), &next).unwrap();
-        assert!(until(|| client.snapshot().n4n0.afk));
+        wait_for_dispatch(&client, &mut writer);
         let shown = client.snapshot();
+        assert!(shown.n4n0.afk);
         assert!(!shown.vrchat_login.busy, "the service never said busy");
         assert_eq!(shown.account.state, crate::state::AccountState::Unknown);
         // Even a publish that changed nothing does.
         client.update_local(|s| s.vrchat_login.busy = true);
         write_state(&mut writer, Some(&next), &next).unwrap();
-        assert!(until(|| !client.snapshot().vrchat_login.busy));
+        wait_for_dispatch(&client, &mut writer);
+        assert!(!client.snapshot().vrchat_login.busy);
     }
 
     /// A state in which every part differs from a new snapshot's: the busy evening of `--publish-cost`, and the rest.

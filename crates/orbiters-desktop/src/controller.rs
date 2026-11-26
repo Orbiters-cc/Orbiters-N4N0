@@ -1885,11 +1885,18 @@ impl Controller {
     /// VRChat's `/avatar` tree alone, and where its OSCQuery answers (`None` outside: no OSC; `Some(None)`: not found).
     /// The kit probe asks only this: the camera's tree beside it was a second request every 2 s for nothing (CTL-10).
     pub(super) fn vrchat_avatar_values(&self) -> (Option<Option<std::net::SocketAddr>>, Vec<(String, OscValue)>) {
+        self.read_vrchat_avatar_values(|addr| orbiters_core::osc::vrchat_values(addr, Duration::from_secs(1)))
+    }
+
+    fn read_vrchat_avatar_values(
+        &self,
+        fetch: impl FnOnce(std::net::SocketAddr) -> anyhow::Result<Vec<(String, OscValue)>>,
+    ) -> (Option<Option<std::net::SocketAddr>>, Vec<(String, OscValue)>) {
         let query = self.with_osc(|o| o.vrchat_query());
         let result = match query {
             None => return (None, Vec::new()),
             Some(None) => Err(anyhow::anyhow!("VRChat's OSCQuery service was not found")), // i18n: not shown (logged as "current OSC values")
-            Some(Some(addr)) => orbiters_core::osc::vrchat_values(addr, Duration::from_secs(1)),
+            Some(Some(addr)) => fetch(addr),
         };
         let values = result.unwrap_or_else(|e| {
             eprintln!("current OSC values: {e:#}");
@@ -4697,18 +4704,15 @@ mod tests {
         settings.osc.vrchat_port = stand_in.local_addr().unwrap().port();
         let ctl = Controller::new(settings);
         ctl.start_osc_with(false);
-        // A VRChat that takes the connection and never answers.
-        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        ctl.with_osc(|o| o.set_vrchat_query(Some(silent.local_addr().unwrap())));
-        let c = ctl.clone();
-        let started = Instant::now();
-        let reader = std::thread::spawn(move || c.vrchat_values());
-        std::thread::sleep(Duration::from_millis(200));
-        let waited = Instant::now();
-        assert!(ctl.with_osc(|_| ()).is_some());
-        assert!(waited.elapsed() < Duration::from_millis(100), "{:?}", waited.elapsed());
-        assert!(reader.join().unwrap().is_empty());
-        assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+        let addr = stand_in.local_addr().unwrap();
+        ctl.with_osc(|o| o.set_vrchat_query(Some(addr))).unwrap();
+        let (query, values) = ctl.read_vrchat_avatar_values(|asked| {
+            assert_eq!(asked, addr);
+            assert!(ctl.osc.try_lock().is_ok(), "the query runs with the OSC lock free");
+            Ok(vec![("/avatar/parameters/Test".into(), OscValue::Bool(true))])
+        });
+        assert_eq!(query, Some(Some(addr)));
+        assert_eq!(values, [("/avatar/parameters/Test".into(), OscValue::Bool(true))]);
         ctl.shutdown();
     }
 

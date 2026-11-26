@@ -97,33 +97,68 @@ pub fn guard(request: ureq::http::Request<ureq::SendBody>, next: ureq::middlewar
 mod tests {
     use super::*;
     use crate::account::Api;
-    use std::io::Read;
-    use std::net::TcpListener;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::io::{BufRead as _, Write as _};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::thread::JoinHandle;
     use std::time::Duration;
 
-    /// A server that counts the bytes it gets and answers nothing.
-    fn counting() -> (String, Arc<AtomicUsize>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}/", listener.local_addr().unwrap());
-        let got = Arc::new(AtomicUsize::new(0));
-        let seen = got.clone();
-        std::thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
-                let seen = seen.clone();
+    struct Probe {
+        address: SocketAddr,
+        bytes: Arc<AtomicUsize>,
+        stopped: Arc<AtomicBool>,
+        worker: Option<JoinHandle<()>>,
+    }
+
+    impl Probe {
+        fn new() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let bytes = Arc::new(AtomicUsize::new(0));
+            let stopped = Arc::new(AtomicBool::new(false));
+            let worker = {
+                let (bytes, stopped) = (bytes.clone(), stopped.clone());
                 std::thread::spawn(move || {
-                    let mut buf = [0u8; 4096];
-                    while let Ok(n) = stream.read(&mut buf) {
-                        if n == 0 {
+                    for stream in listener.incoming() {
+                        let mut stream = stream.unwrap();
+                        if stopped.load(Ordering::Acquire) {
                             break;
                         }
-                        seen.fetch_add(n, Ordering::SeqCst);
+                        stream.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+                        let mut reader = std::io::BufReader::new(&mut stream);
+                        let mut header = Vec::new();
+                        while let Ok(n) = reader.read_until(b'\n', &mut header) {
+                            if n == 0 {
+                                break;
+                            }
+                            bytes.fetch_add(n, Ordering::Relaxed);
+                            if header.ends_with(b"\r\n\r\n") {
+                                // The caller receives its acknowledgment after the fixture records the request.
+                                let _ = stream.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
+                                break;
+                            }
+                        }
                     }
-                });
+                })
+            };
+            Self { address, bytes, stopped, worker: Some(worker) }
+        }
+
+        fn url(&self) -> String {
+            format!("http://{}/", self.address)
+        }
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.stopped.store(true, Ordering::Release);
+            // Wake the listener so the probe drops its socket when the test ends.
+            let _ = TcpStream::connect(self.address);
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
             }
-        });
-        (base, got)
+        }
     }
 
     #[test]
@@ -143,27 +178,28 @@ mod tests {
     /// Every client that may carry a credential: not one byte leaves for another origin, whatever the request.
     #[test]
     fn not_a_byte_of_a_credential_leaves_for_another_origin() {
-        let (first, at_first) = counting();
-        let (second, at_second) = counting();
+        let at_first = Probe::new();
+        let at_second = Probe::new();
+        let (first, second) = (at_first.url(), at_second.url());
         issued("orbit-of-first", &first);
         let api = Api::at(&second);
         assert!(api.check("orbit-of-first").is_err());
         assert!(api.member_feature("orbit-of-first", "x").is_err());
         assert!(api.set_language("orbit-of-first", Some("fr")).is_err());
-        let short = Some(Duration::from_millis(400));
+        let guard = Some(Duration::from_secs(60));
         let auth = "Bearer orbit-of-first";
-        for agent in [api.agent().clone(), crate::http_agent(short, short)] {
+        for agent in [api.agent().clone(), crate::http_agent(guard, guard)] {
             assert!(agent.get(&second).header("Authorization", auth).call().is_err());
             assert!(agent.get(&second).header("authorization", "bearer  orbit-of-first ").call().is_err());
             assert!(agent.post(&second).header("Authorization", auth).send_json(serde_json::json!({ "a": 1 })).is_err());
             // A request with timeouts of its own is the same client's.
-            assert!(agent.delete(&second).config().timeout_global(short).build().header("Authorization", auth).call().is_err());
+            assert!(agent.delete(&second).config().timeout_global(guard).build().header("Authorization", auth).call().is_err());
         }
-        std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(at_second.load(Ordering::SeqCst), 0, "bytes left for another origin");
-        // Its own origin gets it.
-        let _ = Api::at(&first).agent().get(&first).config().timeout_global(short).build().header("Authorization", auth).call();
-        assert!(at_first.load(Ordering::SeqCst) > 0);
+        assert_eq!(at_second.bytes.load(Ordering::Acquire), 0, "bytes left for another origin");
+        // Its own origin gets it and replies after recording what arrived.
+        let response = Api::at(&first).agent().get(&first).config().timeout_global(guard).build().header("Authorization", auth).call().unwrap();
+        assert_eq!(response.status(), 204);
+        assert!(at_first.bytes.load(Ordering::Acquire) > 0);
         // The refusal says so.
         let refused = api.agent().get(&second).header("Authorization", auth).call().unwrap_err();
         assert!(matches!(&refused, ureq::Error::Other(e) if e.downcast_ref::<OtherOrigin>().is_some()), "{refused:?}");

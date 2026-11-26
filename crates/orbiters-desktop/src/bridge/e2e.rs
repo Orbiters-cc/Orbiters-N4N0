@@ -806,10 +806,8 @@ fn only_private_instances_of_ones_own_are_acted_in() {
         // start_timeout on 2026-11-15 came after four minutes, and said nothing of whether anyone was there).
         let (game, _bridge, _server, client) = lab("private");
         game.set_behaviour(|b| b.land_in = Some(instance.to_string()));
-        let begin = Instant::now();
-        // VRChat ended up elsewhere than asked: never counted as arrived, and left at once, saying where it was.
+        // This result requires observing the other destination. A missed observation returns start_timeout.
         let failure = client.fails("go_to_world", json!({ "world_id": LAB_WORLD_A }), "landed_elsewhere");
-        assert!(begin.elapsed() < Duration::from_secs(10), "{instance}: left as soon as it was seen, not at the time limit");
         let message = failure["message"].as_str().unwrap();
         assert!(message.contains(code) && message.contains("12345") && message.contains("closed it"), "{instance}: {failure}");
         assert!(failure["next"].as_str().unwrap().contains("go_to_world"), "{failure}");

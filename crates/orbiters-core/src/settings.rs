@@ -1361,6 +1361,11 @@ mod tests {
         let both = format!("{{\"{LEGACY_N4N0_KEY}\": {{\"wake_word\": true}}, \"n4n0\": {{\"wake_word\": false}}}}");
         std::fs::write(&path, both).unwrap();
         assert!(!Settings::load_from(&path).n4n0.wake_word);
+
+        // The JSON spelling of the key is independent of its decoded name.
+        let escaped = format!(r#"\u{:04x}{}"#, LEGACY_N4N0_KEY.as_bytes()[0], &LEGACY_N4N0_KEY[1..]);
+        std::fs::write(&path, earlier.replace(LEGACY_N4N0_KEY, &escaped)).unwrap();
+        assert!(Settings::load_from(&path).n4n0.wake_word);
         std::fs::remove_dir_all(dir).ok();
     }
 

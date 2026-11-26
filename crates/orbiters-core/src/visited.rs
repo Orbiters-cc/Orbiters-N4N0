@@ -100,7 +100,7 @@ impl History {
                 return Self::default();
             }
         };
-        let (mut history, dropped) = crate::json_lenient::<Self>(&text);
+        let (mut history, dropped) = Self::decode(&text);
         if !dropped.is_empty() {
             let aside = crate::keep_aside(path);
             eprintln!("visited worlds: {} left out of {}, the file kept as {aside:?}", dropped.join(", "), path.display());
@@ -111,6 +111,28 @@ impl History {
         history.instances.retain(|v| seen.insert(v.location()));
         history.instances.reverse();
         history
+    }
+
+    fn decode(text: &str) -> (Self, Vec<String>) {
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+        let Ok(mut input) = serde_json::from_str::<serde_json::Value>(text) else {
+            return (Self::default(), vec!["(not JSON)".into()]);
+        };
+        if let Ok(history) = serde_json::from_value::<Self>(input.clone()) {
+            return (history, Vec::new());
+        }
+
+        // History's world entries deserialize independently. Recover the other
+        // fields with the regular decoder, then parse each world once.
+        let worlds = input.get_mut("worlds").and_then(serde_json::Value::as_object_mut).map(std::mem::take);
+        let (mut history, mut dropped) = crate::json_lenient_value::<Self>(input);
+        for (id, value) in worlds.into_iter().flatten() {
+            match serde_json::from_value::<WorldVisits>(value) {
+                Ok(world) => { history.worlds.insert(id, world); }
+                Err(_) => dropped.push(format!("worlds.{id}")),
+            }
+        }
+        (history, dropped)
     }
 
     /// Written whole ([`crate::write_atomic`]): a reader, a crash or a power cut finds the old file or the new one.
@@ -814,7 +836,37 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// What COR-9, COR-10, COR-20 and COR-28 cost as they were and as they are (printed: run it alone, with `--ignored --nocapture`).
+    #[test]
+    fn a_damaged_history_keeps_its_good_worlds_and_the_original_file() {
+        let dir = std::env::temp_dir().join(format!("orbiters-history-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.json");
+        let text = serde_json::json!({
+            "worlds": {
+                "a": { "name": "Nearby", "visits": [100, 200] },
+                "b": { "name": "Damaged", "visits": "unknown" },
+                "c": { "visits": [300] }
+            },
+            "logs": { "good.txt": 42, "bad.txt": "unknown" },
+            "last": "c",
+        }).to_string();
+        std::fs::write(&path, &text).unwrap();
+
+        let (before, before_dropped) = crate::json_lenient::<History>(&text);
+        let (after, after_dropped) = History::decode(&text);
+        assert_eq!(serde_json::to_value(after).unwrap(), serde_json::to_value(before).unwrap());
+        assert_eq!(after_dropped, before_dropped);
+        assert_eq!(after_dropped, ["logs.bad.txt", "worlds.b"]);
+
+        let history = History::load(&path);
+        assert_eq!(history.worlds.keys().map(String::as_str).collect::<Vec<_>>(), ["a", "c"]);
+        assert_eq!(history.logs.get("good.txt"), Some(&42));
+        let backup = std::fs::read_dir(&dir).unwrap().flatten().find(|e| e.file_name().to_string_lossy().starts_with("history.json.bad-")).unwrap();
+        assert_eq!(std::fs::read_to_string(backup.path()).unwrap(), text);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// What COR-8, COR-9, COR-10, COR-20 and COR-28 cost as they were and as they are (printed: run it alone, with `--ignored --nocapture`).
     #[test]
     #[ignore]
     fn what_the_removed_work_cost() {
@@ -824,6 +876,16 @@ mod tests {
             times.sort_by(f64::total_cmp);
             times[n / 2]
         };
+        // COR-8: a history with one invalid visit list among valid entries.
+        let mut worlds: serde_json::Map<String, serde_json::Value> = (0..1000)
+            .map(|i| (format!("wrld_{i:05}"), serde_json::json!({ "visits": [100, 200, 300] })))
+            .collect();
+        worlds["wrld_00634"]["visits"] = "unknown".into();
+        let text = serde_json::json!({ "worlds": worlds, "instances_read": true }).to_string();
+        let a = text.clone();
+        let before = middle(Box::new(move || assert_eq!(crate::json_lenient::<History>(&a).0.worlds.len(), 999)), 3);
+        let after = middle(Box::new(move || assert_eq!(History::decode(&text).0.worlds.len(), 999)), 13);
+        println!("COR-8, one damaged world in 1,000: {before:.2} ms -> {after:.2} ms");
         // COR-9: one picture of 20,000.
         let mut index = ShotIndex::default();
         for i in 0..20_000u64 {

@@ -3588,7 +3588,7 @@ fn spawn_watchers(ctl: Shared) {
                         ctl.next_reconstruction();
                     }
                     // Microphones come and go (headsets): ask the worker again now and then.
-                    if tick.is_multiple_of(15) && tick > 0 {
+                    if !private && tick.is_multiple_of(15) && tick > 0 {
                         let _ = ctl.send(&WorkerCommand::ListSources);
                     }
                 }

@@ -317,7 +317,7 @@ mod tests {
             ("account.rs", "account::read_saved(", 3, "the account thread itself: what it reads is installed under the gate; and whether the file still holds the credential whose member's id is written to it"),
             ("assistant.rs", "self.account_api()", 1, "whether somebody is signed in"),
             ("avatar_gun.rs", "account_api()", 1, "the stream's own member, read with its identity's epoch: what a hit may still do is checked against it as it leaves, and answered as it"),
-            ("calls.rs", "account_api()", 5, "the calls' own identity: every request is stamped with it and checked as it goes (verify3 of calls)"),
+            ("calls.rs", "account_api()", 6, "the calls' own identity: every request is stamped with it and checked as it goes (verify3 of calls); and whether somebody is signed in, for how long the calls' loop rests (XCT-23)"),
             ("explorer.rs", "account_api()", 1, "reading the points shown"),
             ("maps.rs", "account_api()", 2, "reading My maps, kept by whose they are"),
             ("n4n0.rs", "c.account_api()", 1, "Host::account: whether somebody is signed in (tests_identity holds its uses)"),

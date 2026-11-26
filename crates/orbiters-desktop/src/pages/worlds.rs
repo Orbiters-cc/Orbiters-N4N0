@@ -268,7 +268,7 @@ fn cover(w: &VisitedWorld, info: Option<&Info>, width: u32) -> Option<Picture> {
     }
 }
 
-fn mine_of<'a>(mine: &'a Option<Arc<crate::state::MapsMine>>, id: &str) -> Option<&'a MineWorld> {
+fn mine_of<'a>(mine: &'a Option<crate::state::MapsMine>, id: &str) -> Option<&'a MineWorld> {
     mine.as_ref()?.worlds.iter().find(|w| w.world_id == id)
 }
 

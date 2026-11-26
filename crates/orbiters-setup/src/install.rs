@@ -334,6 +334,10 @@ impl Surroundings for Windows {
 fn install_with(bytes: &[u8], options: &Options, progress: &Progress, silent: bool, fresh: bool, windows: &dyn Surroundings) -> anyhow::Result<()> {
     let dir = &options.dir;
     if let Some(theirs) = crate::companions::holding(dir, &windows.companions()) {
+        // An install from before this rule, updated there: what to do instead, since no folder is chosen in an update.
+        if dir.join(RECORD_FILE).is_file() {
+            anyhow::bail!("{}", tr!("Orbiters - N4N0 is installed in {folder}, inside a folder of Creator Companion or ALCOM, and can no longer be updated there. Uninstall it without removing its settings, then install it again in another folder.", folder = dir.display()));
+        }
         anyhow::bail!("{}", tr!("{folder} is Creator Companion's or ALCOM's own folder: Orbiters puts nothing there. Choose another folder.", folder = theirs.display()));
     }
     let index = payload::read_index(bytes)?;
@@ -1515,7 +1519,8 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&old).unwrap();
         std::fs::write(old.join(APP_EXE), b"old").unwrap();
         record(&[APP_EXE]).write(&old).unwrap();
-        assert!(install(&old).unwrap_err().to_string().contains("Creator Companion"));
+        let refused = install(&old).unwrap_err().to_string();
+        assert!(refused.contains("Creator Companion") && refused.contains("Uninstall it"), "an install of before is told what to do: {refused}");
         assert_eq!(std::fs::read(old.join(APP_EXE)).unwrap(), b"old");
         for dir in [theirs, build, beside] {
             remove_tree(&dir);

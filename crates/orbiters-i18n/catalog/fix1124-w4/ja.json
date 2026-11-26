@@ -2,6 +2,7 @@
   "Copy the last errors": "最近のエラーをコピー",
   "Error log": "エラーログ",
   "No error in the app's log.": "アプリのログにエラーはありません。",
+  "Orbiters - N4N0 is installed in {folder}, inside a folder of Creator Companion or ALCOM, and can no longer be updated there. Uninstall it without removing its settings, then install it again in another folder.": "Orbiters - N4N0 は Creator Companion または ALCOM のフォルダー内の {folder} にインストールされているため、そこではもう更新できません。設定を削除せずにアンインストールし、別のフォルダーにインストールし直してください。",
   "When and where something went wrong inside the app, with its error codes. No names, no messages, no sign-in details. It stays on this computer, two weeks at most.": "アプリの中で問題が起きた日時と場所、そのエラーコードの記録です。名前、メッセージ、サインイン情報は含みません。このコンピューターにのみ、最長2週間残ります。",
   "diagnostics errors problems support folder copy": "診断 エラー 問題 サポート フォルダー コピー",
   "{folder} is Creator Companion's or ALCOM's own folder: Orbiters puts nothing there. Choose another folder.": "{folder} は Creator Companion または ALCOM のフォルダーです。Orbiters はそこに何も置きません。別のフォルダーを選んでください。"

@@ -294,6 +294,8 @@ trait Surroundings {
     fn integrate(&self, dir: &Path, record: &InstallRecord, previous: Option<&InstallRecord>, size: u64, fresh: bool) -> Vec<String>;
     /// Whether a swap in `dir` is under way, which the next sign-in is to put back if it is cut.
     fn swapping(&self, dir: &Path, under_way: bool);
+    /// Creator Companion's and ALCOM's own folders: nothing is installed there.
+    fn companions(&self) -> Vec<PathBuf>;
 }
 
 struct Windows;
@@ -301,6 +303,10 @@ struct Windows;
 impl Surroundings for Windows {
     fn integrate(&self, dir: &Path, record: &InstallRecord, previous: Option<&InstallRecord>, size: u64, fresh: bool) -> Vec<String> {
         integrate(dir, record, previous, size, fresh)
+    }
+
+    fn companions(&self) -> Vec<PathBuf> {
+        crate::companions::folders()
     }
 
     fn swapping(&self, dir: &Path, under_way: bool) {
@@ -320,6 +326,9 @@ impl Surroundings for Windows {
 
 fn install_with(bytes: &[u8], options: &Options, progress: &Progress, silent: bool, fresh: bool, windows: &dyn Surroundings) -> anyhow::Result<()> {
     let dir = &options.dir;
+    if let Some(theirs) = crate::companions::holding(dir, &windows.companions()) {
+        anyhow::bail!("{}", tr!("{folder} is Creator Companion's or ALCOM's own folder: Orbiters puts nothing there. Choose another folder.", folder = theirs.display()));
+    }
     let index = payload::read_index(bytes)?;
     if let Some(free) = system::free_space(dir) {
         anyhow::ensure!(
@@ -1290,6 +1299,48 @@ pub(crate) mod tests {
         assert!(missing.is_empty(), "kept in the shared folder and on no list of what \"remove my data\" removes:\n{}", missing.join("\n"));
     }
 
+    /// A folder chosen inside Creator Companion's is refused before any filesystem mutation.
+    #[test]
+    fn nothing_is_installed_in_creator_companions_folder() {
+        struct Companion(PathBuf);
+        impl Surroundings for Companion {
+            fn integrate(&self, _: &Path, _: &InstallRecord, _: Option<&InstallRecord>, _: u64, _: bool) -> Vec<String> {
+                Vec::new()
+            }
+            fn swapping(&self, _: &Path, _: bool) {}
+            fn companions(&self) -> Vec<PathBuf> {
+                vec![self.0.clone()]
+            }
+        }
+        let theirs = scratch("companions");
+        std::fs::write(theirs.join("settings.json"), b"{}").unwrap();
+        let build = scratch("companions-payload");
+        std::fs::write(build.join("app"), b"new").unwrap();
+        let packed = build.join("payload.bin");
+        payload::pack("1.0.0", &[(APP_EXE.to_string(), build.join("app"))], &packed).unwrap();
+        let packed = std::fs::read(&packed).unwrap();
+        let install = |dir: &Path| {
+            let options = Options { dir: dir.to_path_buf(), desktop_shortcut: false, start_with_windows: false, start_with_steamvr: false, channel: STABLE.into() };
+            install_with(&packed, &options, &Progress::default(), true, false, &Companion(theirs.clone()))
+        };
+        for dir in [theirs.clone(), theirs.join("Orbiters - N4N0"), theirs.join("Repos").join("deeper")] {
+            let refused = install(&dir).expect_err("refused").to_string();
+            assert!(refused.contains("Creator Companion"), "{refused}");
+            assert_eq!(std::fs::read_dir(&theirs).unwrap().count(), 1, "nothing was made there");
+        }
+        let beside = scratch("companions-beside");
+        install(&beside.join("Orbiters - N4N0")).unwrap();
+        let old = theirs.join("Orbiters - N4N0");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join(APP_EXE), b"old").unwrap();
+        record(&[APP_EXE]).write(&old).unwrap();
+        assert!(install(&old).unwrap_err().to_string().contains("Creator Companion"));
+        assert_eq!(std::fs::read(old.join(APP_EXE)).unwrap(), b"old");
+        for dir in [theirs, build, beside] {
+            remove_tree(&dir);
+        }
+    }
+
     /// PRJ-41: the new version in place, what Windows would not take (a shortcut in a protected folder) is said and is no
     /// failure: the record is written, nothing is left of the old version, and the next sign-in has nothing to do.
     #[test]
@@ -1303,6 +1354,9 @@ pub(crate) mod tests {
             }
             fn swapping(&self, _: &Path, under_way: bool) {
                 self.0.borrow_mut().push(under_way);
+            }
+            fn companions(&self) -> Vec<PathBuf> {
+                Vec::new()
             }
         }
         let dir = scratch("refused");

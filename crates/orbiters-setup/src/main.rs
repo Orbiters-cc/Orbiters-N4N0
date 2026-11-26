@@ -14,6 +14,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[cfg(windows)]
+mod companions;
+#[cfg(windows)]
 mod install;
 #[cfg(windows)]
 mod swap;

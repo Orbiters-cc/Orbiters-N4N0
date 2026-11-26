@@ -1374,11 +1374,33 @@ impl<T> Default for Told<T> {
     }
 }
 
-impl Told<f32> {
-    /// Calls `tell` with `value` unless it is what was last told successfully (bit for bit: 0.0 and -0.0 differ, as two
-    /// calls would); returns whether it called.
-    fn send<E>(&mut self, value: f32, tell: impl FnOnce(f32) -> Result<(), E>) -> bool {
-        if self.0.is_some_and(|last| last.to_bits() == value.to_bits()) {
+/// Two values SteamVR would take as the same: equal bit for bit (0.0 and -0.0 differ, as two calls would).
+trait Same: Copy {
+    fn same(&self, other: &Self) -> bool;
+}
+
+impl Same for f32 {
+    fn same(&self, other: &Self) -> bool {
+        self.to_bits() == other.to_bits()
+    }
+}
+
+impl Same for bool {
+    fn same(&self, other: &Self) -> bool {
+        self == other
+    }
+}
+
+impl Same for Matrix34 {
+    fn same(&self, other: &Self) -> bool {
+        self.m.iter().flatten().zip(other.m.iter().flatten()).all(|(a, b)| a.same(b))
+    }
+}
+
+impl<T: Same> Told<T> {
+    /// Calls `tell` with `value` unless it is what was last told successfully; returns whether it called.
+    fn send<E>(&mut self, value: T, tell: impl FnOnce(T) -> Result<(), E>) -> bool {
+        if self.0.is_some_and(|last| last.same(&value)) {
             return false;
         }
         self.0 = tell(value).is_ok().then_some(value);
@@ -1386,12 +1408,16 @@ impl Told<f32> {
     }
 }
 
-/// What one part's overlay was last told.
+/// What one part's overlay was last told. Shown or hidden is told as the rest is (DOV-27): SteamVR keeps it until this process
+/// says otherwise, so it is not asked back each turn (`IsOverlayVisible`, a call into SteamVR's process for each part and each
+/// overlay not up, every turn). Nothing else shows or hides these overlays; a show or hide SteamVR refused is told again.
 #[derive(Clone, Copy, Debug, Default)]
 struct Sent1 {
     handle: vr::OverlayHandle,
     width: Told<f32>,
     alpha: Told<f32>,
+    transform: Told<Matrix34>,
+    shown: Told<bool>,
 }
 
 /// What each part's overlay was last told, by part. An overlay made anew (a new handle for the part, or one given back and made
@@ -1411,6 +1437,79 @@ impl Sent {
     /// `handle` was let go: whatever overlay is made next (whatever handle SteamVR gives it) is told everything.
     fn forget(&mut self, handle: vr::OverlayHandle) {
         self.0.retain(|_, told| told.handle != handle);
+    }
+}
+
+/// What a part's overlay is to be this turn: hidden, or shown that wide, there, that opaque.
+#[derive(Clone, Copy, Debug)]
+enum Wanted {
+    Hidden,
+    Shown { width: f32, transform: Matrix34, alpha: f32 },
+}
+
+/// What [`tell_part`] says to SteamVR: [`vr::Overlay`], or a recorder in tests.
+trait Tell {
+    fn show(&self, handle: vr::OverlayHandle) -> Result<(), i32>;
+    fn hide(&self, handle: vr::OverlayHandle) -> Result<(), i32>;
+    fn width(&self, handle: vr::OverlayHandle, width: f32) -> Result<(), i32>;
+    fn transform(&self, handle: vr::OverlayHandle, transform: &Matrix34) -> Result<(), i32>;
+    fn alpha(&self, handle: vr::OverlayHandle, alpha: f32) -> Result<(), i32>;
+}
+
+impl Tell for vr::Overlay<'_> {
+    fn show(&self, handle: vr::OverlayHandle) -> Result<(), i32> {
+        vr::Overlay::show(self, handle)
+    }
+    fn hide(&self, handle: vr::OverlayHandle) -> Result<(), i32> {
+        vr::Overlay::hide(self, handle)
+    }
+    fn width(&self, handle: vr::OverlayHandle, width: f32) -> Result<(), i32> {
+        self.set_width_in_meters(handle, width)
+    }
+    fn transform(&self, handle: vr::OverlayHandle, transform: &Matrix34) -> Result<(), i32> {
+        self.set_transform_absolute(handle, transform)
+    }
+    fn alpha(&self, handle: vr::OverlayHandle, alpha: f32) -> Result<(), i32> {
+        self.set_alpha(handle, alpha)
+    }
+}
+
+/// Tells every part's overlay what it is to be this turn: `parts` those up now (the sheet's page, in its back's picture, is not one of
+/// its own), every other overlay hidden. Returns the parts shown now that were not up before.
+fn tell_parts(tell: &dyn Tell, sent: &mut Sent, handles: &HashMap<Zone, vr::OverlayHandle>, parts: impl Iterator<Item = (Zone, Wanted)>) -> Vec<Zone> {
+    let mut up = Vec::with_capacity(handles.len());
+    let mut shown_now = Vec::new();
+    for (zone, wanted) in parts.filter(|(zone, _)| *zone != Zone::Takeover) {
+        up.push(zone);
+        if let Some(handle) = handles.get(&zone) {
+            if tell_part(tell, sent, zone, *handle, wanted) {
+                shown_now.push(zone);
+            }
+        }
+    }
+    for (zone, handle) in handles {
+        if !up.contains(zone) {
+            tell_part(tell, sent, *zone, *handle, Wanted::Hidden);
+        }
+    }
+    shown_now
+}
+
+/// Tells part `zone`'s overlay `handle` what it is to be, only what differs from what it was last told. Returns whether it was
+/// shown now (it was not, or not known to be, up before).
+fn tell_part(tell: &dyn Tell, sent: &mut Sent, zone: Zone, handle: vr::OverlayHandle, wanted: Wanted) -> bool {
+    let told = sent.to(zone, handle);
+    match wanted {
+        Wanted::Hidden => {
+            told.shown.send(false, |_| tell.hide(handle));
+            false
+        }
+        Wanted::Shown { width, transform, alpha } => {
+            told.width.send(width, |w| tell.width(handle, w));
+            told.transform.send(transform, |t| tell.transform(handle, &t));
+            told.alpha.send(alpha, |a| tell.alpha(handle, a));
+            told.shown.send(true, |_| tell.show(handle))
+        }
     }
 }
 
@@ -2448,37 +2547,23 @@ impl OrbitVr {
             // controls are the new picture's, what shows is the old one: verify2).
             self.sheet_unshown = sheet_unshown_after(shown, changed, &mut self.sheet.changed);
         }
-        let shown: Vec<Zone> = self.panels.all().map(|p| p.zone).filter(|z| *z != Zone::Takeover).collect();
-        for (((quad, _), panel), place) in quads.iter().zip(self.panels.all()).zip(placing) {
-            if let Some(handle) = self.handles.get(&panel.zone) {
-                // In the back's picture.
-                if panel.zone == Zone::Takeover {
-                    continue;
-                }
-                if !part_shows(panel) {
-                    let _ = cx.overlay.hide(*handle);
-                    continue;
-                }
-                // Width and alpha told only when they differ from what this overlay was last told (SteamVR keeps them, hidden or
-                // not); the place is told every turn, as before.
-                let told = self.sent.to(panel.zone, *handle);
-                told.width.send(quad.width, |w| cx.overlay.set_width_in_meters(*handle, w));
-                let _ = match place {
-                    Placing::At(transform) => cx.overlay.set_transform_absolute(*handle, transform),
-                    Placing::Room => cx.overlay.set_transform_absolute(*handle, &quad.transform),
+        // Width, place, alpha and whether it shows told only when they differ from what this overlay was last told (SteamVR keeps
+        // them, hidden or not: LIGHT-VR-5, DOV-27).
+        let parts = quads.iter().zip(self.panels.all()).zip(placing).map(|(((quad, _), panel), place)| {
+            let wanted = if part_shows(panel) {
+                let transform = match place {
+                    Placing::At(transform) => *transform,
+                    Placing::Room => quad.transform,
                 };
-                told.alpha.send(panel.appear.alpha(), |a| cx.overlay.set_alpha(*handle, a));
-                if !cx.overlay.is_visible(*handle) {
-                    let _ = cx.overlay.show(*handle);
-                    if matches!(panel.zone, Zone::CameraPeople | Zone::CameraWorld | Zone::CameraQr) {
-                        super::super::vr_log::line(&format!("camera first shown: ns={}, zone={:?}, provisional={}", orbiters_core::clock::now_ns(), panel.zone, self.camera_looks < CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation() || !self.camera_follow.settled() || !self.camera_scale_measured())); // i18n: not shown (diagnostics)
-                    }
-                }
-            }
-        }
-        for (zone, handle) in &self.handles {
-            if !shown.contains(zone) && cx.overlay.is_visible(*handle) {
-                let _ = cx.overlay.hide(*handle);
+                Wanted::Shown { width: quad.width, transform, alpha: panel.appear.alpha() }
+            } else {
+                Wanted::Hidden
+            };
+            (panel.zone, wanted)
+        });
+        for zone in tell_parts(cx.overlay, &mut self.sent, &self.handles, parts) {
+            if matches!(zone, Zone::CameraPeople | Zone::CameraWorld | Zone::CameraQr) {
+                super::super::vr_log::line(&format!("camera first shown: ns={}, zone={:?}, provisional={}", orbiters_core::clock::now_ns(), zone, self.camera_looks < CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation() || !self.camera_follow.settled() || !self.camera_scale_measured())); // i18n: not shown (diagnostics)
             }
         }
     }
@@ -2490,11 +2575,7 @@ impl OrbitVr {
         cx.actions.set_block([false; 2]);
         self.panels.set_open(None, Vec::new(), cx.snap);
         self.panels.menu_turn(cx.snap);
-        for handle in self.handles.values() {
-            if cx.overlay.is_visible(*handle) {
-                let _ = cx.overlay.hide(*handle);
-            }
-        }
+        tell_parts(cx.overlay, &mut self.sent, &self.handles, std::iter::empty());
         for hand in 0..2 {
             self.lasers.update(cx.overlay, cx.presenter, hand, None);
         }
@@ -2721,6 +2802,109 @@ mod tests {
         }));
         assert!(!told.alpha.send(0.5, |_| Ok::<(), i32>(())));
         assert_eq!(tries, 2);
+    }
+
+    /// DOV-27: at rest SteamVR is told nothing of the parts: not whether they show (it was asked back for every part and every
+    /// overlay not up, each turn), not the place they keep, not to hide again what is hidden. What changes is told once; a refused
+    /// show and an overlay made anew are told again; closing hides what is up, once.
+    #[test]
+    fn resting_parts_tell_steamvr_nothing() {
+        use super::{tell_parts, Sent, Tell, Wanted, Zone};
+        use std::cell::{Cell, RefCell};
+        #[derive(Default)]
+        struct Recorder {
+            calls: RefCell<Vec<(&'static str, u64)>>,
+            refuse_show: Cell<bool>,
+        }
+        impl Tell for Recorder {
+            fn show(&self, h: u64) -> Result<(), i32> {
+                self.calls.borrow_mut().push(("show", h));
+                if self.refuse_show.get() { Err(1) } else { Ok(()) }
+            }
+            fn hide(&self, h: u64) -> Result<(), i32> {
+                self.calls.borrow_mut().push(("hide", h));
+                Ok(())
+            }
+            fn width(&self, h: u64, _: f32) -> Result<(), i32> {
+                self.calls.borrow_mut().push(("width", h));
+                Ok(())
+            }
+            fn transform(&self, h: u64, _: &super::Matrix34) -> Result<(), i32> {
+                self.calls.borrow_mut().push(("transform", h));
+                Ok(())
+            }
+            fn alpha(&self, h: u64, _: f32) -> Result<(), i32> {
+                self.calls.borrow_mut().push(("alpha", h));
+                Ok(())
+            }
+        }
+        let at = |x: f32| {
+            let mut m = super::Matrix34::IDENTITY;
+            m.m[0][3] = x;
+            m
+        };
+        let up = [Zone::WingWorlds, Zone::WingAll, Zone::QmCaption, Zone::SheetBack];
+        // Parts up, and three overlays of parts that were up once (the wheel's, the camera's) and are not now.
+        let mut handles: HashMap<Zone, u64> = up.iter().copied().zip(1..).collect();
+        handles.extend([(Zone::WheelWorlds, 5), (Zone::WheelAll, 6), (Zone::CameraQr, 7)]);
+        let wanted = |i: usize, x: f32| Wanted::Shown { width: 0.1 + i as f32 / 100.0, transform: at(x + i as f32), alpha: 1.0 };
+        fn told(tell: &Recorder, sent: &mut Sent, handles: &HashMap<Zone, u64>, parts: Vec<(Zone, Wanted)>) -> (Vec<(&'static str, u64)>, Vec<Zone>) {
+            let shown = tell_parts(tell, sent, handles, parts.into_iter());
+            (std::mem::take(&mut *tell.calls.borrow_mut()), shown)
+        }
+        let (tell, mut sent) = (Recorder::default(), Sent::default());
+        macro_rules! turn {
+            ($parts:expr) => {
+                told(&tell, &mut sent, &handles, $parts)
+            };
+        }
+        let resting = || up.iter().enumerate().map(|(i, z)| (*z, wanted(i, 0.0))).collect::<Vec<_>>();
+        // The menu opens: each part up is told everything and shown, each other overlay hidden. Then a hundred turns at rest.
+        let (opening, shown) = turn!(resting());
+        let mut at_rest = 0;
+        for _ in 0..100 {
+            let (calls, shown) = turn!(resting());
+            at_rest += calls.len();
+            assert!(shown.is_empty());
+        }
+        println!("SteamVR calls with {} parts up and 3 other overlays: {} as the menu opens, {at_rest} in 100 turns at rest", up.len(), opening.len());
+        assert_eq!(at_rest, 0, "calls in 100 resting turns");
+        assert_eq!(opening.len(), up.len() * 4 + 3, "{opening:?}");
+        assert_eq!(shown, up);
+        // The hand moves one part: its place alone.
+        let mut moved = resting();
+        moved[1].1 = wanted(1, 0.5);
+        assert_eq!(turn!(moved.clone()).0, [("transform", 2)]);
+        assert!(turn!(moved.clone()).0.is_empty());
+        // A part not up any more (no picture yet, or faded away) is hidden once, and stays so with nothing told.
+        moved[2].1 = Wanted::Hidden;
+        assert_eq!(turn!(moved.clone()).0, [("hide", 3)]);
+        for _ in 0..10 {
+            assert!(turn!(moved.clone()).0.is_empty());
+        }
+        // Up again where it was: shown, nothing else (SteamVR kept its width, place and alpha).
+        let (calls, shown) = turn!(resting());
+        assert_eq!((calls, shown), (vec![("transform", 2), ("show", 3)], vec![Zone::QmCaption]));
+        // Closed: what is up is hidden once; turn after turn with nothing up tells nothing.
+        let (mut calls, _) = turn!(Vec::new());
+        let closed: usize = (0..100).map(|_| turn!(Vec::new()).0.len()).sum();
+        println!("closing: {} calls, then {closed} in 100 turns closed", calls.len());
+        calls.sort();
+        assert_eq!(calls, [("hide", 1), ("hide", 2), ("hide", 3), ("hide", 4)]);
+        assert_eq!(closed, 0);
+        // A show SteamVR refused is told again next turn, until it takes.
+        tell.refuse_show.set(true);
+        let one = vec![(Zone::WingWorlds, wanted(0, 0.0))];
+        assert_eq!(turn!(one.clone()).0, [("show", 1)]);
+        assert_eq!(turn!(one.clone()).0, [("show", 1)]);
+        tell.refuse_show.set(false);
+        assert_eq!(turn!(one.clone()).0, [("show", 1)]);
+        assert!(turn!(one.clone()).0.is_empty());
+        // An overlay given back and made again (or another handle for the part) is told everything.
+        sent.forget(1);
+        assert_eq!(turn!(one.clone()).0.len(), 4);
+        handles.insert(Zone::WingWorlds, 9);
+        assert_eq!(turn!(one).0, [("width", 9), ("transform", 9), ("alpha", 9), ("show", 9)]);
     }
 
     #[test]

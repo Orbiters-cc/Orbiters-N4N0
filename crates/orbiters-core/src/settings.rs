@@ -1026,8 +1026,7 @@ impl Settings {
     /// The settings in `text` as [`crate::json_lenient`] reads them, a statistics switch that did not read off, never on
     /// by default (the person may have turned it off; PRIV-12); with the fields left out.
     pub(crate) fn parse(text: &str) -> (Self, Vec<String>, bool) {
-        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-        let Ok(mut input) = serde_json::from_str(text) else {
+        let Ok(mut input) = crate::json_document(text) else {
             return (Self::unread(), vec!["(not JSON)".into()], false);
         };
         let migrated = migrate_fields(&mut input);
@@ -1365,7 +1364,9 @@ mod tests {
         // The JSON spelling of the key is independent of its decoded name.
         let escaped = format!(r#"\u{:04x}{}"#, LEGACY_N4N0_KEY.as_bytes()[0], &LEGACY_N4N0_KEY[1..]);
         std::fs::write(&path, earlier.replace(LEGACY_N4N0_KEY, &escaped)).unwrap();
+        crate::DOCUMENT_PARSES.set(0);
         assert!(Settings::load_from(&path).n4n0.wake_word);
+        assert_eq!(crate::DOCUMENT_PARSES.replace(0), 1, "migration and settings use the same parsed document");
         std::fs::remove_dir_all(dir).ok();
     }
 

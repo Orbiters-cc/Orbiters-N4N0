@@ -114,8 +114,7 @@ impl History {
     }
 
     fn decode(text: &str) -> (Self, Vec<String>) {
-        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-        let Ok(mut input) = serde_json::from_str::<serde_json::Value>(text) else {
+        let Ok(mut input) = crate::json_document(text) else {
             return (Self::default(), vec!["(not JSON)".into()]);
         };
         if let Ok(history) = serde_json::from_value::<Self>(input.clone()) {

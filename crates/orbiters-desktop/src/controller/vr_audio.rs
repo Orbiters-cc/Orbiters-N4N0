@@ -5,7 +5,9 @@
 //! the start, and the chosen device may only appear then. The devices Windows had before are kept in
 //! `vr-audio.json` (so a restart or a crash in between loses nothing) and put back when SteamVR closes, if the
 //! settings say so. "Before" is what held outside VR for a while ([`SETTLED`]), not what Virtual Desktop set just
-//! before it started SteamVR.
+//! before it started SteamVR. Outside VR the defaults are looked at only now and then ([`OUTSIDE_EVERY`]): how long one
+//! held is counted from the last look that saw another, never less than it really held whatever the pace, and they are
+//! looked at once more as SteamVR starts.
 //!
 //! A device is found by its id, else by its name (a driver installed again gives its devices new ids). The logic is
 //! [`Keeper`], over [`Devices`] (Windows' in [`crate::audio_devices`], a fake one in the tests); [`run`] is the
@@ -23,6 +25,8 @@ use std::time::{Duration, Instant};
 pub const APPLY_FOR: Duration = Duration::from_secs(40);
 /// After SteamVR closes, the devices put back are looked at and put back again this long.
 pub const RESTORE_FOR: Duration = Duration::from_secs(12);
+/// How often the defaults are looked at while it watches them closely (an apply or restore window).
+const BUSY_EVERY: Duration = Duration::from_secs(1);
 /// How often the defaults are looked at outside VR.
 const OUTSIDE_EVERY: Duration = Duration::from_secs(15);
 /// A default outside VR that held this long is the one to put back.
@@ -146,14 +150,17 @@ pub struct Keeper<D: Devices> {
     session: Option<u32>,
     started: bool,
     window: Option<Window>,
-    /// Each flow's defaults seen outside VR, and since when.
+    /// Each flow's defaults seen outside VR, and the earliest they can have become the default: the last look that saw
+    /// others (or the first look of all).
     seen: [Option<(Roles, Instant)>; 2],
+    /// Each flow's last look outside VR.
+    looked: [Option<Instant>; 2],
     choice: Choice,
 }
 
 impl<D: Devices> Keeper<D> {
     pub fn new(devices: D, saved: Saved) -> Self {
-        Self { devices, saved, session: None, started: false, window: None, seen: Default::default(), choice: Default::default() }
+        Self { devices, saved, session: None, started: false, window: None, seen: Default::default(), looked: Default::default(), choice: Default::default() }
     }
 
     /// Whether it is watching the defaults closely (turns should come often).
@@ -167,7 +174,13 @@ impl<D: Devices> Keeper<D> {
         let before = self.saved.clone();
         let choice: Choice = [settings.output.clone(), settings.input.clone()];
         match (self.session, steamvr) {
-            (None, Some(pid)) => self.start(now, pid),
+            (None, Some(pid)) => {
+                // The last look outside VR: what held until now is known before anything is set.
+                if self.window.is_none() {
+                    self.watch_outside(now, &choice);
+                }
+                self.start(now, pid)
+            }
             // Another SteamVR (one quit and started again between two turns): the devices before stay the ones to
             // put back.
             (Some(was), Some(pid)) if was != pid => self.start(now, pid),
@@ -200,6 +213,8 @@ impl<D: Devices> Keeper<D> {
 
     fn start(&mut self, now: Instant, pid: u32) {
         self.session = Some(pid);
+        // What is seen after VR is counted afresh: the defaults in between were VR's.
+        (self.seen, self.looked) = Default::default();
         self.window = Some(Window::new(Kind::Apply, now + APPLY_FOR));
     }
 
@@ -363,25 +378,35 @@ impl<D: Devices> Keeper<D> {
     }
 
     /// Outside VR: notes the defaults that held [`SETTLED`], the ones to put back after VR. Only while a device is
-    /// chosen (else Windows is not asked at all).
+    /// chosen (else Windows is not asked at all). Between two looks a default may have changed just after the first or
+    /// just before the second: one is counted from the last look that saw another, and one replaced as held until this
+    /// look, so the time is never less than it really held, at any pace. Virtual Desktop's, set a few seconds before it
+    /// starts SteamVR, is still the default at the look SteamVR's start brings, and counts at most those seconds and one
+    /// pace ([`OUTSIDE_EVERY`] is well under [`SETTLED`]).
     fn watch_outside(&mut self, now: Instant, choice: &Choice) {
         for (i, flow) in FLOWS.into_iter().enumerate() {
             if choice[i].is_none() {
-                self.seen[i] = None;
+                (self.seen[i], self.looked[i]) = (None, None);
                 continue;
             }
             let current = self.devices.defaults(flow);
+            let looked = self.looked[i].replace(now);
             if current.iter().all(Option::is_none) {
                 continue;
             }
-            match &self.seen[i] {
-                Some((roles, since)) if same(roles, &current) => {
-                    if now.duration_since(*since) >= SETTLED && self.saved.outside[i].as_ref() != Some(&current) {
+            if let Some((roles, since)) = &self.seen[i] {
+                let held = now.duration_since(*since) >= SETTLED;
+                if same(roles, &current) {
+                    if held && self.saved.outside[i].as_ref() != Some(&current) {
                         self.saved.outside[i] = Some(current);
                     }
+                    continue;
                 }
-                _ => self.seen[i] = Some((current, now)),
+                if held && self.saved.outside[i].as_ref() != Some(roles) {
+                    self.saved.outside[i] = Some(roles.clone());
+                }
             }
+            self.seen[i] = Some((current, looked.unwrap_or(now)));
         }
     }
 }
@@ -410,7 +435,7 @@ impl Controller {
     }
 }
 
-/// The service's thread: a turn every second while it watches the defaults closely, every [`OUTSIDE_EVERY`] outside VR while a
+/// The service's thread: a turn every [`BUSY_EVERY`] while it watches the defaults closely, every [`OUTSIDE_EVERY`] outside VR while a
 /// device is chosen (the default before VR is the one that held [`SETTLED`]), else when SteamVR or the choice changes.
 pub fn run(ctl: Shared) {
     if !orbiters_core::here::HERE.steam_vr || !orbiters_core::here::HERE.sound {
@@ -429,7 +454,7 @@ pub fn run(ctl: Shared) {
         }
         let chosen = snap.settings.vr_audio.output.is_some() || snap.settings.vr_audio.input.is_some();
         drop(snap);
-        rest.wait(if keeper.busy() { Some(Duration::from_secs(1)) } else { (chosen && steamvr.is_none()).then_some(OUTSIDE_EVERY) });
+        rest.wait(if keeper.busy() { Some(BUSY_EVERY) } else { (chosen && steamvr.is_none()).then_some(OUTSIDE_EVERY) });
     }
 }
 
@@ -646,6 +671,68 @@ mod tests {
         assert_eq!(fake.default_of(Flow::Output), all(INDEX.0));
         keeper.tick(t0 + SETTLED * 3, 5, None, &settings);
         assert_eq!(fake.default_of(Flow::Output), all(SPEAKERS.0));
+    }
+
+    /// Every pace at which the service's thread can look at the defaults ([`run`]: each second while busy, [`OUTSIDE_EVERY`]
+    /// outside VR), and the two seconds it had before review 1124's W3.
+    const PACES: [u64; 3] = [BUSY_EVERY.as_secs(), 2, OUTSIDE_EVERY.as_secs()];
+
+    /// Drives a keeper as [`run`] does: a turn when the service starts (second `start`), when SteamVR starts or closes, every
+    /// second while busy and every `pace` seconds outside VR while a device is chosen. `happens(second, fake)` is what other
+    /// programs and the person do at each second; SteamVR runs in `vr`. Ends once the keeper is idle after VR.
+    fn drive(fake: &Fake, settings: &VrAudioSettings, pace: u64, start: u64, vr: std::ops::Range<u64>, happens: impl Fn(u64, &Fake)) {
+        let mut keeper = Keeper::new(fake, Saved::default());
+        let base = Instant::now();
+        let mut due = start;
+        let mut was = false;
+        for sec in 0..vr.end + 60 {
+            happens(sec, fake);
+            let running = vr.contains(&sec);
+            if sec < start || (sec < due && running == was) {
+                continue;
+            }
+            was = running;
+            keeper.tick(base + Duration::from_secs(sec), sec * 1000, running.then_some(71), settings);
+            due = if keeper.busy() { sec + 1 } else if running { u64::MAX } else { sec + pace };
+        }
+        assert!(!keeper.busy());
+    }
+
+    #[test]
+    fn headphones_chosen_shortly_before_vr_are_put_back_at_every_pace() {
+        // The person has the speakers, puts on wired headphones, and starts SteamVR 51 seconds later (W23-verify B1).
+        const WIRED: (&str, &str) = ("{0.0.0}.{wired}", "Headphones (USB)");
+        for pace in PACES {
+            for start in 0..pace {
+                let fake = computer();
+                fake.outputs.borrow_mut().push(e(WIRED));
+                drive(&fake, &chosen(Some(INDEX), None), pace, start, 112..180, |sec, fake| {
+                    if sec == 61 {
+                        fake.other_app_sets(Flow::Output, WIRED.0);
+                    }
+                    if sec == 113 {
+                        assert_eq!(fake.default_of(Flow::Output), all(INDEX.0), "set for VR");
+                    }
+                });
+                assert_eq!(fake.default_of(Flow::Output), all(WIRED.0), "looked every {pace} s from second {start}: the headphones in use before VR");
+            }
+        }
+    }
+
+    #[test]
+    fn virtual_desktop_audio_set_just_before_steamvr_is_not_put_back_at_any_pace() {
+        // The speakers for long; Virtual Desktop takes the default as the headset connects, then starts SteamVR 5 s later.
+        for pace in PACES {
+            for start in 0..pace {
+                let fake = computer();
+                drive(&fake, &chosen(Some(INDEX), None), pace, start, 110..180, |sec, fake| {
+                    if sec == 105 {
+                        fake.other_app_sets(Flow::Output, VD.0);
+                    }
+                });
+                assert_eq!(fake.default_of(Flow::Output), all(SPEAKERS.0), "looked every {pace} s from second {start}: the speakers, not Virtual Desktop's");
+            }
+        }
     }
 
     #[test]

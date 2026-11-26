@@ -23,7 +23,8 @@ kept …", "Windows did not take …").
   features. Every role is set: console, multimedia and communications.
 - `crates/orbiters-desktop/src/controller/vr_audio.rs`: the logic (`Keeper`, over a `Devices` trait mocked in its
   tests) and the tray service's `vr-audio` thread (started in `service.rs`). It reads the service's snapshot
-  (`steamvr.running`/`pid`, the process watcher's `vrserver`) every 2 s, every second while it watches closely.
+  (`steamvr.running`/`pid`, the process watcher's `vrserver`) when SteamVR starts or stops or the choice changes, every
+  second while it watches closely, and every 15 s outside VR while a device is chosen.
   - **SteamVR starts** (or its process id changes, or the choice changes while it runs): for 40 s the defaults are
     checked every second and the chosen device is set wherever it is not every role's default. This covers Virtual
     Desktop and SteamVR setting their own a few seconds after the start, and devices that only appear once SteamVR has
@@ -31,7 +32,10 @@ kept …", "Windows did not take …").
     forever; after the window, a change the person makes stays. A device still missing at the end is reported.
   - **The devices before** are saved the first time a device is set: the defaults that held for 45 s outside VR (so
     not Virtual Desktop Audio put there just before Virtual Desktop launched SteamVR), otherwise the defaults at that
-    moment. They are saved per role, so a separate communications device gets its own device back.
+    moment. With a look only every 15 s, a default's time is counted from the last look that saw another one, and a
+    default replaced counts as held until the look that sees the new one; SteamVR's start brings one more look. So a
+    device the person used for 45 s before VR is never missed, whatever the pace, and Virtual Desktop's, set seconds
+    before SteamVR, counts those seconds and one pace at most (review 1124, W23-verify B1). They are saved per role, so a separate communications device gets its own device back.
   - **SteamVR closes**: if Put back is on, each role gets its earlier device again (found by id, else by name) and is
     re-checked for 12 s. Then the saved devices are forgotten. With Put back off, the VR devices stay.
   - A device is found by **its id, else its name** (case-insensitive): reinstalling a driver gives its endpoints new

@@ -235,10 +235,7 @@ pub(super) fn follow(state: &mut State, cx: &Cx, clock: f64) {
 /// friends of now.
 fn joins(state: &State, visit: &Visit, origin: &Origin, me: &str) -> bool {
     match origin {
-        Origin::Friend { .. } => {
-            let friends: std::collections::HashSet<&str> = state.data.friends.iter().map(|f| f.id.as_str()).collect();
-            joinable_without_asking(&visit.instance, me, &|id| friends.contains(id))
-        }
+        Origin::Friend { .. } => joinable_without_asking(&visit.instance, me, &|id| state.has_friend(id)),
         _ => rejoinable(&visit.instance, me),
     }
 }

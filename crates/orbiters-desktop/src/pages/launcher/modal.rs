@@ -317,8 +317,7 @@ fn place_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Fri
     // Join where the instance takes the account without asking (the rule Where and Select use, REQUEST23: public,
     // friends+, friends-only of a friend, a group's public one; a group's plus one no longer, its membership not known
     // here): the Play path with that instance (the running VRChat's own way when one runs). Private ones: ask.
-    let friends: std::collections::HashSet<&str> = state.data.friends.iter().map(|f| f.id.as_str()).collect();
-    let me = state.places.desk.asker().account.clone().unwrap_or_default();
+    let me = state.places.desk.asker().account.as_deref().unwrap_or_default();
     // Where one VRChat runs at a time (a Mac), one that is not up yet starts on the profile chosen: not into another
     // account's place (the rule Where has).
     let idle = state.data.game == orbiters_core::launcher::Game::NotRunning;
@@ -332,7 +331,7 @@ fn place_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Fri
                 // (nor into a private one where whose the VRChat started is could not be told)
                 && !(idle && state.places.previous.log.is_some() && !orbiters_core::vrchat_launch::is_public_instance(&place.instance_id))
                 && !matches!(state.data.game, orbiters_core::launcher::Game::NotInstalled | orbiters_core::launcher::Game::NoEngine)
-                && super::destinations::joinable_without_asking(&place.instance_id, &me, &|id| friends.contains(id)) =>
+                && super::destinations::joinable_without_asking(&place.instance_id, me, &|id| state.has_friend(id)) =>
         {
             Some(place.clone())
         }

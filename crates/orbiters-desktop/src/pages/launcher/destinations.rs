@@ -38,7 +38,7 @@ use orbiters_i18n::{tr, tr_ctx};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::{icons, paint, popup, widgets};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -302,6 +302,8 @@ pub struct Inputs<'a> {
 /// The cards, in the order shown: Home, then the invites, the events, the last instance and the places visited most,
 /// each world once with its strongest reason.
 pub fn suggestions(i: &Inputs) -> Vec<Suggestion> {
+    #[cfg(test)]
+    SUGGESTION_BUILDS.with(|count| count.set(count.get() + 1));
     let mut out = vec![Suggestion { key: "home".into(), world_id: String::new(), name: tr("Home world").into(), picture: None, reason: Reason::Home, go: Go::Home, region: String::new() }];
     let region = i.history.map_or("us", HistoryView::region).to_string();
     let taken = |out: &[Suggestion], world: &str| !world.is_empty() && out.iter().any(|s| s.world_id == world && matches!(s.go, Go::Instance(_) | Go::Held(_) | Go::Invite { .. } | Go::New));
@@ -412,6 +414,9 @@ pub fn suggestions(i: &Inputs) -> Vec<Suggestion> {
     }
     out
 }
+
+#[cfg(test)]
+thread_local!(pub(in crate::pages) static SUGGESTION_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
 
 fn world_name(name: &str) -> String {
     if name.trim().is_empty() { tr("Unnamed world").into() } else { name.to_string() }
@@ -609,11 +614,11 @@ pub fn event_location(o: &orbiters_core::community::Overview) -> Option<String> 
 /// Where's own state on Home's launcher.
 #[derive(Default)]
 pub struct Places {
-    history: Shared<HistoryView>,
+    history: Shared<Arc<HistoryView>>,
     /// The member's events on now or soon, and whose they are ([`crate::state::AccountStatus::member`]).
-    events: Shared<(String, Vec<EventSoon>)>,
+    events: Shared<(String, Arc<[EventSoon]>)>,
     /// Whether the last instance is open: its location, whom it was asked for, what VRChat said and when.
-    open: Shared<(String, Asker, Option<bool>, Instant)>,
+    open: Shared<Arc<(String, Asker, Option<bool>, Instant)>>,
     /// Where's destination and everything known of it: one value, its one owner ([`super::selection`]).
     pub desk: Desk,
     /// The kind of a new instance chosen on a card, by world (Friends+ otherwise).
@@ -623,7 +628,8 @@ pub struct Places {
     /// A quiet line and when it was said (egui's clock).
     pub(super) notice: Option<(String, f64)>,
     /// The cards drawn last (the Play press uses the very card shown).
-    cards: Vec<Suggestion>,
+    cards: Arc<[Suggestion]>,
+    suggestions: Option<ShownSuggestions>,
     /// Whether the row showed in the last frame (the invite card under Play then stands aside).
     pub(super) showing: bool,
     /// A place was just chosen from outside the row (a friend's Select, REQUEST23): Home shows the row (its top).
@@ -641,6 +647,31 @@ pub struct Places {
     pub previous: super::previous::Previous,
 }
 
+/// Inputs of the latest suggestions. The clock is in whole seconds, as are event and invite expirations.
+struct ShownSuggestions {
+    now: i64,
+    language: orbiters_i18n::Language,
+    data: Arc<orbiters_core::launcher::LauncherState>,
+    feed: bool,
+    me: Option<String>,
+    history: Option<Arc<HistoryView>>,
+    events: Option<Arc<[EventSoon]>>,
+    dismissed: HashSet<String>,
+    last_open: Option<bool>,
+    selection: Selection,
+    asker: Asker,
+    offer: Option<Offer>,
+    list: Arc<[Suggestion]>,
+}
+
+fn same_publication<T: ?Sized>(left: &Option<Arc<T>>, right: &Option<Arc<T>>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 struct Staged {
     signed_in: bool,
     loading: bool,
@@ -652,10 +683,10 @@ impl Places {
     pub fn stand_in(&mut self, history: Option<HistoryView>, events: Vec<EventSoon>, last_open: Option<bool>, signed_in: bool) {
         let loading = history.is_none();
         let at = Some(Instant::now());
-        *self.history.lock().unwrap() = Read { value: history, at, busy: false };
-        *self.events.lock().unwrap() = Read { value: Some((String::new(), events)), at, busy: false };
+        *self.history.lock().unwrap() = Read { value: history.map(Arc::new), at, busy: false };
+        *self.events.lock().unwrap() = Read { value: Some((String::new(), events.into())), at, busy: false };
         let location = self.history.lock().unwrap().value.as_ref().and_then(|h| h.last.as_ref()).map(|l| format!("{}:{}", l.world_id, l.instance)).unwrap_or_default();
-        *self.open.lock().unwrap() = Read { value: Some((location, Asker::default(), last_open, Instant::now())), at, busy: false };
+        *self.open.lock().unwrap() = Read { value: Some(Arc::new((location, Asker::default(), last_open, Instant::now()))), at, busy: false };
         self.staged = Some(Staged { signed_in, loading });
     }
 
@@ -840,26 +871,26 @@ fn read_places(ctx: &egui::Context, cx: &Cx, state: &mut State) -> bool {
     {
         let mut s = state.places.history.lock().unwrap_or_else(|e| e.into_inner());
         if s.value.is_none() && s.at.is_none() && !s.busy {
-            s.value = HistoryView::before(&file);
+            s.value = HistoryView::before(&file).map(Arc::new);
         }
     }
     refresh(&state.places.history, HISTORY_EVERY, ctx, "history", move || {
         let history = orbiters_core::visited::History::load(&orbiters_core::visited::history_file());
         let view = HistoryView::of(&history, orbiters_core::visited::now());
         view.keep(&file);
-        Some(view)
+        Some(Arc::new(view))
     });
     // Only once who it is is known: an empty list read before would stand for theirs.
     let server = orbiters_core::account::Server::current();
     if let Some(member) = crate::member::reading(server).filter(|m| cx.snap.account.member.as_deref() == Some(m.key().as_str())) {
         let _ = theirs(&state.places.events, &member.key());
-        refresh(&state.places.events, EVENTS_EVERY, ctx, "events", move || Some((member.key(), read_events(member, events_now()))));
+        refresh(&state.places.events, EVENTS_EVERY, ctx, "events", move || Some((member.key(), read_events(member, events_now()).into())));
     }
     true
 }
 
 /// The cards now, after the reads have been started where due.
-fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>, feed: bool) -> (Vec<Suggestion>, bool) {
+fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>, feed: bool) -> (Arc<[Suggestion]>, bool) {
     let ctx = ui.ctx().clone();
     let now = state.now();
     let reads = read_places(&ctx, cx, state);
@@ -870,12 +901,12 @@ fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>, feed: bool) -> (
     };
     // (Pictures of the page: nobody's in particular.)
     let whose = if state.places.staged.is_some() { "" } else { cx.snap.account.member.as_deref().unwrap_or_default() };
-    let events = theirs(&state.places.events, whose).unwrap_or_default();
+    let events = theirs(&state.places.events, whose);
     // Whether the last instance is open: asked of VRChat (the overlay's own read) while a rejoin could be offered.
-    let last = history.as_ref().and_then(|h| h.last.clone());
+    let last = history.as_ref().and_then(|h| h.last.as_ref());
     let location = last.as_ref().map(|l| format!("{}:{}", l.world_id, l.instance)).unwrap_or_default();
     let mut last_open = None;
-    if let (Some(last), Some(me)) = (&last, me) {
+    if let (Some(last), Some(me)) = (last, me) {
         if rejoinable(&last.instance, me) {
             let known = state.places.open.lock().unwrap_or_else(|e| e.into_inner()).value.clone();
             if reads {
@@ -890,7 +921,7 @@ fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>, feed: bool) -> (
                     refresh(&state.places.open, OPEN_EVERY, &ctx, "open", move || {
                         let asked = Instant::now();
                         let (open, at) = super::previous::said(asked, ctl.vrchat_data(scope, Request::InstanceSeen { world, instance, max_age_ms: 30_000 }));
-                        Some((key, by, open, at))
+                        Some(Arc::new((key, by, open, at)))
                     });
                 }
             }
@@ -903,8 +934,41 @@ fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>, feed: bool) -> (
     // Invites are the friends list's: offered only when it is this account's own, read with its session.
     let invites: &[Invite] = if feed { &state.data.invites } else { &[] };
     let desk = &state.places.desk;
-    let inputs = Inputs { now, invites, dismissed: &dismissed, events: &events, history: history.as_ref(), last_open, me, selection: Some((desk.selection(), desk.asker())), offer: desk.offer(), several: state.data.several_profiles };
-    (suggestions(&inputs), loading)
+    let language = orbiters_i18n::language();
+    if let Some(cached) = state.places.suggestions.as_ref().filter(|cached| {
+        cached.now == now
+            && cached.language == language
+            && Arc::ptr_eq(&cached.data, &state.data)
+            && cached.feed == feed
+            && cached.me.as_deref() == me
+            && same_publication(&cached.history, &history)
+            && same_publication(&cached.events, &events)
+            && cached.dismissed == state.dismissed
+            && cached.last_open == last_open
+            && &cached.selection == desk.selection()
+            && &cached.asker == desk.asker()
+            && cached.offer.as_ref() == desk.offer()
+    }) {
+        return (cached.list.clone(), loading);
+    }
+    let inputs = Inputs { now, invites, dismissed: &dismissed, events: events.as_deref().unwrap_or_default(), history: history.as_deref(), last_open, me, selection: Some((desk.selection(), desk.asker())), offer: desk.offer(), several: state.data.several_profiles };
+    let list: Arc<[Suggestion]> = suggestions(&inputs).into();
+    state.places.suggestions = Some(ShownSuggestions {
+        now,
+        language,
+        data: state.data.clone(),
+        feed,
+        me: me.map(str::to_owned),
+        history,
+        events,
+        dismissed: state.dismissed.clone(),
+        last_open,
+        selection: desk.selection().clone(),
+        asker: desk.asker().clone(),
+        offer: desk.offer().cloned(),
+        list: list.clone(),
+    });
+    (list, loading)
 }
 
 /// The clock events are measured with (pictures of the page fix the launcher's).
@@ -969,7 +1033,7 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     let card_w = ((width - CARD_GAP * (fit as f32 - 1.0)) / fit as f32).min(CARD_MAX_W);
     let pic_h = (card_w * 9.0 / 16.0).round();
     let card_h = pic_h + BODY_H;
-    let shown_cards: Vec<Suggestion> = if loading { cards.iter().take(1).cloned().collect() } else { cards.clone() };
+    let shown_cards = if loading { &cards[..cards.len().min(1)] } else { &cards };
     // Loading: Home and stand-ins; nothing visited yet: Home and a card that says what comes there.
     let extra = if loading { 2.min(fit.saturating_sub(1)) } else { usize::from(cards.len() == 1 && fit > 1) };
     let total = shown_cards.len() + extra;

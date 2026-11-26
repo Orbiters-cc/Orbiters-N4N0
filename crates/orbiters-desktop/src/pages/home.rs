@@ -2079,6 +2079,49 @@ mod tests {
         assert!(many <= few + few / 10 + 20, "{many} allocations a frame over 4000 visits, {few} over 40");
     }
 
+    /// DPG-7: events past their end do not render a card. Keeping six of them in the published input should not
+    /// allocate more per frame than an empty event list.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_frame_of_where_does_not_copy_events() {
+        use crate::pages::launcher::destinations::{EventSoon, HistoryView, SUGGESTION_BUILDS};
+        let frame = |events| {
+            let mut h = where_signed_in(Vec::new());
+            h.state.launcher_mut().places.stand_in(Some(HistoryView::default()), events, None, true);
+            for _ in 0..240 {
+                h.frame(Vec::new());
+            }
+            SUGGESTION_BUILDS.with(|count| count.set(0));
+            let allocations = crate::test_alloc::count(|| (0..60).for_each(|_| h.frame(Vec::new()))) / 60;
+            let builds = SUGGESTION_BUILDS.with(std::cell::Cell::get);
+            assert_eq!(builds, 0, "unchanged Where inputs built {builds} lists across 60 frames");
+            (allocations, builds)
+        };
+        let (empty, empty_builds) = frame(Vec::new());
+        let (ended, ended_builds) = frame((0..6).map(|i| EventSoon {
+            id: format!("ended-{i}"),
+            title: format!("An ended event {i}"),
+            starts_at: 1_794_990_000,
+            ends_at: Some(1_794_991_000),
+            ..Default::default()
+        }).collect());
+        println!("Where allocations per frame: empty events {empty}, six ended events {ended}. Builds over 60 frames: {empty_builds}, {ended_builds}");
+        assert!(ended <= empty + 5, "empty {empty}, ended {ended}");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn where_refreshes_suggestions_when_events_arrive_or_expire() {
+        use crate::pages::launcher::destinations::{EventSoon, HistoryView};
+        let mut h = where_signed_in(Vec::new());
+        assert!(!h.texts().contains("A new event"));
+        let event = EventSoon { id: "test-event".into(), title: "A new event".into(), starts_at: 1_795_000_001, ends_at: Some(1_795_000_900), ..Default::default() };
+        h.state.launcher_mut().places.stand_in(Some(HistoryView::default()), vec![event], None, true);
+        assert!(h.texts().contains("A new event"));
+        h.state.launcher_mut().stand_in(1_795_000_900, "");
+        assert!(!h.texts().contains("A new event"));
+    }
+
     /// DPG-2: Home drew itself at the monitor's rate for as long as it said "Connecting to VRChat…", which lasts until
     /// Orbiters answers: a whole evening offline, in use or behind VRChat. It stands still at rest, and behind another
     /// window; in use its spinner moves at the decorations' rate.

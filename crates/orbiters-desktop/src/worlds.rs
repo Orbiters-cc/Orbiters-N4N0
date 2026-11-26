@@ -363,22 +363,34 @@ pub fn hashes(paths: Vec<PathBuf>) -> HashMap<PathBuf, String> {
 /// Held over the reading, it kept the folder scan, Visited worlds and Photos & captures waiting behind every byte of
 /// every picture of a world.
 fn hashed_index(file: &Path, paths: &[PathBuf]) -> visited::ShotIndex {
-    let todo = {
+    // A walk that replaced or removed a picture meanwhile makes what was read not to be put in (W56-verify B5): asked
+    // once more then, with what the index is by then.
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let (todo, asked) = {
+            let _one = shot_index_lock();
+            let index = visited::ShotIndex::load(file);
+            let todo = index.unhashed(paths);
+            if todo.is_empty() {
+                return index;
+            }
+            (todo, index.generation())
+        };
+        #[cfg(test)]
+        tests::hash_pause(file);
+        let hashed = visited::hash_files(todo);
+        #[cfg(test)]
+        tests::hash_pause(file);
         let _one = shot_index_lock();
-        let index = visited::ShotIndex::load(file);
-        let todo = index.unhashed(paths);
-        if todo.is_empty() {
+        let mut index = visited::ShotIndex::load(file);
+        if index.put_hashes(hashed) {
+            let _ = index.save(file);
+        }
+        if index.generation() == asked || attempts == 2 {
             return index;
         }
-        todo
-    };
-    let hashed = visited::hash_files(todo);
-    let _one = shot_index_lock();
-    let mut index = visited::ShotIndex::load(file);
-    if index.put_hashes(hashed) {
-        let _ = index.save(file);
     }
-    index
 }
 
 /// Every hash Orbiters may know each screenshot by: the file's own (what was sent before PRIV-8, and a gallery share's
@@ -1328,6 +1340,84 @@ pub fn decode_png(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// Where a test holds the hash worker ([`hashed_index`]) of one index file: after it saw what to read, and after it
+    /// read it; each time until the test met it twice there. Once only.
+    static HASH_HOLD: std::sync::Mutex<Option<(PathBuf, Arc<std::sync::Barrier>, u8)>> = std::sync::Mutex::new(None);
+
+    pub(super) fn hash_pause(file: &Path) {
+        let held = {
+            let mut hold = HASH_HOLD.lock().unwrap_or_else(|e| e.into_inner());
+            match hold.as_mut() {
+                Some((f, barrier, left)) if f.as_path() == file => {
+                    *left -= 1;
+                    let barrier = barrier.clone();
+                    if *left == 0 {
+                        *hold = None;
+                    }
+                    Some(barrier)
+                }
+                _ => None,
+            }
+        };
+        if let Some(barrier) = held {
+            barrier.wait();
+            barrier.wait();
+        }
+    }
+
+    /// W56-verify B5: picture A asked to be hashed; while the worker waits, A is moved aside and another picture B (of
+    /// another length) put at its path, which the folder scan takes in; the worker reads; A is put back and taken in
+    /// again; the worker puts in what it read. The digest of B was kept for A for good. Now what is read is of the
+    /// file opened, checked against what the index had, and nothing read before a walk replaced a picture is put in:
+    /// A's own digest is kept.
+    #[test]
+    fn a_picture_swapped_while_it_is_hashed_keeps_its_own_digest() {
+        let r = std::env::temp_dir().join(format!("orbiters-hash-swap-{}", uuid::Uuid::new_v4()));
+        let d = r.join("pics");
+        std::fs::create_dir_all(&d).unwrap();
+        let png = |n: u8, extra: usize| {
+            let mut out = std::io::Cursor::new(Vec::new());
+            image::RgbaImage::from_pixel(2, 2, image::Rgba([n, n, 1, 255])).write_to(&mut out, image::ImageFormat::Png).unwrap();
+            let mut bytes = out.into_inner();
+            bytes.extend(vec![1u8; extra]);
+            bytes
+        };
+        let p = d.join("changed.png");
+        std::fs::write(&p, png(41, 0)).unwrap();
+        let index = r.join("screenshots.json");
+        let walk = || {
+            let _one = shot_index_lock();
+            let mut i = visited::ShotIndex::load(&index);
+            i.refresh(std::slice::from_ref(&d));
+            i.save(&index).unwrap();
+        };
+        walk();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        *HASH_HOLD.lock().unwrap() = Some((index.clone(), barrier.clone(), 2));
+        let (i, pp) = (index.clone(), p.clone());
+        let worker = std::thread::spawn(move || hashed_index(&i, &[pp]));
+        // It saw what to read: A swapped for B, taken in.
+        barrier.wait();
+        std::fs::rename(&p, r.join("original")).unwrap();
+        std::fs::write(&p, png(23, 47)).unwrap();
+        walk();
+        barrier.wait();
+        // It read: A put back, taken in again.
+        barrier.wait();
+        std::fs::remove_file(&p).unwrap();
+        std::fs::rename(r.join("original"), &p).unwrap();
+        walk();
+        barrier.wait();
+        let done = worker.join().unwrap();
+        let actual = visited::sha256_file(&p).unwrap();
+        assert_eq!(done.hashes_of(&p).0, Some(actual.as_str()), "A's own digest");
+        assert_eq!(hashed_index(&index, std::slice::from_ref(&p)).hashes_of(&p).0, Some(actual.as_str()), "and kept");
+        let mut reread = visited::ShotIndex::load(&index);
+        reread.refresh(std::slice::from_ref(&d));
+        assert_eq!(reread.hashes_of(&p).0, Some(actual.as_str()), "after another walk too");
+        let _ = std::fs::remove_dir_all(&r);
+    }
 
     /// Review 1124, W56-verify B1, B2, B3, M1 (the folder notices of DPG-23, taken out again): the picture folders are
     /// walked at every look, whatever the folder set was before.

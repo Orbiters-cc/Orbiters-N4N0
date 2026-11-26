@@ -80,7 +80,7 @@ pub(crate) fn both_sha256(path: &Path) -> (Option<String>, Option<String>) {
     std::fs::File::open(path).map(both_sha256_from).unwrap_or_default()
 }
 
-fn both_sha256_from(file: impl Read) -> (Option<String>, Option<String>) {
+pub(crate) fn both_sha256_from(file: impl Read) -> (Option<String>, Option<String>) {
     struct Both<R> {
         file: R,
         own: Hashing,
